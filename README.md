@@ -61,6 +61,19 @@ curl localhost:4002/health   # chat-gateway
 curl localhost:4003/health   # agent-runner
 ```
 
+### Prisma (schema validate / generate / migrate)
+
+In restricted/proxied environments Prisma's built-in engine downloader can fail
+with `ECONNRESET`. Pre-fetch the engines with curl (reliable over the proxy),
+then use Prisma normally:
+
+```bash
+./scripts/fetch-prisma-engines.sh          # run once after pnpm install
+pnpm --filter @devspace/db db:validate     # -> "The schema ... is valid 🚀"
+# DATABASE_URL=... pnpm --filter @devspace/db db:migrate   # needs Postgres
+```
+
+
 ## Key technologies
 
 - [`devcontainers/cli`](https://github.com/devcontainers/cli) — sandbox engine.

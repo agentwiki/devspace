@@ -1,0 +1,31 @@
+{
+  "name": "@devspace/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistence layer: Prisma schema, migrations, and repository interfaces",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "prisma"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy"
+  },
+  "dependencies": {
+    "@devspace/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "prisma": "^6.1.0",
+    "@prisma/client": "^6.1.0"
+  }
+}

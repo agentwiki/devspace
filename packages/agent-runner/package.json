@@ -1,0 +1,28 @@
+{
+  "name": "@devspace/agent-runner",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ACP client + harness: drives agents inside sandboxes under deterministic guardrails",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@devspace/contracts": "workspace:*",
+    "@devspace/sandbox-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@agentclientprotocol/sdk": "^0.21.0"
+  }
+}

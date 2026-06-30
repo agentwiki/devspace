@@ -1,0 +1,17 @@
+{
+  "name": "@devspace/chat-gateway-svc",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Deployable entrypoint for the chat-gateway service",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@devspace/contracts": "workspace:*",
+    "@devspace/chat-gateway": "workspace:*"
+  }
+}

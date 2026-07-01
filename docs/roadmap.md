@@ -61,7 +61,9 @@ preview proxy, GitHub webhooks.
 
 ## M6+ — Expansion
 
-Slack + web-UI adapters; 2nd ACP agent backend; multi-host scheduling; NATS bus.
+Additional chat adapters (Slack, Discord); 2nd ACP agent backend; multi-host
+scheduling; NATS bus. UI surface is chat only — no self-hosted web UI (see
+docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 

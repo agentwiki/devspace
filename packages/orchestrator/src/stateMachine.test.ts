@@ -5,7 +5,7 @@ import { classifyAction, WorkUnitMachine } from './stateMachine.js';
 describe('classifyAction', () => {
   it('separates deterministic, agent, and approval actions', () => {
     expect(classifyAction('view-pr')).toEqual({ kind: 'deterministic', op: 'view-pr' });
-    expect(classifyAction('create-pr')).toEqual({ kind: 'agent', op: 'create-pr' });
+    expect(classifyAction('create-pr')).toEqual({ kind: 'hybrid', op: 'create-pr' });
     expect(classifyAction('approve:req-42')).toEqual({
       kind: 'approval',
       requestId: 'req-42',

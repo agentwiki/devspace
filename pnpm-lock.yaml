@@ -53,12 +53,28 @@ importers:
 
   apps/orchestrator-svc:
     dependencies:
+      '@devspace/agent-runner':
+        specifier: workspace:*
+        version: link:../../packages/agent-runner
       '@devspace/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@devspace/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@devspace/orchestrator':
         specifier: workspace:*
         version: link:../../packages/orchestrator
+      '@devspace/sandbox-core':
+        specifier: workspace:*
+        version: link:../../packages/sandbox-core
+      pg:
+        specifier: ^8.13.1
+        version: 8.22.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
 
   apps/sandbox-core-svc:
     dependencies:

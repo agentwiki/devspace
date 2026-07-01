@@ -1,0 +1,327 @@
+import { describe, expect, it, vi } from 'vitest';
+import type {
+  AgentEvent,
+  CreateAgentSessionRequest,
+  Environment,
+  PermissionDecision,
+  RenderCommand,
+  TurnRequest,
+} from '@devspace/contracts';
+import { createInMemoryRepositories, type Repositories } from '@devspace/db';
+import type { SandboxCore } from '@devspace/sandbox-core';
+import type { AgentRunner } from '@devspace/agent-runner';
+import {
+  Orchestrator,
+  OrchestratorError,
+  SECRET_GH_TOKEN,
+  SECRET_LLM_KEY,
+  TOPIC_PR_MERGED,
+} from './index.js';
+import { generateKeyEntry, parseKeyring, SecretStore } from './secrets.js';
+import type { GitHubRestClient, HostGitExec, PullRef } from './git.js';
+
+const KEY = generateKeyEntry('k1');
+
+function fakeSandbox(): SandboxCore {
+  const env: Environment = {
+    envId: 'env_1',
+    status: 'ready',
+    ports: [],
+    createdAt: new Date(0).toISOString(),
+  };
+  return {
+    createEnvironment: vi.fn(async () => env),
+    getEnvironment: vi.fn(async () => env),
+    destroyEnvironment: vi.fn(async () => {}),
+    exec: vi.fn(),
+    fsRead: vi.fn(),
+    fsWrite: vi.fn(),
+    fsList: vi.fn(),
+    forwardPort: vi.fn(),
+  } as unknown as SandboxCore;
+}
+
+function fakeAgent(events: AgentEvent[] = [{ type: 'message', text: 'working' }]): AgentRunner & {
+  decisions: PermissionDecision[];
+} {
+  const decisions: PermissionDecision[] = [];
+  return {
+    decisions,
+    async createSession(_req: CreateAgentSessionRequest) {
+      return { agentSessionId: 'as_1' };
+    },
+    async *runTurn(_id: string, _req: TurnRequest): AsyncIterable<AgentEvent> {
+      for (const e of events) yield e;
+    },
+    async decidePermission(_id: string, d: PermissionDecision) {
+      decisions.push(d);
+    },
+  } as AgentRunner & { decisions: PermissionDecision[] };
+}
+
+function fakeGit(code = 0): HostGitExec {
+  return {
+    async run() {
+      return { stdout: '', stderr: '', code };
+    },
+  };
+}
+
+function fakeRestFactory(pull: Partial<PullRef> = {}): (t: string) => GitHubRestClient {
+  const base: PullRef = {
+    number: 42,
+    htmlUrl: 'https://github.com/a/b/pull/42',
+    state: 'open',
+    merged: false,
+    ...pull,
+  };
+  return () => ({
+    async createPull() {
+      return base;
+    },
+    async listOpenPullsByHead() {
+      return [];
+    },
+    async getPull() {
+      return base;
+    },
+  });
+}
+
+interface Harness {
+  orch: Orchestrator;
+  repos: Repositories;
+  store: SecretStore;
+  rendered: RenderCommand[];
+  sandbox: SandboxCore;
+  agent: ReturnType<typeof fakeAgent>;
+}
+
+function harness(over: Partial<Parameters<typeof buildOrch>[0]> = {}): Harness {
+  return buildOrch(over);
+}
+
+function buildOrch(opts: {
+  repos?: Repositories;
+  agent?: ReturnType<typeof fakeAgent>;
+  rest?: (t: string) => GitHubRestClient;
+  revokeToken?: (t: string) => Promise<void>;
+}): Harness {
+  const repos = opts.repos ?? createInMemoryRepositories();
+  const store = new SecretStore(repos.secrets, parseKeyring(KEY));
+  const rendered: RenderCommand[] = [];
+  const sandbox = fakeSandbox();
+  const agent = opts.agent ?? fakeAgent();
+  const orch = new Orchestrator({
+    repos,
+    sandbox,
+    agents: agent,
+    secrets: store,
+    git: fakeGit(),
+    githubRest: opts.rest ?? fakeRestFactory(),
+    render: async (c) => {
+      rendered.push(c);
+    },
+    revokeToken: opts.revokeToken,
+    workdirFor: () => '/work',
+  });
+  return { orch, repos, store, rendered, sandbox, agent };
+}
+
+describe('conversation.created', () => {
+  it('provisions an environment and reaches READY', async () => {
+    const h = harness();
+    await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C1',
+      userId: 'u1',
+      repoChoice: { repoUrl: 'https://github.com/a/b.git', empty: false },
+    });
+    expect(h.sandbox.createEnvironment).toHaveBeenCalledOnce();
+    const conv = await h.repos.workUnits.listByState('READY');
+    expect(conv).toHaveLength(1);
+    expect(conv[0]?.envId).toBe('env_1');
+    expect(h.rendered.map((r) => r.type)).toContain('update_status');
+  });
+
+  it('creates a bare conversation without a repo', async () => {
+    const h = harness();
+    await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C2',
+      userId: 'u1',
+    });
+    expect(h.sandbox.createEnvironment).not.toHaveBeenCalled();
+    expect(await h.repos.workUnits.listByState('CREATED')).toHaveLength(1);
+  });
+
+  it('marks the unit FAILED when provisioning throws', async () => {
+    const h = harness();
+    (h.sandbox.createEnvironment as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('boom'),
+    );
+    await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C3',
+      userId: 'u1',
+      repoChoice: { repoUrl: 'https://github.com/a/b.git', empty: false },
+    });
+    expect(await h.repos.workUnits.listByState('FAILED')).toHaveLength(1);
+    expect(h.rendered.some((r) => 'text' in r && r.text.includes('boom'))).toBe(true);
+  });
+});
+
+/** Seed a conversation + work unit directly in a given state. */
+async function seed(
+  repos: Repositories,
+  store: SecretStore,
+  state: 'READY' | 'WORKING',
+  userId = 'u1',
+) {
+  const conv = await repos.conversations.create({
+    platform: 'slack',
+    externalChannelId: 'Cx',
+    userId,
+  });
+  let wu = await repos.workUnits.create({ conversationId: conv.id });
+  wu = await repos.workUnits.transition(wu.id, 'repoChoice', {
+    repoUrl: 'https://github.com/a/b.git',
+    branch: `devspace/${wu.id}`,
+  });
+  wu = await repos.workUnits.transition(wu.id, 'envReady', { envId: 'env_1' });
+  await store.put(userId, conv.id, SECRET_LLM_KEY, 'sk-llm');
+  await store.put(userId, conv.id, SECRET_GH_TOKEN, 'ghs_push_token');
+  if (state === 'WORKING') {
+    wu = await repos.workUnits.transition(wu.id, 'firstMessage', { agentSessionId: 'as_1' });
+  }
+  return { conv, wu };
+}
+
+describe('message.posted', () => {
+  it('starts a session on the first message and streams agent events', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'READY');
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'do the thing',
+    });
+    const wu = await h.repos.workUnits.getByConversation(conv.id);
+    expect(wu?.state).toBe('WORKING');
+    expect(wu?.agentSessionId).toBe('as_1');
+    expect(h.rendered.some((r) => r.type === 'post_message')).toBe(true);
+  });
+
+  it('rejects a tenant mismatch before touching state', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'READY');
+    await expect(
+      h.orch.handleChatEvent({
+        type: 'message.posted',
+        conversationId: conv.id,
+        userId: 'attacker',
+        text: 'hi',
+      }),
+    ).rejects.toBeInstanceOf(OrchestratorError);
+  });
+});
+
+describe('action.invoked', () => {
+  it('approval routes to decidePermission', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'approve:req-9',
+      payload: {},
+    });
+    expect(h.agent.decisions).toEqual([{ requestId: 'req-9', decision: 'allow', scope: 'once' }]);
+  });
+
+  it('create-pr from an illegal state renders an explanation, not a throw', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'READY'); // not WORKING/PRE_PR
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'create-pr',
+      payload: {},
+    });
+    const wu = await h.repos.workUnits.getByConversation(conv.id);
+    expect(wu?.state).toBe('READY'); // unchanged
+    expect(h.rendered.some((r) => 'text' in r && /start working/i.test(r.text))).toBe(true);
+  });
+
+  it('create-pr from WORKING pushes and opens a PR', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'create-pr',
+      payload: {},
+    });
+    const wu = await h.repos.workUnits.getByConversation(conv.id);
+    expect(wu?.state).toBe('PR_OPEN');
+    expect(wu?.prNumber).toBe(42);
+    expect(wu?.prUrl).toBe('https://github.com/a/b/pull/42');
+  });
+});
+
+describe('bus events + teardown', () => {
+  it('applies prMerged idempotently against redelivery', async () => {
+    const h = harness();
+    const { conv, wu } = await seed(h.repos, h.store, 'WORKING');
+    await h.repos.workUnits.transition(wu.id, 'committedAndPushed');
+    await h.repos.workUnits.transition(wu.id, 'prCreated', { prNumber: 1, prUrl: 'https://x/1' });
+
+    const evt = await h.repos.events.append({
+      topic: TOPIC_PR_MERGED,
+      workUnitId: wu.id,
+      payload: {},
+    });
+    await h.orch.handleBusEvent(evt);
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_MERGED');
+    // Redelivery of the same event must not throw and must not change state.
+    await expect(h.orch.handleBusEvent(evt)).resolves.toBeUndefined();
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_MERGED');
+    expect(conv.id).toBeDefined();
+  });
+
+  it('reconcileOpenPrs publishes prMerged for a merged PR', async () => {
+    const h = harness({ rest: fakeRestFactory({ state: 'closed', merged: true }) });
+    const { wu } = await seed(h.repos, h.store, 'WORKING');
+    await h.repos.workUnits.transition(wu.id, 'committedAndPushed');
+    await h.repos.workUnits.transition(wu.id, 'prCreated', { prNumber: 9, prUrl: 'https://x/9' });
+
+    const published: Array<{ topic: string; workUnitId: string }> = [];
+    await h.orch.reconcileOpenPrs(async (e) => {
+      published.push(e);
+    });
+    expect(published).toEqual([{ topic: TOPIC_PR_MERGED, workUnitId: wu.id }]);
+  });
+
+  it('teardown revokes the push token, deletes secrets, and is replay-safe', async () => {
+    const revoked: string[] = [];
+    const h = harness({ revokeToken: async (t) => void revoked.push(t) });
+    const { conv, wu } = await seed(h.repos, h.store, 'WORKING');
+
+    await h.orch.teardown(conv.id);
+    expect(revoked).toEqual(['ghs_push_token']);
+    expect(await h.repos.secrets.get('u1', SECRET_GH_TOKEN, conv.id)).toBeNull();
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('TORN_DOWN');
+    expect(h.sandbox.destroyEnvironment).toHaveBeenCalledWith('env_1');
+
+    // Replay: no throw, no second revoke.
+    await expect(h.orch.teardown(conv.id)).resolves.toBeUndefined();
+    expect(revoked).toEqual(['ghs_push_token']);
+  });
+});

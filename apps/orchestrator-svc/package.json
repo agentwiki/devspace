@@ -12,6 +12,13 @@
   },
   "dependencies": {
     "@devspace/contracts": "workspace:*",
-    "@devspace/orchestrator": "workspace:*"
+    "@devspace/db": "workspace:*",
+    "@devspace/orchestrator": "workspace:*",
+    "@devspace/sandbox-core": "workspace:*",
+    "@devspace/agent-runner": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10"
   }
 }

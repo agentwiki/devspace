@@ -18,7 +18,7 @@ Four services, one monorepo, dependency graph is a cycle-free DAG:
 | **agent-runner** | `@devspace/agent-runner` | ACP client + harness + guardrails. Drives agents inside sandboxes. |
 | **chat-gateway** | `@devspace/chat-gateway` | Chat adapters (Discord first). Emits events up, renders commands down. |
 
-Shared: `@devspace/contracts` (zod schemas + types), `@devspace/db` (Prisma + repos).
+Shared: `@devspace/contracts` (zod schemas + types), `@devspace/db` (Drizzle + repos).
 
 ```
         orchestrator
@@ -61,16 +61,16 @@ curl localhost:4002/health   # chat-gateway
 curl localhost:4003/health   # agent-runner
 ```
 
-### Prisma (schema validate / generate / migrate)
+### Database (Drizzle — no native engine, offline/air-gap friendly)
 
-In restricted/proxied environments Prisma's built-in engine downloader can fail
-with `ECONNRESET`. Pre-fetch the engines with curl (reliable over the proxy),
-then use Prisma normally:
+Schema lives in `packages/db/src/schema.ts`. `drizzle-kit generate` emits SQL
+migrations locally — no database connection and no binary download (this is why
+we use Drizzle over Prisma for an on-prem product; see
+[ADR-0004](docs/adr/0004-drizzle-over-prisma.md)).
 
 ```bash
-./scripts/fetch-prisma-engines.sh          # run once after pnpm install
-pnpm --filter @devspace/db db:validate     # -> "The schema ... is valid 🚀"
-# DATABASE_URL=... pnpm --filter @devspace/db db:migrate   # needs Postgres
+pnpm --filter @devspace/db db:generate     # schema -> drizzle/*.sql (offline)
+# DATABASE_URL=... pnpm --filter @devspace/db db:migrate   # apply (needs Postgres)
 ```
 
 

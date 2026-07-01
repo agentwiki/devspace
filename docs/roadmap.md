@@ -3,7 +3,7 @@
 Critical path to the end-to-end demo: **M0 → M1 → M2 → M3 → M4.**
 
 ## M0 — Scaffolding (this milestone)
-Monorepo, 6 packages + 4 apps, zod contracts, Prisma schema, compose, base +
+Monorepo, 6 packages + 4 apps, zod contracts, Drizzle schema, compose, base +
 agent-runtime image skeletons, stub services with `/health`, design docs. No real
 logic. **Done when** `pnpm -r build`, `pnpm -r test`, and the 4 health checks pass.
 

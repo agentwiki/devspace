@@ -4,13 +4,15 @@
  * Repository interfaces for the persistence layer plus an in-memory reference
  * implementation used by tests and local boot before Postgres is wired.
  *
- * The Prisma-backed implementation (prisma/schema.prisma -> generated client)
- * lands in M3; it will implement these same interfaces. Keeping the interfaces
- * free of any Prisma import lets every service compile without running
- * `prisma generate` during the M0 scaffolding phase.
+ * The Postgres-backed implementation (Drizzle over `pg`, schema in schema.ts)
+ * lands in M3; it will implement these same interfaces. The interfaces stay
+ * free of any driver import so every service compiles offline — Drizzle needs
+ * no native engine or runtime download (unlike Prisma; see ADR-0004).
  */
 import type { WorkEvent, WorkState, WorkUnit } from '@devspace/contracts';
 import { nextWorkState } from '@devspace/contracts';
+
+export * from './schema.js';
 
 export interface ConversationRecord {
   id: string;

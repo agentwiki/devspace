@@ -22,7 +22,8 @@ export function classifyAction(actionId: string): ActionClass {
   if (actionId === 'view-pr') return { kind: 'deterministic', op: 'view-pr' };
   if (actionId === 'create-pr') return { kind: 'agent', op: 'create-pr' };
   const m = /^(approve|deny):(.+)$/.exec(actionId);
-  if (m) return { kind: 'approval', requestId: m[2]!, decision: m[1] === 'approve' ? 'allow' : 'deny' };
+  if (m)
+    return { kind: 'approval', requestId: m[2]!, decision: m[1] === 'approve' ? 'allow' : 'deny' };
   return { kind: 'unknown', actionId };
 }
 

@@ -6,14 +6,14 @@ them; the schemas are the source of truth.
 
 ## Sandbox Core API (agent-agnostic primitives)
 
-| Method | Request | Response |
-| --- | --- | --- |
-| `POST /environments` | `CreateEnvironmentRequest` | `Environment` |
-| `GET /environments/:id` | — | `Environment \| null` |
-| `DELETE /environments/:id` | — | — |
-| `POST /environments/:id/exec` | `ExecRequest` | **bidi stream of `ExecFrame`** |
-| `POST /environments/:id/fs/{read,write,list}` | `Fs*Request` | bytes / `FsEntry[]` |
-| `POST /environments/:id/ports` | `{containerPort}` | `PortMapping` |
+| Method                                        | Request                    | Response                       |
+| --------------------------------------------- | -------------------------- | ------------------------------ |
+| `POST /environments`                          | `CreateEnvironmentRequest` | `Environment`                  |
+| `GET /environments/:id`                       | —                          | `Environment \| null`          |
+| `DELETE /environments/:id`                    | —                          | —                              |
+| `POST /environments/:id/exec`                 | `ExecRequest`              | **bidi stream of `ExecFrame`** |
+| `POST /environments/:id/fs/{read,write,list}` | `Fs*Request`               | bytes / `FsEntry[]`            |
+| `POST /environments/:id/ports`                | `{containerPort}`          | `PortMapping`                  |
 
 `ExecFrame` keeps `stdin`/`stdout`/`stderr`/`exit` as a discriminated union; byte
 payloads are base64. This is the primitive ACP rides on.
@@ -23,12 +23,12 @@ used to inject the agent runtime and the LLM/Git secrets — the core stays unaw
 
 ## Agent Runner API (ACP-backed)
 
-| Method | Request | Response |
-| --- | --- | --- |
-| `POST /agents/sessions` | `CreateAgentSessionRequest` | `{agentSessionId}` |
-| `POST /agents/sessions/:id/turn` | `TurnRequest` | SSE of `AgentEvent` |
-| `POST /agents/sessions/:id/permission` | `PermissionDecision` | — |
-| `DELETE /agents/sessions/:id` | — | — |
+| Method                                 | Request                     | Response            |
+| -------------------------------------- | --------------------------- | ------------------- |
+| `POST /agents/sessions`                | `CreateAgentSessionRequest` | `{agentSessionId}`  |
+| `POST /agents/sessions/:id/turn`       | `TurnRequest`               | SSE of `AgentEvent` |
+| `POST /agents/sessions/:id/permission` | `PermissionDecision`        | —                   |
+| `DELETE /agents/sessions/:id`          | —                           | —                   |
 
 `AgentEvent` is the normalized stream (`thought`, `message`, `tool_call`,
 `tool_result`, `file_edit`, `command_run`, `permission_request`, `turn_end`). Raw

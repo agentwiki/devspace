@@ -38,7 +38,10 @@ export const workUnits = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index('work_units_conversation_idx').on(t.conversationId), index('work_units_state_idx').on(t.state)],
+  (t) => [
+    index('work_units_conversation_idx').on(t.conversationId),
+    index('work_units_state_idx').on(t.state),
+  ],
 );
 
 // Per-user / per-conversation secrets (GitHub token, LLM key). Ciphertext only.

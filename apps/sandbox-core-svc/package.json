@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@devspace/contracts": "workspace:*",
-    "@devspace/sandbox-core": "workspace:*"
+    "@devspace/sandbox-core": "workspace:*",
+    "zod": "^3.24.1"
   }
 }

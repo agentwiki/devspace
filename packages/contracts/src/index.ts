@@ -95,13 +95,7 @@ export const CreateEnvironmentRequestSchema = z.object({
 });
 export type CreateEnvironmentRequest = z.infer<typeof CreateEnvironmentRequestSchema>;
 
-export const EnvStatusSchema = z.enum([
-  'provisioning',
-  'ready',
-  'stopping',
-  'stopped',
-  'failed',
-]);
+export const EnvStatusSchema = z.enum(['provisioning', 'ready', 'stopping', 'stopped', 'failed']);
 export type EnvStatus = z.infer<typeof EnvStatusSchema>;
 
 export const PortMappingSchema = z.object({
@@ -199,9 +193,18 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('thought'), text: z.string() }),
   z.object({ type: z.literal('message'), text: z.string() }),
   z.object({ type: z.literal('tool_call'), name: z.string(), args: z.record(z.unknown()) }),
-  z.object({ type: z.literal('tool_result'), name: z.string(), ok: z.boolean(), summary: z.string() }),
+  z.object({
+    type: z.literal('tool_result'),
+    name: z.string(),
+    ok: z.boolean(),
+    summary: z.string(),
+  }),
   z.object({ type: z.literal('file_edit'), path: z.string(), diff: z.string() }),
-  z.object({ type: z.literal('command_run'), cmd: z.string(), exitCode: z.number().int().optional() }),
+  z.object({
+    type: z.literal('command_run'),
+    cmd: z.string(),
+    exitCode: z.number().int().optional(),
+  }),
   z.object({
     type: z.literal('permission_request'),
     requestId: z.string(),
@@ -267,7 +270,11 @@ export type ActionButton = z.infer<typeof ActionButtonSchema>;
 
 /** Outbound: orchestrator -> platform adapter (normalized). */
 export const RenderCommandSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('post_message'), conversationId: ConversationIdSchema, text: z.string() }),
+  z.object({
+    type: z.literal('post_message'),
+    conversationId: ConversationIdSchema,
+    text: z.string(),
+  }),
   z.object({
     type: z.literal('update_status'),
     conversationId: ConversationIdSchema,
@@ -324,18 +331,24 @@ export type WorkEvent = z.infer<typeof WorkEventSchema>;
  * Declarative transition table. The orchestrator is the only writer of work
  * state; this map is the canonical definition of legal transitions.
  */
-export const WORK_TRANSITIONS: Readonly<Record<WorkState, Partial<Record<WorkEvent, WorkState>>>> = {
-  CREATED: { repoChoice: 'PROVISIONING', error: 'FAILED', end: 'TORN_DOWN' },
-  PROVISIONING: { envReady: 'READY', error: 'FAILED', end: 'TORN_DOWN' },
-  READY: { firstMessage: 'WORKING', error: 'FAILED', end: 'TORN_DOWN' },
-  WORKING: { committedAndPushed: 'PRE_PR', error: 'FAILED', end: 'TORN_DOWN' },
-  PRE_PR: { prCreated: 'PR_OPEN', committedAndPushed: 'PRE_PR', error: 'FAILED', end: 'TORN_DOWN' },
-  PR_OPEN: { prMerged: 'PR_MERGED', prClosed: 'PR_CLOSED', error: 'FAILED', end: 'TORN_DOWN' },
-  PR_MERGED: { end: 'TORN_DOWN' },
-  PR_CLOSED: { end: 'TORN_DOWN' },
-  FAILED: { end: 'TORN_DOWN' },
-  TORN_DOWN: {},
-};
+export const WORK_TRANSITIONS: Readonly<Record<WorkState, Partial<Record<WorkEvent, WorkState>>>> =
+  {
+    CREATED: { repoChoice: 'PROVISIONING', error: 'FAILED', end: 'TORN_DOWN' },
+    PROVISIONING: { envReady: 'READY', error: 'FAILED', end: 'TORN_DOWN' },
+    READY: { firstMessage: 'WORKING', error: 'FAILED', end: 'TORN_DOWN' },
+    WORKING: { committedAndPushed: 'PRE_PR', error: 'FAILED', end: 'TORN_DOWN' },
+    PRE_PR: {
+      prCreated: 'PR_OPEN',
+      committedAndPushed: 'PRE_PR',
+      error: 'FAILED',
+      end: 'TORN_DOWN',
+    },
+    PR_OPEN: { prMerged: 'PR_MERGED', prClosed: 'PR_CLOSED', error: 'FAILED', end: 'TORN_DOWN' },
+    PR_MERGED: { end: 'TORN_DOWN' },
+    PR_CLOSED: { end: 'TORN_DOWN' },
+    FAILED: { end: 'TORN_DOWN' },
+    TORN_DOWN: {},
+  };
 
 /** Pure transition function: returns the next state or null if illegal. */
 export function nextWorkState(state: WorkState, event: WorkEvent): WorkState | null {

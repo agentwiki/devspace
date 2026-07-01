@@ -43,7 +43,12 @@ describe('contract round-trips', () => {
       }),
     ).not.toThrow();
     expect(() =>
-      RenderCommandSchema.parse({ type: 'update_status', conversationId: 'c1', state: 'READY', text: 'ready' }),
+      RenderCommandSchema.parse({
+        type: 'update_status',
+        conversationId: 'c1',
+        state: 'READY',
+        text: 'ready',
+      }),
     ).not.toThrow();
   });
 });

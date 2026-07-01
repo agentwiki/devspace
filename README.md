@@ -6,21 +6,33 @@ interface — a self-hostable "Claude Code on the web."
 
 > **Status: M1 (sandbox-core vertical).** `@devspace/sandbox-core` now has a real
 > full-duplex exec stream with true two-way backpressure, a docker/devcontainer
-> lifecycle, and fs ops — all unit-tested (the exec flow-control is verified
-> against live child processes, no Docker daemon required). The
-> docker/`devcontainer up` glue needs a live daemon to integration-test. Other
-> services are still M0 stubs. See [`docs/roadmap.md`](docs/roadmap.md).
+> lifecycle, and fs ops. Unit-tested (the exec flow-control is verified against
+> live child processes, no Docker daemon required) **and** integration-tested
+> against a live Docker daemon + `devcontainer` CLI — the full `devcontainer up`
+> → exec → fs → teardown path runs in CI. Other services are still M0 stubs. See
+> [`docs/roadmap.md`](docs/roadmap.md).
+
+## Testing
+
+```bash
+pnpm -r test           # unit tests — fast, no Docker
+pnpm test:integration  # live-Docker integration (needs docker + devcontainer CLI;
+                       # self-skips when unavailable). @devcontainers/cli is a devDep.
+```
+
+Both run in CI (`.github/workflows/ci.yml`): unit + lint + format on every push/PR,
+and the integration suite in a job with a live Docker daemon.
 
 ## Architecture at a glance
 
 Four services, one monorepo, dependency graph is a cycle-free DAG:
 
-| Service | Package | Role |
-| --- | --- | --- |
+| Service          | Package                  | Role                                                                            |
+| ---------------- | ------------------------ | ------------------------------------------------------------------------------- |
 | **orchestrator** | `@devspace/orchestrator` | Control plane. Owns the work-unit FSM, routes events, the only writer of state. |
 | **sandbox-core** | `@devspace/sandbox-core` | Agent-agnostic environment engine (devcontainers/cli). Generic primitives only. |
-| **agent-runner** | `@devspace/agent-runner` | ACP client + harness + guardrails. Drives agents inside sandboxes. |
-| **chat-gateway** | `@devspace/chat-gateway` | Chat adapters (Discord first). Emits events up, renders commands down. |
+| **agent-runner** | `@devspace/agent-runner` | ACP client + harness + guardrails. Drives agents inside sandboxes.              |
+| **chat-gateway** | `@devspace/chat-gateway` | Chat adapters (Discord first). Emits events up, renders commands down.          |
 
 Shared: `@devspace/contracts` (zod schemas + types), `@devspace/db` (Drizzle + repos).
 
@@ -76,7 +88,6 @@ we use Drizzle over Prisma for an on-prem product; see
 pnpm --filter @devspace/db db:generate     # schema -> drizzle/*.sql (offline)
 # DATABASE_URL=... pnpm --filter @devspace/db db:migrate   # apply (needs Postgres)
 ```
-
 
 ## Key technologies
 

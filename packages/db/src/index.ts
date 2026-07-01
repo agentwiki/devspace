@@ -85,7 +85,9 @@ function id(prefix: string): string {
 }
 
 /** In-memory repositories. Deterministic ids; no clock dependency in ids. */
-export function createInMemoryRepositories(now: () => string = () => new Date(0).toISOString()): Repositories {
+export function createInMemoryRepositories(
+  now: () => string = () => new Date(0).toISOString(),
+): Repositories {
   const conversations = new Map<string, ConversationRecord>();
   const workUnits = new Map<string, WorkUnit>();
   const secrets = new Map<string, SecretRecord>();

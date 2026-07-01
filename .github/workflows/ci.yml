@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-unit:
+    name: build + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build (topological)
+        run: pnpm -r build
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Unit tests
+        run: pnpm -r test
+
+  integration:
+    name: sandbox-core integration (live Docker)
+    runs-on: ubuntu-latest
+    # ubuntu-latest ships a running Docker daemon; `devcontainer` is provided by
+    # the @devcontainers/cli devDependency (resolved from node_modules/.bin).
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build (integration tests import built contracts types)
+        run: pnpm -r build
+
+      - name: Verify Docker + devcontainer CLI are available
+        run: |
+          docker info >/dev/null
+          ./node_modules/.bin/devcontainer --version
+
+      - name: Integration tests
+        run: pnpm test:integration
+        env:
+          # MCR base image: public, unauthenticated, no Docker Hub pull limits.
+          DEVSPACE_TEST_IMAGE: mcr.microsoft.com/devcontainers/base:ubuntu

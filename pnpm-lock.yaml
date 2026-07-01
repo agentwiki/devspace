@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@devcontainers/cli':
+        specifier: ^0.87.0
+        version: 0.87.0
       '@eslint/js':
         specifier: ^9.17.0
         version: 9.39.4
@@ -147,6 +150,11 @@ packages:
     resolution: {integrity: sha512-ZTLH+o9QxcZDLX/9ww+W7C2iExnXFM+vD/uGFVSlR61Kzj9FaxUqBC6Rv/kwgA7qVWYUEI9c5ZNqCuO9PM4rKg==}
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
+
+  '@devcontainers/cli@0.87.0':
+    resolution: {integrity: sha512-OVwjI0LH6cYilo2MXrnqYALtCwKM0dsdphNsIguw0ESRBG8s1wPIjDbPiDO5taxPTe3cLshsQYVZY1UpKtFaJA==}
+    engines: {node: '>=20.0.0'}
+    hasBin: true
 
   '@discordjs/builders@1.14.1':
     resolution: {integrity: sha512-gSKkhXLqs96TCzk66VZuHHl8z2bQMJFGwrXC0f33ngK+FLNau4hU1PYny3DNJfNdSH+gVMzE85/d5FQ2BpcNwQ==}
@@ -1681,6 +1689,8 @@ snapshots:
   '@agentclientprotocol/sdk@0.21.1(zod@3.25.76)':
     dependencies:
       zod: 3.25.76
+
+  '@devcontainers/cli@0.87.0': {}
 
   '@discordjs/builders@1.14.1':
     dependencies:

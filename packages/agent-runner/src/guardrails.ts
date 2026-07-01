@@ -25,7 +25,14 @@ export interface GuardrailPolicy {
 
 export const DEFAULT_POLICY: GuardrailPolicy = {
   deniedCommands: ['shutdown', 'reboot', 'mkfs'],
-  deniedCommandPatterns: ['rm -rf /', 'git push --force', 'git push -f', ':(){', 'curl | sh', 'wget | sh'],
+  deniedCommandPatterns: [
+    'rm -rf /',
+    'git push --force',
+    'git push -f',
+    ':(){',
+    'curl | sh',
+    'wget | sh',
+  ],
   protectedWritePaths: ['/opt/agent-runtime', '/.git/hooks', '/etc'],
   workspaceRoot: '/workspace',
   approvalRequired: ['git_push', 'pr_create', 'network'],
@@ -34,8 +41,7 @@ export const DEFAULT_POLICY: GuardrailPolicy = {
 };
 
 export type GuardrailVerdict =
-  | { allowed: true; requiresApproval: boolean }
-  | { allowed: false; reason: string };
+  { allowed: true; requiresApproval: boolean } | { allowed: false; reason: string };
 
 function basename(cmd: string): string {
   const first = cmd.trim().split(/\s+/)[0] ?? '';
@@ -43,7 +49,10 @@ function basename(cmd: string): string {
   return parts[parts.length - 1] ?? first;
 }
 
-export function checkCommand(cmdline: string, policy: GuardrailPolicy = DEFAULT_POLICY): GuardrailVerdict {
+export function checkCommand(
+  cmdline: string,
+  policy: GuardrailPolicy = DEFAULT_POLICY,
+): GuardrailVerdict {
   const base = basename(cmdline);
   if (policy.deniedCommands.includes(base)) {
     return { allowed: false, reason: `command "${base}" is denied` };
@@ -66,10 +75,17 @@ function normalize(path: string): string {
   return '/' + out.join('/');
 }
 
-export function checkFileWrite(path: string, policy: GuardrailPolicy = DEFAULT_POLICY): GuardrailVerdict {
+export function checkFileWrite(
+  path: string,
+  policy: GuardrailPolicy = DEFAULT_POLICY,
+): GuardrailVerdict {
   const abs = path.startsWith('/') ? normalize(path) : normalize(`${policy.workspaceRoot}/${path}`);
   for (const protectedPrefix of policy.protectedWritePaths) {
-    if (abs === protectedPrefix || abs.startsWith(`${protectedPrefix}/`) || abs.includes(protectedPrefix)) {
+    if (
+      abs === protectedPrefix ||
+      abs.startsWith(`${protectedPrefix}/`) ||
+      abs.includes(protectedPrefix)
+    ) {
       return { allowed: false, reason: `write to protected path "${abs}" is denied` };
     }
   }

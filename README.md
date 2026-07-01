@@ -4,8 +4,12 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M0 (scaffolding).** Design docs + a compiling monorepo skeleton.
-> No real business logic yet. See [`docs/roadmap.md`](docs/roadmap.md).
+> **Status: M1 (sandbox-core vertical).** `@devspace/sandbox-core` now has a real
+> full-duplex exec stream with true two-way backpressure, a docker/devcontainer
+> lifecycle, and fs ops — all unit-tested (the exec flow-control is verified
+> against live child processes, no Docker daemon required). The
+> docker/`devcontainer up` glue needs a live daemon to integration-test. Other
+> services are still M0 stubs. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Architecture at a glance
 

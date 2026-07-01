@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { collectStdout, createScriptedExecStream, encodeStdin, fromBase64, toBase64 } from './exec.js';
+import {
+  collectStdout,
+  createScriptedExecStream,
+  encodeStdin,
+  fromBase64,
+  toBase64,
+} from './exec.js';
 
 describe('exec stream primitive', () => {
   it('round-trips bytes through base64 frames', () => {

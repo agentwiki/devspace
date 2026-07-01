@@ -10,11 +10,23 @@
 import type { ExecFrame } from '@devspace/contracts';
 
 export interface ExecStream {
-  /** Write raw bytes to the process stdin. */
-  writeStdin(bytes: Uint8Array): void;
+  /**
+   * Write raw bytes to the process stdin. Returns `false` when the write buffer
+   * is full — callers streaming large payloads should then `await drain()`
+   * before writing more, so we never build an unbounded backlog in memory
+   * (the stdin half of flow-control).
+   */
+  writeStdin(bytes: Uint8Array): boolean;
+  /** Resolves once the stdin buffer has drained below its high-water mark. */
+  drain(): Promise<void>;
   /** Signal EOF on stdin. */
   closeStdin(): void;
-  /** Frames flowing from the process (stdout/stderr/exit). */
+  /**
+   * Frames flowing from the process (stdout/stderr/exit). Consuming this
+   * iterable slowly applies real backpressure: the implementation pauses the
+   * underlying readable streams, which fills the OS pipe buffer and blocks the
+   * process's own writes — no unbounded buffering, no OOM on large diffs.
+   */
   frames: AsyncIterable<ExecFrame>;
   /** Resolves with the process exit code. */
   done: Promise<number>;
@@ -36,11 +48,37 @@ export function encodeStdin(bytes: Uint8Array): ExecFrame {
 
 /** Convenience: drain an exec stream's stdout into a single Buffer (tests/util). */
 export async function collectStdout(stream: ExecStream): Promise<Buffer> {
-  const chunks: Buffer[] = [];
+  return (await captureExec(stream)).stdout;
+}
+
+/** The result of running a command to completion and buffering its output. */
+export interface ExecCapture {
+  code: number;
+  stdout: Buffer;
+  stderr: Buffer;
+}
+
+/**
+ * Drain an exec stream to completion, buffering stdout and stderr separately
+ * and returning the exit code. Used by the fs helpers, which run small
+ * commands (`cat`, `find`) whose output comfortably fits in memory. Do NOT use
+ * this for agent turns — those must be consumed frame-by-frame so backpressure
+ * stays intact.
+ */
+export async function captureExec(stream: ExecStream): Promise<ExecCapture> {
+  const out: Buffer[] = [];
+  const err: Buffer[] = [];
+  let code = -1;
   for await (const frame of stream.frames) {
-    if (frame.kind === 'stdout') chunks.push(Buffer.from(fromBase64(frame.data)));
+    if (frame.kind === 'stdout') out.push(Buffer.from(fromBase64(frame.data)));
+    else if (frame.kind === 'stderr') err.push(Buffer.from(fromBase64(frame.data)));
+    else if (frame.kind === 'exit') code = frame.code;
   }
-  return Buffer.concat(chunks);
+  return {
+    code: await stream.done.catch(() => code),
+    stdout: Buffer.concat(out),
+    stderr: Buffer.concat(err),
+  };
 }
 
 /**
@@ -61,6 +99,10 @@ export function createScriptedExecStream(scriptedFrames: ExecFrame[]): ExecStrea
   return {
     writeStdin() {
       /* no-op for the scripted stream */
+      return true;
+    },
+    drain() {
+      return Promise.resolve();
     },
     closeStdin() {
       /* no-op */

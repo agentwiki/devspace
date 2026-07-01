@@ -2,15 +2,34 @@
 
 Critical path to the end-to-end demo: **M0 → M1 → M2 → M3 → M4.**
 
-## M0 — Scaffolding (this milestone)
+## M0 — Scaffolding (done)
 Monorepo, 6 packages + 4 apps, zod contracts, Drizzle schema, compose, base +
 agent-runtime image skeletons, stub services with `/health`, design docs. No real
 logic. **Done when** `pnpm -r build`, `pnpm -r test`, and the 4 health checks pass.
 
-## M1 — sandbox-core vertical
+## M1 — sandbox-core vertical (in progress)
 `devcontainers/cli` integration: provision from repoUrl, **bidi streaming exec
 with real backpressure/flow-control**, fs ops, teardown, resource limits.
 Out: ports proxy polish, gVisor.
+
+Landed:
+- **Full-duplex exec with real two-way backpressure** (`process-stream.ts`) — the
+  risk-#1 primitive. stdout/stderr pause the child via watermarks (kernel pipe
+  backpressure, no unbounded buffering); stdin honors `write()`/`drain()`. It is
+  transport-agnostic, so it is unit-tested against live child processes — the
+  backpressure test proves a paused consumer actually blocks a >2MB producer.
+- **DockerRuntime** (exec/destroy/liveness) with pure, tested `docker` argv builders.
+- **DevcontainerProvisioner**: shallow clone → synthesized `devcontainer.json`
+  (repo config + override + resource `runArgs` + generic mounts) → `devcontainer up`
+  → containerId. Config-merge/arg/parse logic is pure and unit-tested.
+- **DevcontainerSandboxCore**: env registry + lifecycle, per-exec secret-env
+  injection, file secrets written post-ready (never on the workspace disk), and
+  fs read/write/list built on the exec primitive (binary-safe).
+- **sandbox-core-svc**: JSON control surface (env lifecycle, fs, capture-exec).
+
+To integration-test (needs a live Docker daemon + `devcontainer` CLI, absent in
+CI here): the `devcontainer up` / `docker exec` glue end-to-end. Disk-quota
+enforcement (`--storage-opt size=`) is deferred to M5 (driver-dependent).
 
 ## M2 — agent-runner + agent-in-container
 Build the agent-runtime volume; mount it; launch codex-acp via exec; wrap stdio in

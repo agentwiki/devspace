@@ -1,0 +1,230 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { ExecRequest } from '@devspace/contracts';
+import { toBase64 } from './exec.js';
+import type { ExecStream } from './exec.js';
+import type { ContainerRuntime } from './runtime.js';
+import type { Provisioner, ProvisionResult } from './provision.js';
+import { DevcontainerSandboxCore, SandboxError, parseFindOutput } from './sandbox.js';
+
+/**
+ * An in-memory fake container: `exec` runs a tiny hand-written interpreter over
+ * the argv so the sandbox's fs helpers (cat/find/chmod/`sh -c 'cat >'`) can be
+ * exercised end-to-end without Docker.
+ */
+class FakeContainer {
+  readonly files = new Map<string, Buffer>();
+  readonly modes = new Map<string, number>();
+  lastEnv: Record<string, string> | undefined;
+
+  exec(req: ExecRequest): ExecStream {
+    this.lastEnv = req.env;
+    const [cmd, ...rest] = req.cmd;
+    const frames = this.run(cmd!, rest, req);
+    return scriptStream(frames.out, frames.err, frames.code, (stdin) => frames.onStdin?.(stdin));
+  }
+
+  private run(
+    cmd: string,
+    rest: string[],
+    _req: ExecRequest,
+  ): { out: Buffer; err: Buffer; code: number; onStdin?: (data: Buffer) => void } {
+    if (cmd === 'cat' && rest[0] === '--') {
+      const path = rest[1]!;
+      const file = this.files.get(path);
+      if (!file) return { out: Buffer.alloc(0), err: Buffer.from('No such file'), code: 1 };
+      return { out: file, err: Buffer.alloc(0), code: 0 };
+    }
+    if (cmd === 'sh' && rest[0] === '-c' && rest[1] === 'cat > "$1"') {
+      const path = rest[3]!;
+      return {
+        out: Buffer.alloc(0),
+        err: Buffer.alloc(0),
+        code: 0,
+        onStdin: (data) => this.files.set(path, data),
+      };
+    }
+    if (cmd === 'chmod') {
+      const path = rest[2]!;
+      this.modes.set(path, parseInt(rest[0]!, 8));
+      return { out: Buffer.alloc(0), err: Buffer.alloc(0), code: 0 };
+    }
+    if (cmd === 'find') {
+      const rows = [...this.files.keys()].map(
+        (p) => `${p.split('/').pop()}\tf\t${this.files.get(p)!.length}`,
+      );
+      return {
+        out: Buffer.from(rows.join('\n') + (rows.length ? '\n' : '')),
+        err: Buffer.alloc(0),
+        code: 0,
+      };
+    }
+    return { out: Buffer.alloc(0), err: Buffer.from(`unknown cmd ${cmd}`), code: 127 };
+  }
+}
+
+/**
+ * A minimal ExecStream that buffers stdin then replays scripted output. Like
+ * the real stream, `done` resolves independently of frame consumption — either
+ * when stdin is closed (the fsWrite path awaits `done` without reading frames)
+ * or when the frames are fully drained (the capture path).
+ */
+function scriptStream(
+  out: Buffer,
+  err: Buffer,
+  code: number,
+  onStdin?: (data: Buffer) => void,
+): ExecStream {
+  const chunks: Buffer[] = [];
+  let resolveDone!: (c: number) => void;
+  const done = new Promise<number>((r) => (resolveDone = r));
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    if (onStdin) onStdin(Buffer.concat(chunks));
+    resolveDone(code);
+  };
+
+  async function* gen() {
+    if (out.length) yield { kind: 'stdout' as const, data: toBase64(out) };
+    if (err.length) yield { kind: 'stderr' as const, data: toBase64(err) };
+    finish();
+    yield { kind: 'exit' as const, code };
+  }
+
+  return {
+    writeStdin(bytes) {
+      if (!finished) chunks.push(Buffer.from(bytes));
+      return true;
+    },
+    drain: () => Promise.resolve(),
+    closeStdin: finish,
+    frames: gen(),
+    done,
+    kill() {
+      resolveDone(-1);
+    },
+  };
+}
+
+function makeCore(container = new FakeContainer()) {
+  const destroy = vi.fn(async () => {});
+  const runtime: ContainerRuntime = {
+    execStream: (_id, req) => container.exec(req),
+    destroy,
+    exists: async () => true,
+  };
+  const provisioner: Provisioner = {
+    provision: vi.fn(async (): Promise<ProvisionResult> => ({
+      containerId: 'cont-1',
+      workspaceFolder: '/ws',
+    })),
+  };
+  return {
+    core: new DevcontainerSandboxCore({ runtime, provisioner }),
+    container,
+    destroy,
+    provisioner,
+  };
+}
+
+describe('DevcontainerSandboxCore lifecycle', () => {
+  it('provisions to ready and reports status', async () => {
+    const { core } = makeCore();
+    const env = await core.createEnvironment({ repoUrl: 'https://x/r.git' });
+    expect(env.status).toBe('ready');
+    expect(env.containerId).toBe('cont-1');
+    expect(env.envId).toMatch(/^env_/);
+    expect((await core.getEnvironment(env.envId))?.status).toBe('ready');
+  });
+
+  it('marks the env failed and throws PROVISION_FAILED when provisioning fails', async () => {
+    const { core, provisioner } = makeCore();
+    (provisioner.provision as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('devcontainer boom'),
+    );
+    await expect(core.createEnvironment({})).rejects.toMatchObject({ code: 'PROVISION_FAILED' });
+  });
+
+  it('injects env-target secrets into every exec, letting per-call env override', async () => {
+    const { core, container } = makeCore();
+    const env = await core.createEnvironment({
+      secrets: [{ name: 'GH_TOKEN', value: 'secret-abc', target: 'env' }],
+    });
+    const stream = await core.exec(env.envId, {
+      cmd: ['cat', '--', '/x'],
+      tty: false,
+      env: { EXTRA: '1' },
+    });
+    // Drain so the fake records lastEnv.
+    for await (const _ of stream.frames) void _;
+    expect(container.lastEnv).toMatchObject({ GH_TOKEN: 'secret-abc', EXTRA: '1' });
+  });
+
+  it('writes file-target secrets into the container at 0600 after ready', async () => {
+    const { core, container } = makeCore();
+    await core.createEnvironment({
+      secrets: [
+        {
+          name: 'npmrc',
+          value: '//registry/:_authToken=xyz',
+          target: 'file',
+          path: '/root/.npmrc',
+        },
+      ],
+    });
+    expect(container.files.get('/root/.npmrc')?.toString()).toBe('//registry/:_authToken=xyz');
+    expect(container.modes.get('/root/.npmrc')).toBe(0o600);
+  });
+
+  it('round-trips binary data through fsWrite/fsRead', async () => {
+    const { core } = makeCore();
+    const env = await core.createEnvironment({});
+    const payload = new Uint8Array([0, 255, 10, 66, 254]);
+    await core.fsWrite(env.envId, '/data.bin', payload);
+    const read = await core.fsRead(env.envId, '/data.bin');
+    expect(Buffer.compare(Buffer.from(read), Buffer.from(payload))).toBe(0);
+  });
+
+  it('lists directory entries', async () => {
+    const { core } = makeCore();
+    const env = await core.createEnvironment({});
+    await core.fsWrite(env.envId, '/a.txt', new TextEncoder().encode('hi'));
+    const list = await core.fsList(env.envId, '/');
+    expect(list).toContainEqual({ name: 'a.txt', type: 'file', size: 2 });
+  });
+
+  it('throws NOT_FOUND for unknown envs and CONFLICT before ready', async () => {
+    const { core } = makeCore();
+    await expect(core.exec('nope', { cmd: ['ls'], tty: false })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    await expect(core.fsRead('nope', '/x')).rejects.toBeInstanceOf(SandboxError);
+  });
+
+  it('destroys the container and transitions to stopped', async () => {
+    const { core, destroy } = makeCore();
+    const env = await core.createEnvironment({});
+    await core.destroyEnvironment(env.envId);
+    expect(destroy).toHaveBeenCalledWith('cont-1');
+    expect((await core.getEnvironment(env.envId))?.status).toBe('stopped');
+  });
+
+  it('reports a read failure as EXEC_FAILED', async () => {
+    const { core } = makeCore();
+    const env = await core.createEnvironment({});
+    await expect(core.fsRead(env.envId, '/missing')).rejects.toMatchObject({ code: 'EXEC_FAILED' });
+  });
+});
+
+describe('parseFindOutput', () => {
+  it('maps find type codes to FsEntry types', () => {
+    const rows = 'a.txt\tf\t12\nsub\td\t4096\nlink\tl\t0\nweird\tp\t0\n';
+    expect(parseFindOutput(rows)).toEqual([
+      { name: 'a.txt', type: 'file', size: 12 },
+      { name: 'sub', type: 'dir', size: 4096 },
+      { name: 'link', type: 'symlink', size: 0 },
+      { name: 'weird', type: 'other', size: 0 },
+    ]);
+  });
+});

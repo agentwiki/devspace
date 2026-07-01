@@ -4,12 +4,15 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M1 (sandbox-core vertical).** `@devspace/sandbox-core` now has a real
-> full-duplex exec stream with true two-way backpressure, a docker/devcontainer
-> lifecycle, and fs ops. Unit-tested (the exec flow-control is verified against
-> live child processes, no Docker daemon required) **and** integration-tested
-> against a live Docker daemon + `devcontainer` CLI — the full `devcontainer up`
-> → exec → fs → teardown path runs in CI. Other services are still M0 stubs. See
+> **Status: M2 (agent-runner vertical).** On top of the M1 sandbox-core engine
+> (real full-duplex exec with two-way backpressure, docker/devcontainer lifecycle,
+> fs ops — unit- and live-Docker integration-tested in CI), `@devspace/agent-runner`
+> now speaks ACP end to end: it launches codex-acp via exec, wraps the exec stream
+> in `ndJsonStream`/`ClientSideConnection`, runs a prompt turn, normalizes
+> `session/update`s into the `AgentEvent` stream, and gates sensitive tool calls
+> behind a human approval. The whole vertical — handshake, turn, event mapping,
+> permission gate — is exercised against a REAL SDK agent over an in-memory loopback
+> (no Docker). The orchestrator and chat-gateway are still M0 stubs. See
 > [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing

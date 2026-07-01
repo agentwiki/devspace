@@ -8,7 +8,7 @@ Monorepo, 6 packages + 4 apps, zod contracts, Drizzle schema, compose, base +
 agent-runtime image skeletons, stub services with `/health`, design docs. No real
 logic. **Done when** `pnpm -r build`, `pnpm -r test`, and the 4 health checks pass.
 
-## M1 — sandbox-core vertical (in progress)
+## M1 — sandbox-core vertical (done)
 
 `devcontainers/cli` integration: provision from repoUrl, **bidi streaming exec
 with real backpressure/flow-control**, fs ops, teardown, resource limits.
@@ -38,11 +38,38 @@ Landed:
 Deferred: disk-quota enforcement (`--storage-opt size=`) to M5 (driver-dependent);
 gVisor/ports proxy per the milestone's out-of-scope list.
 
-## M2 — agent-runner + agent-in-container
+## M2 — agent-runner + agent-in-container (in progress)
 
 Build the agent-runtime volume; mount it; launch codex-acp via exec; wrap stdio in
 ACP `ndJsonStream`/`ClientSideConnection`; run one turn; normalize events.
 Out: full guardrails, approvals.
+
+Landed:
+
+- **Full ACP client wiring** (`acp/connection.ts`) — the exec stream is adapted to
+  ACP's byte-stream pair (`acp/stream-adapter.ts`, stdout→protocol, stderr→logs,
+  backpressure preserved), wrapped in `ndJsonStream`, and driven through a real
+  `ClientSideConnection`. `connectAgent` does the `initialize` + `newSession`
+  handshake and returns a session whose `runTurn` streams events until `turn_end`.
+- **ACP→AgentEvent normalization** (`acp/events.ts`) — pure, total mapping of
+  `session/update` (message/thought chunks, tool calls, diffs, tool results) onto
+  the normalized `AgentEvent` union; unknown updates map to null, never throw.
+- **Approval gate** (`acp/client.ts`) — `requestPermission` surfaces a
+  `permission_request` event and PARKS the agent's JSON-RPC call until a human
+  `decide()` arrives, so nothing sensitive runs without an explicit allow.
+- **DefaultAgentRunner** (`runner.ts`) — composes an `ExecProvider` (sandbox-core,
+  exec only), a backend, and `connectAgent`; per-exec model + resolved LLM key
+  injection via the backend's `launchCommand`; `agentRuntimeMount()` for the
+  orchestrator to attach the runtime volume (ADR-0003).
+- **End-to-end ACP round-trip test** (`acp/roundtrip.test.ts`) — a REAL SDK
+  `AgentSideConnection` plays codex-acp over an in-memory loopback
+  (`acp/loopback.ts`); the full handshake, a prompt turn, event normalization, and
+  the permission gate run with no Docker and no child process.
+- **agent-runtime volume publish** (`infra/images/agent-runtime/publish.sh`) —
+  builds the image and copies `/opt/agent-runtime` into a named Docker volume.
+
+Deferred: full guardrail enforcement on tool calls + auto-deny (M3, wired to the
+FSM/secret store); the agent-runner-svc HTTP control surface (M3/M4).
 
 ## M3 — orchestrator + FSM + secrets
 

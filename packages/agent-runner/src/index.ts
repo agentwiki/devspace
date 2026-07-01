@@ -10,6 +10,12 @@
 export * from './guardrails.js';
 export * from './backends/codex.js';
 export * from './acp/connection.js';
+export * from './acp/events.js';
+export * from './acp/client.js';
+export * from './acp/stream-adapter.js';
+export * from './acp/async-queue.js';
+export * from './acp/loopback.js';
+export * from './runner.js';
 
 import type {
   AgentEvent,

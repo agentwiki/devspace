@@ -21,10 +21,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.21.0",
     "@devspace/contracts": "workspace:*",
     "@devspace/sandbox-core": "workspace:*"
-  },
-  "devDependencies": {
-    "@agentclientprotocol/sdk": "^0.21.0"
   }
 }

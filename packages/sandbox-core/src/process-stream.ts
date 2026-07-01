@@ -189,6 +189,13 @@ export function spawnExecStream(
       },
     },
     done,
+    // WARNING: this signals ONLY the direct local child. For the docker-exec
+    // transport (runtime.ts) that child is the `docker exec` client — Docker does
+    // NOT propagate the signal into the container, so the in-container process
+    // tree (e.g. codex-acp and anything it spawned) keeps running. Do NOT build
+    // M5 auto-abort / turn-budget kill on top of this alone; hard-stopping an
+    // agent needs in-container termination (`docker exec <ctr> kill`) or
+    // `destroy()` (`docker rm --force`, which reaps the whole container).
     kill(signal: NodeJS.Signals = 'SIGTERM'): void {
       if (closed) return;
       if (spawned) child.kill(signal);

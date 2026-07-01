@@ -30,7 +30,13 @@ export interface ExecStream {
   frames: AsyncIterable<ExecFrame>;
   /** Resolves with the process exit code. */
   done: Promise<number>;
-  /** Forcibly terminate the process. */
+  /**
+   * Forcibly terminate the process. NOTE: over the docker-exec transport this
+   * signals the local `docker exec` client only — it does NOT reach the process
+   * tree inside the container (Docker doesn't propagate the signal). Use the
+   * runtime's `destroy()` to actually reap in-container processes. See the M5
+   * auto-abort caveat in docs/roadmap.md.
+   */
   kill(signal?: NodeJS.Signals): void;
 }
 

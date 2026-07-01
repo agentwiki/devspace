@@ -86,6 +86,12 @@ stream output, create-PR/view-PR + approval buttons. **= the demo.**
 gVisor/Kata, egress allowlist, output redaction, turn budgets, audit log, ports
 preview proxy, GitHub webhooks.
 
+> Auto-abort caveat: turn-budget/runaway kill must NOT rely on `ExecStream.kill()`
+> alone. Over the docker-exec transport that signals only the local `docker exec`
+> client; Docker does not propagate it into the container, so the agent's
+> in-container process tree survives. Hard-stopping an agent needs in-container
+> termination (`docker exec <ctr> kill`) or `destroy()` (`docker rm --force`).
+
 ## M6+ — Expansion
 
 Additional chat adapters (Slack, Discord); 2nd ACP agent backend; multi-host

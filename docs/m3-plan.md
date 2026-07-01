@@ -30,7 +30,7 @@ In (per roadmap M3):
   `RenderCommand` contracts.
 
 **M3/M4 boundary (drawn in ink).** M3 delivers the platform-agnostic routing and
-the pure `AgentEvent → RenderCommand[]` mapping only. M4 adds *only* the Slack
+the pure `AgentEvent → RenderCommand[]` mapping only. M4 adds _only_ the Slack
 transport + Block Kit rendering that consumes `RenderCommand`s and produces
 `ChatEvent`s — **no orchestrator logic lands in M4**. If that invariant cannot be
 held, the `message.posted` turn-streaming + `render.ts` move to M4 and M3's
@@ -39,7 +39,7 @@ held, the `message.posted` turn-streaming + `render.ts` move to M4 and M3's
 Out (deferred):
 
 - GitHub webhooks — **poll** PR state instead (roadmap M3 "Out"; webhooks are M5).
-- Full guardrail enforcement / auto-deny on tool calls (M5). The approval *gate*
+- Full guardrail enforcement / auto-deny on tool calls (M5). The approval _gate_
   already exists (M2). **No abort path ships in M3** — the auto-abort caveat below
   is context for M5, not M3 work. **[review: scope #6, testing #6]**
 - Slack adapter end-to-end and the agent-runner-svc HTTP surface (M4).
@@ -55,7 +55,7 @@ is a **precondition of the secret store**, not an M5 guardrail, and ships in M3
 1. **Push and PR-create are both host-side; no writable token enters the
    container. [review: security #1]** The original plan injected the GitHub
    token into the container for `git push`, but `sandbox-core.exec()` merges
-   secret env into *every* exec and child processes (credential helpers, repo
+   secret env into _every_ exec and child processes (credential helpers, repo
    `pre-push` hooks) inherit it — re-introducing the exact exposure the wrapper
    exists to avoid. Instead the orchestrator performs `git push` from the host
    (HTTPS remote with a host-controlled, single-invocation credential; repo hooks
@@ -97,7 +97,7 @@ event bus. (`pg`, `drizzle-orm`, `drizzle-kit` are already declared deps.)
   - `workUnits.transition(id, event, patch)` uses **`SELECT … FOR UPDATE` then
     recompute** as the single design (not the blind conditional-UPDATE variant).
     Inside one transaction: lock+read the current state, `nextWorkState(current,
-    event)`; if `null` → `IllegalTransitionError` (a *genuine* illegal transition
+event)`; if `null` → `IllegalTransitionError` (a _genuine_ illegal transition
     against the true current state), else `UPDATE`. Because the row is locked, a
     lost-update race cannot be misreported as an illegal transition — the loser
     re-reads the committed state and recomputes. **[review: architecture #4,
@@ -119,8 +119,8 @@ event bus. (`pg`, `drizzle-orm`, `drizzle-kit` are already declared deps.)
   (`0000_grey_invaders.sql` exists); regenerate for the `consumedAt` change.
 - **itest plumbing (must be spelled out, not "mirror sandbox-core"):**
   add `packages/db/vitest.integration.config.ts` (`include: ['src/**/*.itest.ts']`),
-  a `db` `test:integration` script, and tsconfig excludes for `src/**/*.itest.ts`
-  + support files + both vitest configs (else `pnpm -r build` compiles the itest
+  a `db` `test:integration` script, and tsconfig excludes for the itest files,
+  support files, and both vitest configs (else `pnpm -r build` compiles the itest
   and breaks). Broaden the root `test:integration` (or invoke the db suite
   directly in CI). **[review: testing #1]**
 - Tests:
@@ -139,7 +139,7 @@ event bus. (`pg`, `drizzle-orm`, `drizzle-kit` are already declared deps.)
 - `packages/orchestrator/src/secrets.ts` — `SecretStore`:
   - Backed by a **keyring** (`keyId → key`), not a single env var, so rotation is
     real. `put(userId, conversationId, name, plaintext)` → AES-256-GCM encrypt
-    with the *current* key, GCM **AAD bound to `(userId, conversationId, name)`**
+    with the _current_ key, GCM **AAD bound to `(userId, conversationId, name)`**
     (a ciphertext cannot be replayed under a different owner), store
     `{ciphertext, keyId}`. `resolveRef(ref)` → look up by record id
     (`SecretRepo.get(id)`), decrypt with the envelope's `keyId`. `rotate()` batch:
@@ -148,7 +148,7 @@ event bus. (`pg`, `drizzle-orm`, `drizzle-kit` are already declared deps.)
     keyId→key source. **[review: security #5, #6-AAD]**
   - Plaintext is never logged; GCM auth-tag / AAD failure throws.
 - **Live secret registry + redaction.** A per-conversation registry collects
-  *every* resolved plaintext (LLM key, clone token, and the host-side push/PR
+  _every_ resolved plaintext (LLM key, clone token, and the host-side push/PR
   token for its lifetime). `redactSecrets(text, registry)` runs on **100% of
   outbound `RenderCommand` text** in `render.ts`. Documented as **defense-in-depth**
   (a transformed/split secret survives redaction; egress filtering in M5 is the
@@ -185,7 +185,7 @@ event bus. (`pg`, `drizzle-orm`, `drizzle-kit` are already declared deps.)
 
 Replace the three `handleChatEvent` stubs with real logic. **Provisioning is
 synchronous within the handler** — the orchestrator `await`s
-`sandbox.createEnvironment` and *itself* applies `envReady`/`error`. The event
+`sandbox.createEnvironment` and _itself_ applies `envReady`/`error`. The event
 bus is reserved for genuinely out-of-process producers (the PR poll reconciler).
 This closes the "who emits `envReady`?" gap — `SandboxCore` emits no events.
 **[review: architecture #1]**
@@ -257,7 +257,7 @@ PR_OPEN --prMerged--> PR_MERGED   PR_OPEN --prClosed--> PR_CLOSED
 ```
 
 The orchestrator is the sole writer; `WorkUnitMachine.apply` → `repo.transition`
-is the only path that mutates `state`. Redelivery is handled *above* this by
+is the only path that mutates `state`. Redelivery is handled _above_ this by
 handler-level idempotency (D), never by making `transition` swallow illegal
 transitions.
 
@@ -283,7 +283,7 @@ transitions.
   once redelivery is normal, and a redelivered transition event must no-op, not
   throw. Tested explicitly. **[review: architecture #3, testing #6]**
 - **Transition atomicity** (top-risk #7, FSM vs GitHub drift): `SELECT … FOR
-  UPDATE` + recompute, tested with an explicit lock so lost-update ≠ illegal
+UPDATE` + recompute, tested with an explicit lock so lost-update ≠ illegal
   transition.
 - **Token exposure** (top-risk #3): no writable token in the container at all
   (Decision 1); tenant authZ gates every secret resolution; `redactSecrets` on

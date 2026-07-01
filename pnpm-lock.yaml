@@ -74,16 +74,15 @@ importers:
 
   packages/agent-runner:
     dependencies:
+      '@agentclientprotocol/sdk':
+        specifier: ^0.21.0
+        version: 0.21.1(zod@3.25.76)
       '@devspace/contracts':
         specifier: workspace:*
         version: link:../contracts
       '@devspace/sandbox-core':
         specifier: workspace:*
         version: link:../sandbox-core
-    devDependencies:
-      '@agentclientprotocol/sdk':
-        specifier: ^0.21.0
-        version: 0.21.1(zod@3.25.76)
 
   packages/chat-gateway:
     dependencies:

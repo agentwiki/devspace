@@ -20,6 +20,7 @@ RUN mkdir -p /opt/agent-runtime/bin \
        > /opt/agent-runtime/codex-acp \
     && chmod +x /opt/agent-runtime/codex-acp
 
-# The publish step (M2) copies /opt/agent-runtime into a named volume.
+# `publish.sh` copies this /opt/agent-runtime tree into a named Docker volume
+# that the orchestrator mounts read-only into each sandbox (ADR-0003).
 FROM scratch AS runtime
 COPY --from=build /opt/agent-runtime /opt/agent-runtime

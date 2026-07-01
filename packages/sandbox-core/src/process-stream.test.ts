@@ -62,7 +62,13 @@ describe('spawnExecStream', () => {
   it(
     'kill() terminates a long-running process',
     async () => {
-      const stream = spawnExecStream('sh', ['-c', 'sleep 30']);
+      // `exec` so the shell REPLACES itself with sleep — one process, one pid.
+      // Plain `sh -c 'sleep 30'` may fork sleep as a child; SIGKILL then reaps
+      // the shell instantly (`exit`) but the orphaned sleep inherits the stdout
+      // pipe and holds it open, so `done` (which resolves on stdio-EOF `close`,
+      // to keep the exit frame last) wouldn't settle until sleep's full 30s —
+      // a photo-finish with this test's own timeout under CI load.
+      const stream = spawnExecStream('sh', ['-c', 'exec sleep 30']);
       stream.kill('SIGKILL');
       // 128 + SIGKILL(9) = 137
       expect(await stream.done).toBe(137);

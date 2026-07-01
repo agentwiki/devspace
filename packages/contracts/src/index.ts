@@ -226,7 +226,7 @@ export type PermissionDecision = z.infer<typeof PermissionDecisionSchema>;
 /* Chat Gateway: inbound events + outbound render commands                     */
 /* -------------------------------------------------------------------------- */
 
-export const ChatPlatformSchema = z.enum(['discord', 'slack', 'web']);
+export const ChatPlatformSchema = z.enum(['slack', 'discord']);
 export type ChatPlatform = z.infer<typeof ChatPlatformSchema>;
 
 export const RepoChoiceSchema = z.object({

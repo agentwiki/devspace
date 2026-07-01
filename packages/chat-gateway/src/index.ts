@@ -33,4 +33,5 @@ export interface ChatRenderer {
   openStream(conversationId: string): Promise<StreamHandle>;
 }
 
+export * from './adapters/slack.js';
 export * from './adapters/discord.js';

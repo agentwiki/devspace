@@ -10,7 +10,7 @@ export const conversations = pgTable(
   'conversations',
   {
     id: text('id').primaryKey().notNull(),
-    platform: text('platform').notNull(), // discord | slack | web
+    platform: text('platform').notNull(), // slack | discord
     externalChannelId: text('external_channel_id').notNull(),
     userId: text('user_id').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),

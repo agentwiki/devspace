@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Chat adapter layer: platform-agnostic ChatAdapter/ChatRenderer + Discord adapter",
+  "description": "Chat adapter layer: platform-agnostic ChatAdapter/ChatRenderer + Slack (primary) and Discord adapters",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -24,6 +24,7 @@
     "@devspace/contracts": "workspace:*"
   },
   "devDependencies": {
+    "@slack/bolt": "^4.0.0",
     "discord.js": "^14.16.3"
   }
 }

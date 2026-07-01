@@ -154,6 +154,20 @@ export function spawnExecStream(
     finish(-1);
   });
 
+  // spawn is async: a kill() issued before the OS process exists would be
+  // dropped (child.kill() is a no-op with no pid), leaving a SIGKILL'd `sleep`
+  // to run to completion. Track spawn state and defer any early signal until
+  // the process actually exists, so kill() is race-free right after spawn.
+  let spawned = false;
+  let pendingSignal: NodeJS.Signals | null = null;
+  child.on('spawn', () => {
+    spawned = true;
+    if (pendingSignal && !closed) {
+      child.kill(pendingSignal);
+      pendingSignal = null;
+    }
+  });
+
   // A broken pipe (process exits mid-write) must not crash the host process.
   child.stdin.on('error', () => {});
 
@@ -176,7 +190,9 @@ export function spawnExecStream(
     },
     done,
     kill(signal: NodeJS.Signals = 'SIGTERM'): void {
-      child.kill(signal);
+      if (closed) return;
+      if (spawned) child.kill(signal);
+      else pendingSignal = signal; // deliver once the process actually exists
     },
   };
 }

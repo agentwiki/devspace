@@ -3,7 +3,7 @@ import type { ChatPlatform } from '@devspace/contracts';
 
 const SERVICE = 'chat-gateway';
 const PORT = Number(process.env.PORT ?? 4002);
-const platform: ChatPlatform = 'discord';
+const platform: ChatPlatform = 'slack';
 
 const server = createServer((req, res) => {
   if (req.url === '/health') {

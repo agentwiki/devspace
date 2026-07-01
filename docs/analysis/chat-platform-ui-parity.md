@@ -1,10 +1,11 @@
-# UI 표면: Discord/Slack (자체 웹 UI 없음)
+# UI 표면: Slack/Discord (자체 웹 UI 없음)
 
 ## 설계
 
-UI 표면은 Discord/Slack 채팅이다. 자체 웹 UI는 만들지 않는다. 채팅은 대화·승인·
-상태·세션관리·알림을 담당하고, **정밀 라인 단위 코드 리뷰는 GitHub PR 리뷰에 위임**한다.
-플랫폼 1차 타깃은 Slack, Discord는 동급 지원. `ChatAdapter`는 플랫폼 중립이다.
+UI 표면은 채팅이다. **1차 플랫폼은 Slack**(App Home = 네이티브 세션 사이드바, Block Kit),
+Discord는 Forum 채널 기반으로 동급 지원한다. 자체 웹 UI는 만들지 않는다. 채팅은 대화·
+승인·상태·세션관리·알림을 담당하고, **정밀 라인 단위 코드 리뷰는 GitHub PR 리뷰에 위임**한다.
+`ChatAdapter`는 플랫폼 중립이다.
 
 ## Claude Code 웹 UI 기능의 채팅 구현
 

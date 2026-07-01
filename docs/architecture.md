@@ -9,7 +9,7 @@ Self-hostable "Claude Code on the web."
 ## Components & dependency DAG
 
 ```
-            [Discord / Slack / Web]
+               [Slack / Discord]
                      |  (platform events)
                      v
    orchestrator  <----  chat-gateway     (emits events UP, never calls agent/sandbox)

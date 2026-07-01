@@ -32,7 +32,7 @@ Four services, one monorepo, dependency graph is a cycle-free DAG:
 | **orchestrator** | `@devspace/orchestrator` | Control plane. Owns the work-unit FSM, routes events, the only writer of state. |
 | **sandbox-core** | `@devspace/sandbox-core` | Agent-agnostic environment engine (devcontainers/cli). Generic primitives only. |
 | **agent-runner** | `@devspace/agent-runner` | ACP client + harness + guardrails. Drives agents inside sandboxes.              |
-| **chat-gateway** | `@devspace/chat-gateway` | Chat adapters (Discord first). Emits events up, renders commands down.          |
+| **chat-gateway** | `@devspace/chat-gateway` | Chat adapters (Slack first). Emits events up, renders commands down.            |
 
 Shared: `@devspace/contracts` (zod schemas + types), `@devspace/db` (Drizzle + repos).
 
@@ -96,4 +96,5 @@ pnpm --filter @devspace/db db:generate     # schema -> drizzle/*.sql (offline)
   [`@agentclientprotocol/sdk`](https://www.npmjs.com/package/@agentclientprotocol/sdk) —
   agent-runner is the ACP client.
 - [`codex-acp`](https://github.com/agentclientprotocol/codex-acp) — first agent backend.
-- [discord.js](https://discord.js.org) — first chat adapter.
+- [Slack Bolt](https://tools.slack.dev/bolt-js/) + Block Kit — first chat adapter
+  (App Home for the session list); [discord.js](https://discord.js.org) as an additional adapter.

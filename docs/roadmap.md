@@ -49,9 +49,9 @@ Out: full guardrails, approvals.
 Work-unit FSM wired to Postgres; event bus (LISTEN/NOTIFY); per-user PAT/LLM-key
 store + injection; deterministic git/PR wrapper. Out: webhooks (poll instead).
 
-## M4 — chat-gateway (Discord) end-to-end
+## M4 — chat-gateway (Slack) end-to-end
 
-Discord adapter: create conversation, pick repo, live status message, message→turn,
+Slack adapter: create conversation, pick repo, live status message, message→turn,
 stream output, create-PR/view-PR + approval buttons. **= the demo.**
 
 ## M5 — Hardening (release-blocking for real multi-tenant use)

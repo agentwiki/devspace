@@ -1,0 +1,10 @@
+{
+  "name": "devspace-default",
+  "build": { "dockerfile": "Dockerfile" },
+  "workspaceFolder": "/workspace",
+  "remoteUser": "vscode",
+  "features": {},
+  "containerEnv": {},
+  "mounts": [],
+  "// note": "Agent runtime is mounted at provision time via the generic mounts[] primitive, not declared here."
+}

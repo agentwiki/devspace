@@ -1,0 +1,27 @@
+{
+  "name": "@devspace/chat-gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Chat adapter layer: platform-agnostic ChatAdapter/ChatRenderer + Discord adapter",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@devspace/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "discord.js": "^14.16.3"
+  }
+}

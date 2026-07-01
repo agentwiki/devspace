@@ -1,0 +1,17 @@
+{
+  "name": "@devspace/agent-runner-svc",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Deployable entrypoint for the agent-runner service",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@devspace/contracts": "workspace:*",
+    "@devspace/agent-runner": "workspace:*"
+  }
+}

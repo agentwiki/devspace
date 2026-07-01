@@ -1,0 +1,67 @@
+# Local dev stack: Postgres + the four services.
+# Build once from the shared image; each service overrides command + PORT.
+name: devspace
+
+x-svc: &svc
+  build:
+    context: ..
+    dockerfile: infra/Dockerfile
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment:
+    DATABASE_URL: postgres://devspace:devspace@postgres:5432/devspace
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: devspace
+      POSTGRES_PASSWORD: devspace
+      POSTGRES_DB: devspace
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devspace"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  orchestrator:
+    <<: *svc
+    command: ["node", "apps/orchestrator-svc/dist/main.js"]
+    environment:
+      DATABASE_URL: postgres://devspace:devspace@postgres:5432/devspace
+      PORT: "4000"
+    ports:
+      - "4000:4000"
+
+  sandbox-core:
+    <<: *svc
+    command: ["node", "apps/sandbox-core-svc/dist/main.js"]
+    environment:
+      PORT: "4001"
+    ports:
+      - "4001:4001"
+
+  chat-gateway:
+    <<: *svc
+    command: ["node", "apps/chat-gateway-svc/dist/main.js"]
+    environment:
+      PORT: "4002"
+    ports:
+      - "4002:4002"
+
+  agent-runner:
+    <<: *svc
+    command: ["node", "apps/agent-runner-svc/dist/main.js"]
+    environment:
+      PORT: "4003"
+    ports:
+      - "4003:4003"
+
+volumes:
+  pgdata:

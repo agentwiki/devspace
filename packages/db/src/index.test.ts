@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { createInMemoryRepositories, IllegalTransitionError } from './index.js';
+import {
+  createInMemoryEventBus,
+  createInMemoryRepositories,
+  IllegalTransitionError,
+} from './index.js';
 
 describe('in-memory repositories', () => {
   it('creates a work unit and transitions it legally', async () => {
@@ -40,5 +44,63 @@ describe('in-memory repositories', () => {
 
     await repos.events.append({ topic: 'env.ready', payload: { envId: 'e1' } });
     expect(await repos.events.list('env.ready')).toHaveLength(1);
+  });
+
+  it('resolves and deletes a secret by record id; re-put upserts in place', async () => {
+    const repos = createInMemoryRepositories();
+    const rec = await repos.secrets.put({
+      userId: 'u1',
+      conversationId: 'c1',
+      name: 'LLM_KEY',
+      ciphertext: 'ct1',
+      keyId: 'k1',
+    });
+    expect((await repos.secrets.getById(rec.id))?.ciphertext).toBe('ct1');
+
+    // Re-put the same (user, conversation, name) rotates ciphertext, keeps the id.
+    const again = await repos.secrets.put({
+      userId: 'u1',
+      conversationId: 'c1',
+      name: 'LLM_KEY',
+      ciphertext: 'ct2',
+      keyId: 'k2',
+    });
+    expect(again.id).toBe(rec.id);
+    expect((await repos.secrets.getById(rec.id))?.ciphertext).toBe('ct2');
+
+    await repos.secrets.delete(rec.id);
+    expect(await repos.secrets.getById(rec.id)).toBeNull();
+    expect(await repos.secrets.get('u1', 'LLM_KEY', 'c1')).toBeNull();
+    await expect(repos.secrets.delete(rec.id)).resolves.toBeUndefined(); // idempotent
+  });
+
+  it('tracks event consumption', async () => {
+    const repos = createInMemoryRepositories();
+    const e = await repos.events.append({ topic: 't', payload: {} });
+    expect(await repos.events.listUnconsumed()).toHaveLength(1);
+    await repos.events.markConsumed(e.id);
+    expect(await repos.events.listUnconsumed()).toHaveLength(0);
+    await expect(repos.events.markConsumed('missing')).resolves.toBeUndefined();
+  });
+});
+
+describe('in-memory event bus', () => {
+  it('appends a durable row, fans out synchronously, and marks consumed', async () => {
+    const repos = createInMemoryRepositories();
+    const bus = createInMemoryEventBus(repos.events);
+    const seen: string[] = [];
+    const off = bus.subscribe((evt) => {
+      seen.push(evt.topic);
+    });
+
+    const published = await bus.publish({ topic: 'pr.merged', payload: { prNumber: 7 } });
+    expect(published.topic).toBe('pr.merged');
+    expect(seen).toEqual(['pr.merged']);
+    // Durable row exists and was stamped consumed by the synchronous delivery.
+    expect(await repos.events.listUnconsumed()).toHaveLength(0);
+
+    off();
+    await bus.publish({ topic: 'pr.closed', payload: {} });
+    expect(seen).toEqual(['pr.merged']); // unsubscribed handler no longer fires
   });
 });

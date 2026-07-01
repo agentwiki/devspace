@@ -67,3 +67,64 @@ jobs:
         env:
           # MCR base image: public, unauthenticated, no Docker Hub pull limits.
           DEVSPACE_TEST_IMAGE: mcr.microsoft.com/devcontainers/base:ubuntu
+
+  orchestrator-db:
+    name: orchestrator + db integration (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: devspace
+          POSTGRES_PASSWORD: devspace
+          POSTGRES_DB: devspace
+        ports:
+          - 5432:5432
+        # Gate the job on the DB actually being ready before any step runs.
+        options: >-
+          --health-cmd "pg_isready -U devspace"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://devspace:devspace@localhost:5432/devspace
+      # Must-not-skip guard: a misconfigured URL fails the suite instead of
+      # silently skipping (pg.itest.ts asserts on this).
+      DEVSPACE_REQUIRE_PG: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build (topological)
+        run: pnpm -r build
+
+      # Apply migrations BEFORE the integration step — the suite runs against a
+      # migrated schema, never generates it.
+      - name: Apply migrations
+        run: pnpm --filter @devspace/db db:migrate
+
+      - name: DB integration tests
+        run: pnpm --filter @devspace/db test:integration
+
+      - name: Boot-migrate smoke (service starts, migrates, serves /health)
+        run: |
+          export SECRET_ENVELOPE_KEY="k1:$(head -c 32 /dev/urandom | base64 -w0)"
+          export ORCHESTRATOR_PORT=4099
+          node apps/orchestrator-svc/dist/main.js &
+          SVC_PID=$!
+          for i in $(seq 1 40); do
+            curl -sf localhost:4099/health >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+          curl -sf localhost:4099/health | grep -q '"status":"ok"'
+          # Malformed ChatEvent must be rejected with 400.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -XPOST localhost:4099/events -d '{"type":"nope"}')" = "400"
+          kill $SVC_PID

@@ -13,6 +13,9 @@ import type { WorkEvent, WorkState, WorkUnit } from '@devspace/contracts';
 import { nextWorkState } from '@devspace/contracts';
 
 export * from './schema.js';
+export * from './bus.js';
+export * from './pg.js';
+export * from './migrate.js';
 
 export interface ConversationRecord {
   id: string;
@@ -37,6 +40,8 @@ export interface EventRecord {
   workUnitId?: string;
   payload: Record<string, unknown>;
   emittedAt: string;
+  /** Stamped when a bus subscriber has processed the row (at-least-once). */
+  consumedAt?: string;
 }
 
 export interface ConversationRepo {
@@ -47,6 +52,10 @@ export interface ConversationRepo {
 export interface WorkUnitRepo {
   create(input: Pick<WorkUnit, 'conversationId'> & Partial<WorkUnit>): Promise<WorkUnit>;
   get(id: string): Promise<WorkUnit | null>;
+  /** The (single) work unit for a conversation — units are 1:1 with conversations. */
+  getByConversation(conversationId: string): Promise<WorkUnit | null>;
+  /** Units currently in a given state (the poll reconciler enumerates PR_OPEN). */
+  listByState(state: WorkState): Promise<WorkUnit[]>;
   /** Apply an FSM transition atomically; throws on an illegal transition. */
   transition(id: string, event: WorkEvent, patch?: Partial<WorkUnit>): Promise<WorkUnit>;
 }
@@ -54,11 +63,19 @@ export interface WorkUnitRepo {
 export interface SecretRepo {
   put(input: Omit<SecretRecord, 'id'>): Promise<SecretRecord>;
   get(userId: string, name: string, conversationId?: string): Promise<SecretRecord | null>;
+  /** Resolve a secret by its record id (llmKeyRef and friends are record ids). */
+  getById(id: string): Promise<SecretRecord | null>;
+  /** Delete a secret record by id; idempotent (missing id is a no-op). */
+  delete(id: string): Promise<void>;
 }
 
 export interface EventRepo {
-  append(input: Omit<EventRecord, 'id' | 'emittedAt'>): Promise<EventRecord>;
+  append(input: Omit<EventRecord, 'id' | 'emittedAt' | 'consumedAt'>): Promise<EventRecord>;
   list(topic?: string): Promise<EventRecord[]>;
+  /** Rows appended but not yet processed by a bus subscriber. */
+  listUnconsumed(): Promise<EventRecord[]>;
+  /** Mark a row processed. Idempotent. */
+  markConsumed(id: string): Promise<void>;
 }
 
 export interface Repositories {
@@ -90,8 +107,12 @@ export function createInMemoryRepositories(
 ): Repositories {
   const conversations = new Map<string, ConversationRecord>();
   const workUnits = new Map<string, WorkUnit>();
-  const secrets = new Map<string, SecretRecord>();
+  const secretsById = new Map<string, SecretRecord>();
+  const secretIdByKey = new Map<string, string>();
   const events: EventRecord[] = [];
+
+  const secretKey = (userId: string, conversationId: string | undefined, name: string): string =>
+    `${userId}:${conversationId ?? ''}:${name}`;
 
   return {
     conversations: {
@@ -120,6 +141,13 @@ export function createInMemoryRepositories(
       async get(wid) {
         return workUnits.get(wid) ?? null;
       },
+      async getByConversation(cid) {
+        for (const wu of workUnits.values()) if (wu.conversationId === cid) return wu;
+        return null;
+      },
+      async listByState(state) {
+        return [...workUnits.values()].filter((wu) => wu.state === state);
+      },
       async transition(wid, event, patch) {
         const wu = workUnits.get(wid);
         if (!wu) throw new Error(`work unit not found: ${wid}`);
@@ -132,12 +160,27 @@ export function createInMemoryRepositories(
     },
     secrets: {
       async put(input) {
-        const rec: SecretRecord = { id: id('sec'), ...input };
-        secrets.set(`${input.userId}:${input.conversationId ?? ''}:${input.name}`, rec);
+        // Upsert on (userId, conversationId, name) — mirrors the Pg unique index
+        // so a re-put rotates the ciphertext in place instead of orphaning a row.
+        const key = secretKey(input.userId, input.conversationId, input.name);
+        const existingId = secretIdByKey.get(key);
+        const rec: SecretRecord = { id: existingId ?? id('sec'), ...input };
+        secretsById.set(rec.id, rec);
+        secretIdByKey.set(key, rec.id);
         return rec;
       },
       async get(userId, name, conversationId) {
-        return secrets.get(`${userId}:${conversationId ?? ''}:${name}`) ?? null;
+        const sid = secretIdByKey.get(secretKey(userId, conversationId, name));
+        return (sid && secretsById.get(sid)) || null;
+      },
+      async getById(sid) {
+        return secretsById.get(sid) ?? null;
+      },
+      async delete(sid) {
+        const rec = secretsById.get(sid);
+        if (!rec) return;
+        secretsById.delete(sid);
+        secretIdByKey.delete(secretKey(rec.userId, rec.conversationId, rec.name));
       },
     },
     events: {
@@ -148,6 +191,13 @@ export function createInMemoryRepositories(
       },
       async list(topic) {
         return topic ? events.filter((e) => e.topic === topic) : [...events];
+      },
+      async listUnconsumed() {
+        return events.filter((e) => e.consumedAt === undefined);
+      },
+      async markConsumed(eid) {
+        const rec = events.find((e) => e.id === eid);
+        if (rec) rec.consumedAt = now();
       },
     },
   };

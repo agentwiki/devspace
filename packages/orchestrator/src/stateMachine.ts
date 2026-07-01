@@ -13,14 +13,17 @@ import { IllegalTransitionError } from '@devspace/db';
 
 export type ActionClass =
   | { kind: 'deterministic'; op: 'view-pr' }
-  | { kind: 'agent'; op: 'create-pr' }
+  // "hybrid": the agent finalizes commits, then the DETERMINISTIC host-side
+  // GitWrapper pushes + opens the PR. The tag no longer implies a pure
+  // AgentRunner dispatch (it isn't one).
+  | { kind: 'hybrid'; op: 'create-pr' }
   | { kind: 'approval'; requestId: string; decision: 'allow' | 'deny' }
   | { kind: 'unknown'; actionId: string };
 
-/** Classify a chat button click. "create-pr" is an agent task; "view-pr" is not. */
+/** Classify a chat button click. "create-pr" is a hybrid task; "view-pr" is not. */
 export function classifyAction(actionId: string): ActionClass {
   if (actionId === 'view-pr') return { kind: 'deterministic', op: 'view-pr' };
-  if (actionId === 'create-pr') return { kind: 'agent', op: 'create-pr' };
+  if (actionId === 'create-pr') return { kind: 'hybrid', op: 'create-pr' };
   const m = /^(approve|deny):(.+)$/.exec(actionId);
   if (m)
     return { kind: 'approval', requestId: m[2]!, decision: m[1] === 'approve' ? 'allow' : 'deny' };

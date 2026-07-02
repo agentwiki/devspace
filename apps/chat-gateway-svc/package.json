@@ -8,10 +8,19 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "test": "vitest run"
   },
   "dependencies": {
     "@devspace/contracts": "workspace:*",
-    "@devspace/chat-gateway": "workspace:*"
+    "@devspace/chat-gateway": "workspace:*",
+    "@devspace/orchestrator": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@devspace/db": "workspace:*",
+    "@devspace/sandbox-core": "workspace:*",
+    "@devspace/agent-runner": "workspace:*",
+    "@types/pg": "^8.11.10"
   }
 }

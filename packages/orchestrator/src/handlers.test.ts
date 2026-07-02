@@ -131,7 +131,7 @@ function buildOrch(opts: {
 describe('conversation.created', () => {
   it('provisions an environment and reaches READY', async () => {
     const h = harness();
-    await h.orch.handleChatEvent({
+    const created = await h.orch.handleChatEvent({
       type: 'conversation.created',
       platform: 'slack',
       externalChannelId: 'C1',
@@ -143,11 +143,13 @@ describe('conversation.created', () => {
     expect(conv).toHaveLength(1);
     expect(conv[0]?.envId).toBe('env_1');
     expect(h.rendered.map((r) => r.type)).toContain('update_status');
+    // The gateway binds its thread to this id (M4 Decision 1).
+    expect(created).toEqual({ conversationId: conv[0]?.conversationId });
   });
 
   it('creates a bare conversation without a repo', async () => {
     const h = harness();
-    await h.orch.handleChatEvent({
+    const created = await h.orch.handleChatEvent({
       type: 'conversation.created',
       platform: 'slack',
       externalChannelId: 'C2',
@@ -155,6 +157,38 @@ describe('conversation.created', () => {
     });
     expect(h.sandbox.createEnvironment).not.toHaveBeenCalled();
     expect(await h.repos.workUnits.listByState('CREATED')).toHaveLength(1);
+    expect(created).toMatchObject({ conversationId: expect.any(String) });
+  });
+
+  it('returns the created id even when provisioning fails (thread stays bound)', async () => {
+    const h = harness();
+    (h.sandbox.createEnvironment as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('boom'),
+    );
+    const created = await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C-fail',
+      userId: 'u1',
+      repoChoice: { repoUrl: 'https://github.com/a/b.git', empty: false },
+    });
+    expect(created).toMatchObject({ conversationId: expect.any(String) });
+    expect(await h.repos.workUnits.listByState('FAILED')).toHaveLength(1);
+  });
+
+  it('resolveConversationId maps a platform thread back to the conversation', async () => {
+    const h = harness();
+    const created = await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C9:1.000100',
+      userId: 'u1',
+    });
+    await expect(h.orch.resolveConversationId('slack', 'C9:1.000100')).resolves.toBe(
+      (created as { conversationId: string }).conversationId,
+    );
+    await expect(h.orch.resolveConversationId('slack', 'C9:9.999999')).resolves.toBeNull();
+    await expect(h.orch.resolveConversationId('discord', 'C9:1.000100')).resolves.toBeNull();
   });
 
   it('marks the unit FAILED when provisioning throws', async () => {
@@ -214,6 +248,24 @@ describe('message.posted', () => {
     expect(wu?.state).toBe('WORKING');
     expect(wu?.agentSessionId).toBe('as_1');
     expect(h.rendered.some((r) => r.type === 'post_message')).toBe(true);
+  });
+
+  it('redacts an agent echo of the LLM key — every turn, not just the first', async () => {
+    // The runner resolves the key by record id OUTSIDE the conversation
+    // registry; the handler must register the plaintext itself or an echo
+    // reaches chat unredacted. Found by the M4 wiring smoke.
+    const agent = fakeAgent([{ type: 'message', text: 'my key is sk-llm' }]);
+    const h = harness({ agent });
+    const { conv } = await seed(h.repos, h.store, 'WORKING'); // NOT the first message
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'echo your key',
+    });
+    const posted = h.rendered.filter((r) => r.type === 'post_message');
+    expect(posted.some((r) => r.text.includes('«redacted»'))).toBe(true);
+    expect(JSON.stringify(h.rendered)).not.toContain('sk-llm');
   });
 
   it('rejects a tenant mismatch before touching state', async () => {

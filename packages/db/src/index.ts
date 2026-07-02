@@ -47,6 +47,12 @@ export interface EventRecord {
 export interface ConversationRepo {
   create(input: Omit<ConversationRecord, 'id' | 'createdAt'>): Promise<ConversationRecord>;
   get(id: string): Promise<ConversationRecord | null>;
+  /** Point read on the (platform, externalChannelId) unique index — the
+   * gateway's post-restart inbound cold-miss resolution (M4). */
+  getByExternalChannelId(
+    platform: string,
+    externalChannelId: string,
+  ): Promise<ConversationRecord | null>;
 }
 
 export interface WorkUnitRepo {
@@ -123,6 +129,12 @@ export function createInMemoryRepositories(
       },
       async get(cid) {
         return conversations.get(cid) ?? null;
+      },
+      async getByExternalChannelId(platform, externalChannelId) {
+        for (const rec of conversations.values()) {
+          if (rec.platform === platform && rec.externalChannelId === externalChannelId) return rec;
+        }
+        return null;
       },
     },
     workUnits: {

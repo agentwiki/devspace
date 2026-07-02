@@ -41,6 +41,9 @@ export * from './stateMachine.js';
 export * from './secrets.js';
 export * from './git.js';
 export * from './render.js';
+// boot.js imports Orchestrator from this module; the cycle is benign (the
+// class is only referenced inside bootOrchestrator's body, after module init).
+export * from './boot.js';
 
 /** Well-known secret names. The push/PR token is host-only; clone token is the
  * only credential permitted inside a container (read-only). */
@@ -146,7 +149,13 @@ export class Orchestrator {
     }
   }
 
-  async handleChatEvent(event: ChatEvent): Promise<void> {
+  /**
+   * Route a chat event. `conversation.created` returns the freshly created
+   * `conversationId` so the gateway can bind it to its platform thread (M4,
+   * Decision 1) — a return value exposing already-created state, not new
+   * control logic. Other events return void.
+   */
+  async handleChatEvent(event: ChatEvent): Promise<{ conversationId: string } | void> {
     switch (event.type) {
       case 'conversation.created':
         return this.onConversationCreated(event);
@@ -157,13 +166,22 @@ export class Orchestrator {
     }
   }
 
+  /** Gateway cold-miss resolution (post-restart): platform thread → conversation. */
+  async resolveConversationId(platform: string, externalChannelId: string): Promise<string | null> {
+    const conv = await this.deps.repos.conversations.getByExternalChannelId(
+      platform,
+      externalChannelId,
+    );
+    return conv?.id ?? null;
+  }
+
   /* ---------------------------------------------------------------------- */
   /* conversation.created                                                    */
   /* ---------------------------------------------------------------------- */
 
   private async onConversationCreated(
     event: Extract<ChatEvent, { type: 'conversation.created' }>,
-  ): Promise<void> {
+  ): Promise<{ conversationId: string }> {
     const conv = await this.deps.repos.conversations.create({
       platform: event.platform,
       externalChannelId: event.externalChannelId,
@@ -171,11 +189,12 @@ export class Orchestrator {
     });
     const wu = await this.deps.repos.workUnits.create({ conversationId: conv.id });
     const registry = this.registryFor(conv.id);
+    const created = { conversationId: conv.id };
 
     const choice = event.repoChoice;
     if (!choice || choice.empty || !choice.repoUrl) {
       await this.emit(statusCommand(conv.id, 'CREATED', 'Conversation ready.', registry));
-      return;
+      return created;
     }
 
     const branch = `devspace/${wu.id}`;
@@ -211,6 +230,7 @@ export class Orchestrator {
     } catch (err) {
       await this.failWorkUnit(wu.id, conv.id, err, registry);
     }
+    return created;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -245,16 +265,24 @@ export class Orchestrator {
       return;
     }
 
+    // The agent runner resolves the LLM key itself (by record id, for
+    // injection), which bypasses this conversation's redaction registry — so
+    // register the plaintext here, EVERY turn, or an agent echoing its key
+    // would reach chat unredacted (B's 100%-of-outbound invariant). Every
+    // turn, not just the first: registries are in-memory, and a restart
+    // mid-conversation must not reopen the hole.
+    const llm = await this.deps.repos.secrets.get(
+      event.userId,
+      SECRET_LLM_KEY,
+      event.conversationId,
+    );
+    if (llm) await this.deps.secrets.resolveRef(llm.id, registry);
+
     // Ensure an agent session, transitioning READY --firstMessage--> WORKING on
     // the first message. Subsequent messages find WORKING and skip the transition.
     let unit = wu;
     let agentSessionId = wu.agentSessionId;
     if (!agentSessionId) {
-      const llm = await this.deps.repos.secrets.get(
-        event.userId,
-        SECRET_LLM_KEY,
-        event.conversationId,
-      );
       if (!llm) {
         await this.emit(
           messageCommand(

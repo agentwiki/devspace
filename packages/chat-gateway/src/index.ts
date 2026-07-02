@@ -19,10 +19,18 @@ export interface StreamHandle {
   end(): Promise<void>;
 }
 
+/** `conversation.created` returns the created id so the adapter can bind its
+ * platform thread to it (M4 Decision 1); other events resolve to void. */
+export interface ChatEventResult {
+  conversationId?: string;
+}
+
+export type EmitChatEvent = (event: ChatEvent) => Promise<ChatEventResult | void>;
+
 /** Inbound: platform -> normalized events. */
 export interface ChatAdapter {
   readonly platform: ChatPlatform;
-  start(emit: (event: ChatEvent) => Promise<void>): Promise<void>;
+  start(emit: EmitChatEvent): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -33,5 +41,8 @@ export interface ChatRenderer {
   openStream(conversationId: string): Promise<StreamHandle>;
 }
 
+export * from './binding.js';
+export * from './status.js';
+export * from './slack/blocks.js';
 export * from './adapters/slack.js';
 export * from './adapters/discord.js';

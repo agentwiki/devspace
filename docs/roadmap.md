@@ -38,7 +38,7 @@ Landed:
 Deferred: disk-quota enforcement (`--storage-opt size=`) to M5 (driver-dependent);
 gVisor/ports proxy per the milestone's out-of-scope list.
 
-## M2 — agent-runner + agent-in-container (in progress)
+## M2 — agent-runner + agent-in-container (done)
 
 Build the agent-runtime volume; mount it; launch codex-acp via exec; wrap stdio in
 ACP `ndJsonStream`/`ClientSideConnection`; run one turn; normalize events.
@@ -71,15 +71,52 @@ Landed:
 Deferred: full guardrail enforcement on tool calls + auto-deny (M3, wired to the
 FSM/secret store); the agent-runner-svc HTTP control surface (M3/M4).
 
-## M3 — orchestrator + FSM + secrets
+## M3 — orchestrator + FSM + secrets (done)
 
 Work-unit FSM wired to Postgres; event bus (LISTEN/NOTIFY); per-user PAT/LLM-key
 store + injection; deterministic git/PR wrapper. Out: webhooks (poll instead).
+See docs/m3-plan.md for the design of record and what landed.
 
-## M4 — chat-gateway (Slack) end-to-end
+## M4 — chat-gateway (Slack) end-to-end (done)
 
 Slack adapter: create conversation, pick repo, live status message, message→turn,
 stream output, create-PR/view-PR + approval buttons. **= the demo.**
+Design of record: docs/m4-plan.md.
+
+Landed:
+
+- **conversationId ↔ Slack-thread binding** (`binding.ts`) — reversible
+  `externalChannelId = "<channel>:<threadTs>"` + a bidirectional warm-on-inbound
+  cache; the render path never does a reverse DB read, and DB-backed resolvers
+  cover the post-restart cold miss in both directions.
+- **Pure Block Kit builders** (`slack/blocks.ts`) — every `RenderCommand`
+  variant, stable action_ids untouched, long text chunked at newline boundaries,
+  App Home session-list view.
+- **Real `SlackAdapter`** (Bolt + Socket Mode) — /devspace roots a session
+  thread; mentions create/continue conversations (no double emit); thread
+  replies → `message.posted`; buttons → raw action_ids; one status message
+  edited in place; streams coalesced (≤1 chat.update/sec, full-text edits,
+  drained on stop); the render path never throws. Tested by replaying recorded
+  Slack payload fixtures through a REAL Bolt App (injected receiver + offline
+  authorize) against a fake WebClient — no live Slack (CI egress blocks it).
+- **The two read-only lookups** — `ConversationRepo.getByExternalChannelId` and
+  `handleChatEvent` returning `{ conversationId }` (+ `resolveConversationId`);
+  the only non-transport surface M4 added.
+- **In-process demo wiring** — the M3 assembly extracted into
+  `bootOrchestrator()` (one code path for orchestrator-svc and the demo);
+  chat-gateway-svc connects render⇄emit at exactly the two seam functions a
+  later HTTP split (M6) cuts. The wiring smoke drives the whole demo path
+  (/devspace → READY → turn → approve → create-pr → merged) over in-memory
+  repos + fakes — and caught a real M3 gap: the LLM key resolved by the agent
+  runner bypassed the redaction registry; the handler now registers it every
+  turn.
+- **Local live setup**: paste `infra/slack/manifest.yaml` into a free
+  workspace, set `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`, run chat-gateway-svc
+  (Socket Mode — outbound WebSocket only, no public URL).
+
+Deferred: in-chat secret entry (seeded out-of-band for the demo), modal repo
+picker, App Home session-list data source (a conversations-by-user read), the
+two-service HTTP split (M6).
 
 ## M5 — Hardening (release-blocking for real multi-tenant use)
 

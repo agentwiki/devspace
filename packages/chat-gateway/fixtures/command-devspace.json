@@ -1,0 +1,15 @@
+{
+  "token": "verification-token",
+  "team_id": "T0001",
+  "team_domain": "acme",
+  "channel_id": "C0123ABC",
+  "channel_name": "eng",
+  "user_id": "U111",
+  "user_name": "dev",
+  "command": "/devspace",
+  "text": "<https://github.com/acme/widgets> main",
+  "api_app_id": "A0001",
+  "is_enterprise_install": "false",
+  "response_url": "https://hooks.slack.com/commands/T0001/1234/abcd",
+  "trigger_id": "13345224609.738474920.8088930838d88f008e0"
+}

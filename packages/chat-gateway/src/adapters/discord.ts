@@ -1,14 +1,20 @@
 /**
- * Discord adapter (first target). M0 skeleton: implements the ChatAdapter /
- * ChatRenderer surface with typed no-ops. The M4 implementation will use
+ * Discord adapter (additional surface). M0 skeleton: implements the ChatAdapter /
+ * ChatRenderer surface with typed no-ops. The M6 implementation will use
  * discord.js (gateway client + interaction/button handlers) and translate:
  *   - slash command / new thread     -> conversation.created
  *   - message in thread              -> message.posted
  *   - button click                   -> action.invoked
  * and render post_message / update_status / post_actions / stream_append.
  */
-import type { ChatEvent, ChatPlatform, RenderCommand } from '@devspace/contracts';
-import type { ChatAdapter, ChatRenderer, MessageRef, StreamHandle } from '../index.js';
+import type { ChatPlatform, RenderCommand } from '@devspace/contracts';
+import type {
+  ChatAdapter,
+  ChatRenderer,
+  EmitChatEvent,
+  MessageRef,
+  StreamHandle,
+} from '../index.js';
 
 export interface DiscordConfig {
   token: string;
@@ -20,10 +26,10 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
 
   constructor(private readonly config: DiscordConfig) {}
 
-  async start(_emit: (event: ChatEvent) => Promise<void>): Promise<void> {
+  async start(_emit: EmitChatEvent): Promise<void> {
     void this.config;
-    // M4: new Client({intents}).login(this.config.token); wire event handlers.
-    throw new Error('DiscordAdapter.start not implemented yet (lands in M4)');
+    // M6: new Client({intents}).login(this.config.token); wire event handlers.
+    throw new Error('DiscordAdapter.start not implemented yet (lands in M6)');
   }
 
   async stop(): Promise<void> {

@@ -50,6 +50,25 @@ importers:
       '@devspace/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@devspace/orchestrator':
+        specifier: workspace:*
+        version: link:../../packages/orchestrator
+      pg:
+        specifier: ^8.13.1
+        version: 8.22.0
+    devDependencies:
+      '@devspace/agent-runner':
+        specifier: workspace:*
+        version: link:../../packages/agent-runner
+      '@devspace/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@devspace/sandbox-core':
+        specifier: workspace:*
+        version: link:../../packages/sandbox-core
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
 
   apps/orchestrator-svc:
     dependencies:
@@ -105,10 +124,10 @@ importers:
       '@devspace/contracts':
         specifier: workspace:*
         version: link:../contracts
-    devDependencies:
       '@slack/bolt':
         specifier: ^4.0.0
         version: 4.7.3(@types/express@5.0.6)
+    devDependencies:
       discord.js:
         specifier: ^14.16.3
         version: 14.26.4

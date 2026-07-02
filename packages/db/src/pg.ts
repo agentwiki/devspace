@@ -110,6 +110,18 @@ export function createPostgresRepositories(pool: Pool): Repositories {
         const [row] = await db.select().from(conversations).where(eq(conversations.id, id));
         return row ? mapConversation(row) : null;
       },
+      async getByExternalChannelId(platform, externalChannelId) {
+        const [row] = await db
+          .select()
+          .from(conversations)
+          .where(
+            and(
+              eq(conversations.platform, platform),
+              eq(conversations.externalChannelId, externalChannelId),
+            ),
+          );
+        return row ? mapConversation(row) : null;
+      },
     },
 
     workUnits: {

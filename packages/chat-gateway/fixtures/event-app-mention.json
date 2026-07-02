@@ -1,0 +1,17 @@
+{
+  "token": "verification-token",
+  "team_id": "T0001",
+  "api_app_id": "A0001",
+  "type": "event_callback",
+  "event_id": "Ev0001MENTION",
+  "event_time": 1712345680,
+  "authorizations": [{ "team_id": "T0001", "user_id": "UBOT", "is_bot": true }],
+  "event": {
+    "type": "app_mention",
+    "user": "U111",
+    "text": "<@UBOT> acme/widgets",
+    "ts": "1712345680.000400",
+    "channel": "C0123ABC",
+    "event_ts": "1712345680.000400"
+  }
+}

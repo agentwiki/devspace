@@ -33,5 +33,7 @@ export interface ChatRenderer {
   openStream(conversationId: string): Promise<StreamHandle>;
 }
 
+export * from './binding.js';
+export * from './status.js';
 export * from './adapters/slack.js';
 export * from './adapters/discord.js';

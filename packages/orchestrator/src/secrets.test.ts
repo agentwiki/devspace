@@ -101,4 +101,37 @@ describe('SecretRegistry / redactSecrets', () => {
     reg.register('abcdef-ghijkl');
     expect(redactSecrets('x abcdef-ghijkl y', reg)).toBe('x «redacted» y');
   });
+
+  it('scrubs well-known token shapes even when never registered (M5)', () => {
+    const reg = new SecretRegistry(); // empty — nothing was resolved
+    const cases = [
+      'pat ghp_ABCDEFGHIJKLMNOPQRST123456 end',
+      'fine github_pat_11ABCDEFG0123456789_abcdefghij end',
+      'oauth gho_ABCDEFGHIJKLMNOPQRST123456 end',
+      'app ghs_ABCDEFGHIJKLMNOPQRST123456 end',
+      'llm sk-proj-ABCDEFGHIJKLMNOPQRSTUV end',
+      'slack xoxb-1234567890-abcdefghij end',
+    ];
+    for (const text of cases) {
+      const out = redactSecrets(text, reg);
+      expect(out).toContain('«redacted»');
+      expect(out).not.toMatch(/ghp_|github_pat_|gho_|ghs_|sk-|xoxb-/);
+    }
+  });
+
+  it('leaves ordinary prose and near-miss shapes untouched', () => {
+    const reg = new SecretRegistry();
+    const text = 'ghp_short sk-1 xoxq-nope github_pat is a prefix, task-42 fine';
+    expect(redactSecrets(text, reg)).toBe(text);
+  });
+
+  it('applies registered values before patterns so whole secrets win', () => {
+    const reg = new SecretRegistry();
+    // A registered secret that EMBEDS a token-shaped substring is scrubbed
+    // whole, not partially by the pattern pass.
+    reg.register('prefix-ghp_ABCDEFGHIJKLMNOPQRST123456-suffix');
+    expect(redactSecrets('x prefix-ghp_ABCDEFGHIJKLMNOPQRST123456-suffix y', reg)).toBe(
+      'x «redacted» y',
+    );
+  });
 });

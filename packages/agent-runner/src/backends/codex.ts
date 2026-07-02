@@ -20,6 +20,13 @@ export interface AgentBackend {
    * shipped in the mounted agent-runtime volume so the base image needs no Node.
    */
   launchCommand(opts: LaunchOptions): ExecRequest;
+  /**
+   * In-container command that terminates this backend's process tree (M5
+   * auto-abort). Run via the ordinary exec provider — NEVER `ExecStream.kill()`,
+   * which only signals the local `docker exec` client (the roadmap caveat).
+   * Must be a no-op when the agent is already dead.
+   */
+  killCommand(): ExecRequest;
   /** Map a raw ACP session update (shape varies by agent) into a normalized event. */
   mapEvent(update: unknown): AgentEvent | null;
 }
@@ -47,6 +54,14 @@ export const codexBackend: AgentBackend = {
       cmd: [`${AGENT_RUNTIME_PATH}/bin/node`, `${AGENT_RUNTIME_PATH}/codex-acp`],
       cwd: workspacePath,
       env,
+      tty: false,
+    };
+  },
+  killCommand() {
+    // Matches the launch argv (`<runtime>/codex-acp`); SIGTERM the whole match
+    // set, and `|| true` so an already-dead agent exits 0.
+    return {
+      cmd: ['sh', '-c', `pkill -TERM -f '${AGENT_RUNTIME_PATH}/codex-acp' || true`],
       tty: false,
     };
   },

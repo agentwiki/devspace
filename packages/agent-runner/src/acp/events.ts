@@ -61,13 +61,23 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-/** Best-effort command line for an `execute` tool call, for the command_run event. */
-function commandOf(tc: ToolCall | ToolCallUpdate): string {
+/** Best-effort command line for an `execute` tool call (also used by the
+ * guardrail gate to auto-deny policy-blocked commands before parking). */
+export function commandOf(tc: ToolCall | ToolCallUpdate): string {
   const raw = asRecord(tc.rawInput);
   const command = raw.command ?? raw.cmd;
   if (typeof command === 'string') return command;
   if (Array.isArray(command)) return command.map(String).join(' ');
   return tc.title ?? '';
+}
+
+/** Best-effort target path for a file-write tool call, or null if unknowable. */
+export function pathOf(tc: ToolCall | ToolCallUpdate): string | null {
+  const location = tc.locations?.[0]?.path;
+  if (typeof location === 'string' && location) return location;
+  const raw = asRecord(tc.rawInput);
+  const path = raw.path ?? raw.file ?? raw.filename;
+  return typeof path === 'string' && path ? path : null;
 }
 
 function mapToolCall(tc: ToolCall): AgentEvent | null {

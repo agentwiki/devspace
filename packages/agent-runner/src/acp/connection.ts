@@ -19,6 +19,7 @@ import { ClientSideConnection, PROTOCOL_VERSION, ndJsonStream } from '@agentclie
 import type { AgentEvent, PermissionDecision } from '@devspace/contracts';
 import type { ExecStream } from '@devspace/sandbox-core';
 import type { AgentBackend } from '../backends/codex.js';
+import type { GuardrailPolicy } from '../guardrails.js';
 import { AsyncQueue } from './async-queue.js';
 import { DevspaceAcpClient } from './client.js';
 import { stopReasonToTurnEnd } from './events.js';
@@ -29,6 +30,8 @@ export interface ConnectOptions {
   workspacePath: string;
   /** Sink for agent stderr / diagnostics. */
   onLog?: (line: string) => void;
+  /** Guardrail policy for the permission gate's auto-deny (M5). */
+  policy?: GuardrailPolicy;
 }
 
 export interface AcpSession {
@@ -38,6 +41,12 @@ export interface AcpSession {
   runTurn(prompt: string): AsyncIterable<AgentEvent>;
   /** Resolve a parked permission request; false if the id is unknown. */
   decide(decision: PermissionDecision): boolean;
+  /**
+   * Abort the in-flight turn: cancel parked permissions + ACP `session/cancel`.
+   * Protocol-level only — the caller (runner) pairs it with the in-container
+   * kill; a subsequent `runTurn` on an aborted session fails cleanly.
+   */
+  abort(): Promise<void>;
   /** Cancel any in-flight turn and tear down the session. */
   close(): Promise<void>;
 }
@@ -53,7 +62,7 @@ export async function connectAgent(
   opts: ConnectOptions,
 ): Promise<AcpSession> {
   const onLog = opts.onLog ?? (() => {});
-  const client = new DevspaceAcpClient(backend, onLog);
+  const client = new DevspaceAcpClient(backend, onLog, opts.policy);
   const bytes = execStreamToAcp(stream, onLog);
   const conn = new ClientSideConnection(() => client, ndJsonStream(bytes.writable, bytes.readable));
 
@@ -90,13 +99,18 @@ export async function connectAgent(
     }
   }
 
+  async function abort(): Promise<void> {
+    client.cancelAllPending();
+    await conn.cancel({ sessionId }).catch(() => {});
+  }
+
   return {
     sessionId,
     runTurn,
     decide: (decision) => client.decide(decision),
+    abort,
     async close() {
-      client.cancelAllPending();
-      await conn.cancel({ sessionId }).catch(() => {});
+      await abort();
       stream.closeStdin();
     },
   };

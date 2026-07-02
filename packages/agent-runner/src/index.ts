@@ -8,6 +8,7 @@
  * chat gateway — chat capabilities reach the agent as orchestrator-mediated tools.
  */
 export * from './guardrails.js';
+export * from './budget.js';
 export * from './backends/codex.js';
 export * from './acp/connection.js';
 export * from './acp/events.js';
@@ -28,5 +29,11 @@ export interface AgentRunner {
   createSession(req: CreateAgentSessionRequest): Promise<{ agentSessionId: string }>;
   runTurn(agentSessionId: string, req: TurnRequest): AsyncIterable<AgentEvent>;
   decidePermission(agentSessionId: string, decision: PermissionDecision): Promise<void>;
+  /**
+   * Hard-stop an in-flight turn (M5): protocol cancel + in-container kill.
+   * Optional — the default runner self-aborts on budget breaches, so callers
+   * only need this for an explicit user-driven stop.
+   */
+  abortTurn?(agentSessionId: string): Promise<void>;
   closeSession(agentSessionId: string): Promise<void>;
 }

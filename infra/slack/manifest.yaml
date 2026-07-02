@@ -1,0 +1,58 @@
+# Slack app manifest for the devspace chat gateway (M4).
+#
+# Create the app in one paste — no click-through configuration:
+#   1. https://api.slack.com/apps → "Create New App" → "From a manifest"
+#   2. Pick the (free) target workspace, paste this file, review, create.
+#   3. "Install to Workspace" → copy the Bot User OAuth Token (xoxb-…)
+#      → SLACK_BOT_TOKEN.
+#   4. "Basic Information" → "App-Level Tokens" → generate a token with the
+#      `connections:write` scope (xapp-…) → SLACK_APP_TOKEN.
+#
+# Socket Mode is enabled, so the gateway opens an OUTBOUND WebSocket to
+# Slack — no public URL, no ngrok, no inbound webhook. This is what makes
+# local/on-prem live testing work. Note the outbound egress requirement:
+# slack.com + wss-primary.slack.com must be reachable (see docs/m4-plan.md,
+# "Risks / notes" — restricted CI/remote environments block this, which is
+# why live Slack is a local-only, self-skipping test).
+display_information:
+  name: devspace
+  description: On-prem coding agent — drive a work unit from a Slack thread.
+  background_color: '#1a1d21'
+
+features:
+  app_home:
+    home_tab_enabled: true # session list (views.publish) — the "sidebar"
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: devspace
+    always_online: true
+  slash_commands:
+    - command: /devspace
+      description: Start a work unit (optionally on a repository)
+      usage_hint: '[repoUrl] [ref]'
+      should_escape: false
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write # post_message / update_status / post_actions / streams
+      - commands # /devspace
+      - app_mentions:read # new-thread-by-mention entry point
+      - channels:history # message.posted in public-channel threads
+      - groups:history # … in private channels
+      - im:history # … in DMs
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - app_home_opened
+      - message.channels
+      - message.groups
+      - message.im
+  interactivity:
+    is_enabled: true # Block Kit buttons → action.invoked
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

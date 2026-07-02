@@ -77,10 +77,17 @@ orchestrator.handleChatEvent(event))`. This is the DAG the architecture already
    network split adds nothing to the demo and is deferred. The seam is exactly
    these two function boundaries, so the split stays mechanical.
 3. **The Slack Web API + Socket-Mode event source are injected behind thin
-   interfaces.** Every Block Kit payload is produced by a **pure** builder
-   (`RenderCommand → Slack blocks`); the adapter/renderer are driven in tests by a
-   fake client and a synthetic event source — no live Slack, mirroring the M2 ACP
-   loopback and the M1 self-skipping Docker itests.
+   interfaces; inbound tests replay recorded payloads.** Every Block Kit payload
+   is produced by a **pure** builder (`RenderCommand → Slack blocks`); the
+   adapter/renderer are driven in tests by a fake `WebClient` and an injected
+   Bolt receiver — no live Slack, mirroring the M2 ACP loopback and the M1
+   self-skipping Docker itests. Inbound fixtures are **recorded real Slack
+   payloads** (slash command, thread message, button click, `app_home_opened`
+   JSON) checked in as golden files and pushed through the injected receiver —
+   higher fidelity than hand-written synthetic events, still fully
+   deterministic. This is forced by the environment, not just preferred: CI and
+   the remote dev container have **no egress to slack.com** (the proxy denies
+   CONNECT), so live Slack cannot run there even optionally.
 4. **Status is edited in place, streams are coalesced.** Each conversation has one
    lazily-created "status" message; `update_status` `chat.update`s it rather than
    posting a new line per FSM milestone. `stream_append` buffers chunks and flushes
@@ -163,7 +170,8 @@ socketMode: true })` (client + receiver injected in tests) and wires:
     else drop with a logged warning (never throw on the render path).
 - `openStream(conversationId)` returns a `StreamHandle` backed by the coalescer.
 - `stop()` → `app.stop()` and flush pending coalesced updates.
-- Tests: a synthetic Socket-Mode event → the expected `ChatEvent` (incl. repo
+- Tests: recorded Slack payload fixtures (`packages/chat-gateway/fixtures/`)
+  replayed through the injected receiver → the expected `ChatEvent` (incl. repo
   parse + empty choice); a `RenderCommand` sequence → the expected fake-client
   calls (status created once then updated; actions posted; stream coalesced);
   unbound-thread and self-message events are ignored.
@@ -185,8 +193,15 @@ socketMode: true })` (client + receiver injected in tests) and wires:
   `Orchestrator` (reusing the M3 `orchestrator-svc` assembly: Pg repos, event bus,
   secret store, git wrapper, reconciler) **and** the `SlackAdapter`, then connects
   render⇄emit in-process (Decision 2). Slack tokens from `SLACK_BOT_TOKEN` /
-  `SLACK_APP_TOKEN`; existing orchestrator env unchanged. `/health` retained;
-  migrations still applied on boot before Socket Mode connects.
+  `SLACK_APP_TOKEN` (`.env.example`); existing orchestrator env unchanged.
+  `/health` retained; migrations still applied on boot before Socket Mode
+  connects.
+- **Local live setup is one paste:** `infra/slack/manifest.yaml` is a committed
+  Slack **app manifest** (scopes, `/devspace` slash command, Socket Mode,
+  interactivity, App Home, event subscriptions) with the token-generation steps
+  inline. Create-from-manifest in a free workspace → two tokens → run the demo
+  service. Socket Mode means an outbound WebSocket only — no public URL/ngrok,
+  which is exactly the on-prem constraint.
 - Decision needed at implementation time — **reuse vs extract** the
   `orchestrator-svc` boot: prefer extracting the M3 assembly into an exported
   `bootOrchestrator()` so both the standalone orchestrator-svc and the demo wiring
@@ -221,8 +236,12 @@ redacted by the M3 `render.ts` before it reaches the transport.
 - **Postgres integration (`pg.itest.ts`):** extend for
   `getByExternalChannelId`; self-skips without `DATABASE_URL`, must-not-skip in
   CI (M3 discipline).
-- **Live Slack (optional itest):** self-skips without `SLACK_BOT_TOKEN` /
-  `SLACK_APP_TOKEN`; drives a real workspace when configured. Not required in CI.
+- **Live Slack (optional itest, local-only):** self-skips without
+  `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`; drives a real workspace (created from
+  `infra/slack/manifest.yaml`) when configured. **Cannot run in CI or the remote
+  dev container** — their egress proxy denies slack.com — so unlike the Docker
+  itests there is no must-not-skip CI assertion for this suite; the recorded
+  fixtures are the CI-grade coverage.
 
 ## Risks / notes
 
@@ -237,6 +256,13 @@ redacted by the M3 `render.ts` before it reaches the transport.
   is produced by M3's `render.ts` (100% redacted) before the transport sees it.
   The Block Kit builders are pure formatters and must not re-introduce raw text
   from any other source.
+- **Egress is a deployment prerequisite, not a code concern.** Verified: the
+  remote dev container's proxy rejects CONNECT to slack.com (403), so live Slack
+  is structurally impossible in CI/remote — hence recorded fixtures as the
+  CI-grade inbound coverage. Deploying the gateway inside a restricted network
+  requires the M5 egress allowlist to include `slack.com` and
+  `wss-primary.slack.com` (Socket Mode's outbound WebSocket); note this in the
+  M5 allowlist work.
 - **No abort path** (unchanged from M3): a `stop`/cancel button is not M4. Turn
   budgets + in-container termination are M5 (the `ExecStream.kill()` caveat in the
   roadmap still applies).

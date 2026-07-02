@@ -23,6 +23,22 @@ describe('in-memory repositories', () => {
     expect(provisioning.repoUrl).toBe('https://github.com/acme/widgets');
   });
 
+  it('resolves a conversation by (platform, externalChannelId) — gateway cold miss (M4)', async () => {
+    const repos = createInMemoryRepositories();
+    const conv = await repos.conversations.create({
+      platform: 'slack',
+      externalChannelId: 'C1:1712345678.000200',
+      userId: 'u1',
+    });
+    await expect(
+      repos.conversations.getByExternalChannelId('slack', 'C1:1712345678.000200'),
+    ).resolves.toMatchObject({ id: conv.id });
+    // Same key on another platform is a different conversation namespace.
+    await expect(
+      repos.conversations.getByExternalChannelId('discord', 'C1:1712345678.000200'),
+    ).resolves.toBeNull();
+  });
+
   it('rejects an illegal transition', async () => {
     const repos = createInMemoryRepositories();
     const conv = await repos.conversations.create({

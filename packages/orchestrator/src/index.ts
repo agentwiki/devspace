@@ -146,7 +146,13 @@ export class Orchestrator {
     }
   }
 
-  async handleChatEvent(event: ChatEvent): Promise<void> {
+  /**
+   * Route a chat event. `conversation.created` returns the freshly created
+   * `conversationId` so the gateway can bind it to its platform thread (M4,
+   * Decision 1) — a return value exposing already-created state, not new
+   * control logic. Other events return void.
+   */
+  async handleChatEvent(event: ChatEvent): Promise<{ conversationId: string } | void> {
     switch (event.type) {
       case 'conversation.created':
         return this.onConversationCreated(event);
@@ -157,13 +163,22 @@ export class Orchestrator {
     }
   }
 
+  /** Gateway cold-miss resolution (post-restart): platform thread → conversation. */
+  async resolveConversationId(platform: string, externalChannelId: string): Promise<string | null> {
+    const conv = await this.deps.repos.conversations.getByExternalChannelId(
+      platform,
+      externalChannelId,
+    );
+    return conv?.id ?? null;
+  }
+
   /* ---------------------------------------------------------------------- */
   /* conversation.created                                                    */
   /* ---------------------------------------------------------------------- */
 
   private async onConversationCreated(
     event: Extract<ChatEvent, { type: 'conversation.created' }>,
-  ): Promise<void> {
+  ): Promise<{ conversationId: string }> {
     const conv = await this.deps.repos.conversations.create({
       platform: event.platform,
       externalChannelId: event.externalChannelId,
@@ -171,11 +186,12 @@ export class Orchestrator {
     });
     const wu = await this.deps.repos.workUnits.create({ conversationId: conv.id });
     const registry = this.registryFor(conv.id);
+    const created = { conversationId: conv.id };
 
     const choice = event.repoChoice;
     if (!choice || choice.empty || !choice.repoUrl) {
       await this.emit(statusCommand(conv.id, 'CREATED', 'Conversation ready.', registry));
-      return;
+      return created;
     }
 
     const branch = `devspace/${wu.id}`;
@@ -211,6 +227,7 @@ export class Orchestrator {
     } catch (err) {
       await this.failWorkUnit(wu.id, conv.id, err, registry);
     }
+    return created;
   }
 
   /* ---------------------------------------------------------------------- */

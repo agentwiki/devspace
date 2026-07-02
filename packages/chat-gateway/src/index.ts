@@ -35,5 +35,6 @@ export interface ChatRenderer {
 
 export * from './binding.js';
 export * from './status.js';
+export * from './slack/blocks.js';
 export * from './adapters/slack.js';
 export * from './adapters/discord.js';

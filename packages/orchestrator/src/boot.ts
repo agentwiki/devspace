@@ -19,7 +19,13 @@ import {
   type EventBus,
   type Repositories,
 } from '@devspace/db';
-import { DevcontainerSandboxCore } from '@devspace/sandbox-core';
+import {
+  DevcontainerSandboxCore,
+  assertRuntimeAvailable,
+  hardeningFromEnv,
+  nodeCommandRunner,
+  type SandboxHardening,
+} from '@devspace/sandbox-core';
 import { DefaultAgentRunner } from '@devspace/agent-runner';
 import { Orchestrator } from './index.js';
 import { parseKeyring, SecretStore } from './secrets.js';
@@ -62,6 +68,12 @@ export interface OrchestratorBootConfig {
   workdirFor?: (workUnitId: string) => string;
   revokeToken?: (token: string) => Promise<void>;
   baseBranch?: string;
+  /**
+   * Sandbox isolation policy (m5-plan Decision 1). Defaults to
+   * `hardeningFromEnv(process.env)` so every boot path picks up the
+   * SANDBOX_* / EGRESS_* vars; demo mode when nothing is configured.
+   */
+  sandboxHardening?: SandboxHardening;
 }
 
 export interface BootedOrchestrator {
@@ -85,7 +97,13 @@ export async function bootOrchestrator(
   const repos = createPostgresRepositories(pool);
   const keyring = parseKeyring(config.envelopeKey, config.retiredKeys ?? []);
   const secrets = new SecretStore(repos.secrets, keyring);
-  const sandbox = new DevcontainerSandboxCore();
+  // Hardening is boot-time host policy; a configured runtime class (gVisor/
+  // Kata) must exist on the daemon or we refuse to serve at all.
+  const hardening = config.sandboxHardening ?? hardeningFromEnv(process.env);
+  if (hardening?.runtime) {
+    await assertRuntimeAvailable(nodeCommandRunner, hardening.runtime);
+  }
+  const sandbox = new DevcontainerSandboxCore({ hardening });
   const agents = new DefaultAgentRunner({
     exec: sandbox,
     // llmKeyRef is a secret record id resolved through the envelope store.

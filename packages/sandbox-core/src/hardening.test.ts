@@ -6,11 +6,14 @@ import {
   DEMO_HARDENING,
   dockerInfoRuntimesArgs,
   dockerNetworkCreateArgs,
+  dockerNetworkGatewayArgs,
   dockerNetworkRmArgs,
   HARDENED_DEFAULTS,
+  hardeningFromEnv,
   hardeningRunArgs,
   ownsNetworkLifecycle,
   parseDockerRuntimes,
+  parseNetworkGateway,
   perEnvNetworkName,
   proxyContainerEnv,
   resolveNetworkName,
@@ -96,6 +99,56 @@ describe('proxyContainerEnv', () => {
     expect(env.https_proxy).toBe('http://172.20.0.1:3128');
     expect(env.NO_PROXY).toContain('localhost');
     expect(env.no_proxy).toContain('127.0.0.1');
+  });
+});
+
+describe('network gateway resolution', () => {
+  it('builds the inspect argv and parses v4/v6/CIDR gateways', () => {
+    expect(dockerNetworkGatewayArgs('n1')).toEqual([
+      'network',
+      'inspect',
+      '--format',
+      '{{(index .IPAM.Config 0).Gateway}}',
+      'n1',
+    ]);
+    expect(parseNetworkGateway('172.20.0.1\n')).toBe('172.20.0.1');
+    expect(parseNetworkGateway('172.20.0.1/16')).toBe('172.20.0.1');
+    expect(parseNetworkGateway('fd00::1')).toBe('fd00::1');
+    expect(() => parseNetworkGateway('')).toThrow(/could not parse/);
+    expect(() => parseNetworkGateway('<no value>')).toThrow(/could not parse/);
+  });
+});
+
+describe('hardeningFromEnv', () => {
+  it('returns undefined when nothing is configured (demo mode)', () => {
+    expect(hardeningFromEnv({})).toBeUndefined();
+    expect(hardeningFromEnv({ UNRELATED: 'x' })).toBeUndefined();
+  });
+
+  it('starts from HARDENED_DEFAULTS on SANDBOX_HARDENED=1', () => {
+    const h = hardeningFromEnv({ SANDBOX_HARDENED: '1' })!;
+    expect(h.runtime).toBe('runsc');
+    expect(h.network).toBe('per-env');
+    expect(h.noNewPrivileges).toBe(true);
+    expect(h.enforceDiskQuota).toBe(false);
+  });
+
+  it('lets individual vars override, including unsetting the runtime', () => {
+    const h = hardeningFromEnv({
+      SANDBOX_HARDENED: 'true',
+      SANDBOX_RUNTIME: '', // no gVisor on this host
+      SANDBOX_DISK_QUOTA: '1',
+      EGRESS_PROXY_PORT: '3128',
+    })!;
+    expect(h.runtime).toBeUndefined();
+    expect(h.enforceDiskQuota).toBe(true);
+    expect(h.egressProxyPort).toBe(3128);
+  });
+
+  it('supports piecemeal config without the hardened base', () => {
+    const h = hardeningFromEnv({ SANDBOX_NETWORK: 'shared-net', EGRESS_PROXY_URL: 'http://gw:1' })!;
+    expect(h).toMatchObject({ network: 'shared-net', egressProxyUrl: 'http://gw:1' });
+    expect(h.runtime).toBeUndefined();
   });
 });
 

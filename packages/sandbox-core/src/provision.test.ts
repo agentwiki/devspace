@@ -222,6 +222,9 @@ describe('DevcontainerProvisioner with a per-env network profile', () => {
             ? { code: 1, stdout: '', stderr: 'boom' }
             : { code: 0, stdout: '{"outcome":"success","containerId":"c1"}', stderr: '' };
         }
+        if (command === 'docker' && args[0] === 'network' && args[1] === 'inspect') {
+          return { code: 0, stdout: '172.20.0.1\n', stderr: '' };
+        }
         return { code: 0, stdout: '', stderr: '' };
       },
       stream() {
@@ -282,6 +285,23 @@ describe('DevcontainerProvisioner with a per-env network profile', () => {
       calls.some((c) => c.command === 'docker' && c.args[0] === 'network' && c.args[1] === 'rm'),
     ).toBe(true);
     expect(await readdir(workspaceRoot)).toEqual([]);
+  });
+
+  it("resolves the per-env network's own gateway for the proxy env", async () => {
+    // An --internal network reaches the host only at ITS OWN bridge gateway,
+    // so a static proxy URL cannot work — the provisioner must resolve it.
+    const { runner, calls } = fakeRunner({});
+    const provisioner = new DevcontainerProvisioner(runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+      hardening: { network: 'per-env', egressProxyPort: 3128 },
+    });
+
+    await provisioner.provision('e4', req);
+    const upArgs = calls.find((c) => c.command === 'devcontainer')!.args;
+    const configPath = upArgs[upArgs.indexOf('--config') + 1]!;
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as DevcontainerConfig;
+    expect(config.containerEnv?.HTTP_PROXY).toBe('http://172.20.0.1:3128');
+    expect(config.containerEnv?.HTTPS_PROXY).toBe('http://172.20.0.1:3128');
   });
 
   it('neither creates nor reports a network for a named-network profile', async () => {

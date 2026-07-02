@@ -42,12 +42,20 @@ export interface SandboxHardening {
   /** Opt-in `--storage-opt size=<diskMB>m` (driver-dependent). */
   enforceDiskQuota?: boolean;
   /**
-   * Egress allowlist proxy URL (http://<bridge-gateway>:<port>). When set it
-   * is injected as HTTP(S)_PROXY containerEnv so every in-env process
-   * inherits it. Enforcement does NOT rely on processes honoring it — the
-   * internal network has no other route.
+   * Static egress allowlist proxy URL, injected as HTTP(S)_PROXY containerEnv
+   * so every in-env process inherits it. Use with a fixed/named network whose
+   * gateway address is known up front. Enforcement does NOT rely on processes
+   * honoring it — the internal network has no other route.
    */
   egressProxyUrl?: string;
+  /**
+   * Host port of the egress proxy for `per-env` networks. An `--internal`
+   * network can only reach the host at ITS OWN bridge gateway, which differs
+   * per network — so the provisioner resolves the freshly created network's
+   * gateway and injects `http://<gateway>:<port>`. Ignored when
+   * `egressProxyUrl` is set.
+   */
+  egressProxyPort?: number;
   /** Escape hatch for deployment-specific flags; appended last. */
   extraRunArgs?: string[];
 }
@@ -116,6 +124,25 @@ export function dockerNetworkCreateArgs(name: string, opts: { internal: boolean 
 
 export const dockerNetworkRmArgs = (name: string): string[] => ['network', 'rm', name];
 
+export const dockerNetworkGatewayArgs = (name: string): string[] => [
+  'network',
+  'inspect',
+  '--format',
+  '{{(index .IPAM.Config 0).Gateway}}',
+  name,
+];
+
+/** Parse the gateway address out of `docker network inspect` output. */
+export function parseNetworkGateway(stdout: string): string {
+  const gateway = stdout.trim();
+  // v4 or v6, possibly CIDR-suffixed on some daemons — take the address part.
+  const addr = gateway.split('/')[0] ?? '';
+  if (!/^[0-9a-fA-F.:]+$/.test(addr) || addr.length === 0) {
+    throw new Error(`could not parse network gateway from: ${gateway.slice(0, 100)}`);
+  }
+  return addr;
+}
+
 /** `HTTP(S)_PROXY` containerEnv for the egress proxy (both cases — tools disagree). */
 export function proxyContainerEnv(proxyUrl: string): Record<string, string> {
   return {
@@ -145,6 +172,32 @@ export function parseDockerRuntimes(stdout: string): string[] {
 }
 
 export const dockerInfoRuntimesArgs = (): string[] => ['info', '--format', '{{json .Runtimes}}'];
+
+/**
+ * Build a hardening profile from service env (the boot-time policy source,
+ * m5-plan Decision 1). Returns undefined when nothing is configured (demo
+ * mode). `SANDBOX_HARDENED=1` starts from `HARDENED_DEFAULTS`; the individual
+ * vars then override:
+ *
+ *   SANDBOX_RUNTIME=runsc|kata-runtime|'' (empty unsets the default's runtime)
+ *   SANDBOX_NETWORK=per-env|<named network>
+ *   SANDBOX_DISK_QUOTA=1
+ *   EGRESS_PROXY_PORT=<host port>   (per-env gateway resolution)
+ *   EGRESS_PROXY_URL=<static url>   (fixed/named-network deployments)
+ */
+export function hardeningFromEnv(
+  env: Record<string, string | undefined>,
+): SandboxHardening | undefined {
+  const truthy = (v: string | undefined): boolean => v === '1' || v === 'true';
+  const h: SandboxHardening = truthy(env.SANDBOX_HARDENED) ? { ...HARDENED_DEFAULTS } : {};
+  if (env.SANDBOX_RUNTIME !== undefined) h.runtime = env.SANDBOX_RUNTIME || undefined;
+  if (env.SANDBOX_NETWORK) h.network = env.SANDBOX_NETWORK;
+  if (truthy(env.SANDBOX_DISK_QUOTA)) h.enforceDiskQuota = true;
+  if (env.EGRESS_PROXY_PORT) h.egressProxyPort = Number(env.EGRESS_PROXY_PORT);
+  if (env.EGRESS_PROXY_URL) h.egressProxyUrl = env.EGRESS_PROXY_URL;
+  const configured = Object.values(h).some((v) => v !== undefined);
+  return configured ? h : undefined;
+}
 
 /**
  * Fail fast at service boot when the configured runtime class is missing from

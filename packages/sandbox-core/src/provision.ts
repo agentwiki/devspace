@@ -24,9 +24,11 @@ import type { SandboxHardening } from './hardening.js';
 import {
   DEMO_HARDENING,
   dockerNetworkCreateArgs,
+  dockerNetworkGatewayArgs,
   dockerNetworkRmArgs,
   hardeningRunArgs,
   ownsNetworkLifecycle,
+  parseNetworkGateway,
   proxyContainerEnv,
   resolveNetworkName,
 } from './hardening.js';
@@ -245,6 +247,19 @@ export class DevcontainerProvisioner implements Provisioner {
         createdNetwork = true;
       }
 
+      // The egress proxy address: static when configured, otherwise resolved
+      // from the per-env network's OWN gateway — an `--internal` network can
+      // reach the host only on its own bridge subnet.
+      let proxyUrl = this.hardening.egressProxyUrl;
+      if (!proxyUrl && this.hardening.egressProxyPort && createdNetwork && networkName) {
+        const inspect = await runOrThrow(
+          this.runner,
+          this.docker,
+          dockerNetworkGatewayArgs(networkName),
+        );
+        proxyUrl = `http://${parseNetworkGateway(inspect.stdout)}:${this.hardening.egressProxyPort}`;
+      }
+
       const config = mergeDevcontainerConfig({
         override: req.devcontainerOverride,
         baseImage: req.baseImage,
@@ -252,9 +267,7 @@ export class DevcontainerProvisioner implements Provisioner {
         mounts: req.mounts,
         hardening: this.hardening,
         networkName,
-        containerEnv: this.hardening.egressProxyUrl
-          ? proxyContainerEnv(this.hardening.egressProxyUrl)
-          : undefined,
+        containerEnv: proxyUrl ? proxyContainerEnv(proxyUrl) : undefined,
       });
 
       // Write our synthesized config to a sibling path and point `--config` at

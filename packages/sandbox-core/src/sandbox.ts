@@ -21,6 +21,7 @@ import { nodeCommandRunner } from './cli.js';
 import type { CommandRunner } from './cli.js';
 import { captureExec } from './exec.js';
 import type { ExecStream } from './exec.js';
+import type { SandboxHardening } from './hardening.js';
 import { DevcontainerProvisioner } from './provision.js';
 import type { Provisioner } from './provision.js';
 import { DockerRuntime } from './runtime.js';
@@ -40,6 +41,8 @@ export class SandboxError extends Error {
 interface EnvRecord {
   env: Environment;
   containerId?: string;
+  /** Per-env network created at provision time (removed on teardown). */
+  networkName?: string;
   /** Resolved env-target secrets, injected into every exec (never logged). */
   secretEnv: Record<string, string>;
 }
@@ -65,10 +68,13 @@ export class DevcontainerSandboxCore implements SandboxCore {
   private readonly provisioner: Provisioner;
   private readonly envs = new Map<string, EnvRecord>();
 
-  constructor(deps?: Partial<SandboxCoreDeps> & { runner?: CommandRunner }) {
+  constructor(
+    deps?: Partial<SandboxCoreDeps> & { runner?: CommandRunner; hardening?: SandboxHardening },
+  ) {
     const runner = deps?.runner ?? nodeCommandRunner;
     this.runtime = deps?.runtime ?? new DockerRuntime(runner);
-    this.provisioner = deps?.provisioner ?? new DevcontainerProvisioner(runner);
+    this.provisioner =
+      deps?.provisioner ?? new DevcontainerProvisioner(runner, { hardening: deps?.hardening });
   }
 
   async createEnvironment(input: CreateEnvironmentRequest): Promise<Environment> {
@@ -83,8 +89,9 @@ export class DevcontainerSandboxCore implements SandboxCore {
     this.envs.set(envId, record);
 
     try {
-      const { containerId } = await this.provisioner.provision(envId, req);
+      const { containerId, networkName } = await this.provisioner.provision(envId, req);
       record.containerId = containerId;
+      record.networkName = networkName;
       record.env = { ...record.env, status: 'ready', containerId };
       // File-target secrets land inside the container only after it is ready,
       // so nothing sensitive ever touches the workspace on disk.
@@ -109,6 +116,12 @@ export class DevcontainerSandboxCore implements SandboxCore {
     record.env = { ...record.env, status: 'stopping' };
     if (record.containerId) {
       await this.runtime.destroy(record.containerId);
+    }
+    // The per-env network outlives its only container by a moment; removal is
+    // best-effort (a racing daemon cleanup may have taken it already).
+    if (record.networkName) {
+      await this.runtime.removeNetwork?.(record.networkName).catch(() => {});
+      record.networkName = undefined;
     }
     record.env = { ...record.env, status: 'stopped', containerId: undefined };
   }

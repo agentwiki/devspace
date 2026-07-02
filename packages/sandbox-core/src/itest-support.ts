@@ -70,6 +70,49 @@ export function forceRemoveByEnvLabel(envId: string): void {
   }
 }
 
+/** Read a container's security/network hardening state via `docker inspect`. */
+export function inspectHardening(containerId: string): {
+  securityOpt: string[];
+  networkMode: string;
+} {
+  const out = execFileSync(
+    'docker',
+    [
+      'inspect',
+      '--format',
+      '{{json .HostConfig.SecurityOpt}}\t{{.HostConfig.NetworkMode}}',
+      containerId,
+    ],
+    { encoding: 'utf8' },
+  ).trim();
+  const [securityOptJson, networkMode] = out.split('\t');
+  return {
+    securityOpt: (JSON.parse(securityOptJson ?? 'null') as string[] | null) ?? [],
+    networkMode: networkMode ?? '',
+  };
+}
+
+/** True when the named docker network exists and is `--internal`. */
+export function networkIsInternal(name: string): boolean {
+  try {
+    const out = execFileSync('docker', ['network', 'inspect', '--format', '{{.Internal}}', name], {
+      encoding: 'utf8',
+    }).trim();
+    return out === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/** Remove a docker network left behind by a failed test (best-effort). */
+export function forceRemoveNetwork(name: string): void {
+  try {
+    execFileSync('docker', ['network', 'rm', name], { stdio: 'ignore' });
+  } catch {
+    /* best-effort cleanup */
+  }
+}
+
 /** Read a container's enforced HostConfig limits via `docker inspect`. */
 export function inspectHostLimits(containerId: string): {
   memory: number;

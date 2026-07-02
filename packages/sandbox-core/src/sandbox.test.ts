@@ -107,23 +107,27 @@ function scriptStream(
   };
 }
 
-function makeCore(container = new FakeContainer()) {
+function makeCore(container = new FakeContainer(), provisionResult: Partial<ProvisionResult> = {}) {
   const destroy = vi.fn(async () => {});
+  const removeNetwork = vi.fn(async () => {});
   const runtime: ContainerRuntime = {
     execStream: (_id, req) => container.exec(req),
     destroy,
     exists: async () => true,
+    removeNetwork,
   };
   const provisioner: Provisioner = {
     provision: vi.fn(async (): Promise<ProvisionResult> => ({
       containerId: 'cont-1',
       workspaceFolder: '/ws',
+      ...provisionResult,
     })),
   };
   return {
     core: new DevcontainerSandboxCore({ runtime, provisioner }),
     container,
     destroy,
+    removeNetwork,
     provisioner,
   };
 }
@@ -203,10 +207,23 @@ describe('DevcontainerSandboxCore lifecycle', () => {
   });
 
   it('destroys the container and transitions to stopped', async () => {
-    const { core, destroy } = makeCore();
+    const { core, destroy, removeNetwork } = makeCore();
     const env = await core.createEnvironment({});
     await core.destroyEnvironment(env.envId);
     expect(destroy).toHaveBeenCalledWith('cont-1');
+    expect(removeNetwork).not.toHaveBeenCalled(); // no per-env network provisioned
+    expect((await core.getEnvironment(env.envId))?.status).toBe('stopped');
+  });
+
+  it('removes a provision-time per-env network after the container (best-effort)', async () => {
+    const { core, destroy, removeNetwork } = makeCore(new FakeContainer(), {
+      networkName: 'devspace-net-e1',
+    });
+    const env = await core.createEnvironment({});
+    removeNetwork.mockRejectedValueOnce(new Error('already gone'));
+    await core.destroyEnvironment(env.envId); // rejection swallowed
+    expect(destroy).toHaveBeenCalled();
+    expect(removeNetwork).toHaveBeenCalledWith('devspace-net-e1');
     expect((await core.getEnvironment(env.envId))?.status).toBe('stopped');
   });
 

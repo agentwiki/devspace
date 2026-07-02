@@ -64,7 +64,7 @@ Out (deferred):
 
 1. **Hardening is host policy, not caller choice.** All of it — runtime class,
    caps, network, disk quota, proxy env — lives in a `SandboxHardening` config
-   on the *provisioner* (sourced from service env at boot), never on
+   on the _provisioner_ (sourced from service env at boot), never on
    `CreateEnvironmentRequest`. A tenant request cannot weaken its own sandbox;
    a compromised orchestrator caller cannot opt out of gVisor. This is also
    why contracts don't change.
@@ -100,7 +100,7 @@ Out (deferred):
    `turn_end { reason: 'aborted' }`; the orchestrator already renders that.
 5. **Auto-deny happens at the gate, silently to the human.** The ACP
    `requestPermission` handler consults `checkCommand`/`checkFileWrite`
-   *before* parking. A policy-denied operation resolves as rejected
+   _before_ parking. A policy-denied operation resolves as rejected
    immediately and emits a plain `message` AgentEvent explaining the denial —
    **no** `permission_request` is emitted, so no approval buttons appear for
    something no human is allowed to approve anyway.
@@ -131,7 +131,7 @@ Out (deferred):
   arg/config builders, `assertRuntimeAvailable`, and `EgressProxy`
   (start/stop + allowlist) — all host-side exports, no contract types.
 - `packages/agent-runner`: `AgentBackend.killCommand()`; `AgentRunner.
-  abortTurn(agentSessionId)` (interface + fakes); budget options on
+abortTurn(agentSessionId)` (interface + fakes); budget options on
   `AgentRunnerDeps` (policy + injected clock).
 - `packages/orchestrator`: `handleGitHubWebhook(evt)`; optional `audit` write
   path threaded through existing handlers; `verifyWebhookSignature` +
@@ -146,8 +146,8 @@ redaction layer. Lettered commits, one per workstream, like M4.
 ### A. sandbox-core — hardened runtime profile
 
 - `hardening.ts`: `SandboxHardening` = `{ runtime?: 'runsc' | 'kata-runtime',
-  noNewPrivileges, capDrop / capAdd, networkName?, enforceDiskQuota,
-  extraRunArgs }` with a conservative `HARDENED_DEFAULTS` and a permissive
+noNewPrivileges, capDrop / capAdd, networkName?, enforceDiskQuota,
+extraRunArgs }` with a conservative `HARDENED_DEFAULTS` and a permissive
   `DEMO_DEFAULTS` (plain Docker, default bridge). Pure
   `hardeningRunArgs(hardening, resources)`:
   `--runtime=…`, `--security-opt=no-new-privileges`, `--cap-drop/--cap-add`,
@@ -157,10 +157,10 @@ redaction layer. Lettered commits, one per workstream, like M4.
   injected runArgs append after resource args (same never-clobber rule);
   `containerEnv` merges over the repo config's own.
 - `assertRuntimeAvailable(runner, runtime)`: parse `docker info --format
-  '{{json .Runtimes}}'`; pure parser + injected runner. Called from boot paths
+'{{json .Runtimes}}'`; pure parser + injected runner. Called from boot paths
   when a runtime class is configured.
 - Per-env network lifecycle: pure `dockerNetworkCreateArgs(name,
-  { internal })` / `dockerNetworkRmArgs(name)`; `DevcontainerProvisioner`
+{ internal })` / `dockerNetworkRmArgs(name)`; `DevcontainerProvisioner`
   creates the network before `up` when hardening asks for per-env networks and
   removes it on failed provision; `DevcontainerSandboxCore.destroyEnvironment`
   removes it after the container (best-effort).
@@ -183,7 +183,7 @@ redaction layer. Lettered commits, one per workstream, like M4.
   control plane's egress, not the sandbox's, and is documented rather than
   defaulted into tenant envs.
 - `proxyContainerEnv(proxyUrl)` → `{ HTTP_PROXY, HTTPS_PROXY, http_proxy,
-  https_proxy, NO_PROXY }`, injected through A's `containerEnv` plumbing when
+https_proxy, NO_PROXY }`, injected through A's `containerEnv` plumbing when
   hardening carries an egress proxy URL.
 - Tests (loopback only, CI-safe): allowlist matcher table; CONNECT to an
   allowed host reaches a local upstream TCP server through the tunnel; CONNECT
@@ -225,13 +225,13 @@ redaction layer. Lettered commits, one per workstream, like M4.
 ### D. db + orchestrator — audit log
 
 - Schema: `audit_log(id, at, user_id?, conversation_id?, work_unit_id?,
-  action, detail jsonb)` + indexes on conversation and action; regenerate the
+action, detail jsonb)` + indexes on conversation and action; regenerate the
   drizzle migration.
 - `AuditRepo`: `append(entry)` / `listByConversation(conversationId)`;
   in-memory + Pg impls; `pg.itest.ts` round-trip extension.
 - Orchestrator: private `audit(action, ctx)` helper (best-effort — an audit
   write failure logs and never fails the user path… **no**: audit of a
-  *privileged* op must not silently vanish; it awaits normally and only
+  _privileged_ op must not silently vanish; it awaits normally and only
   teardown's best-effort blocks stay best-effort). Audited actions:
   `secret.resolved` (name + purpose, never plaintext), `approval.decided`,
   `pr.pushed`+`pr.opened`, `teardown` (+`token.revoked`), `webhook.received`
@@ -242,17 +242,16 @@ redaction layer. Lettered commits, one per workstream, like M4.
 ### E. orchestrator(+svc) — GitHub webhooks
 
 - `webhooks.ts` (orchestrator): `verifyWebhookSignature(secret, rawBody,
-  header)` (pure; `sha256=`-prefixed HMAC, `timingSafeEqual`, length-safe);
+header)` (pure; `sha256=`-prefixed HMAC, `timingSafeEqual`, length-safe);
   `mapPullRequestWebhook(eventName, payload)` → `{ repoUrl, prNumber,
-  outcome: 'merged' | 'closed' } | null` (zod-parsed; everything else null,
+outcome: 'merged' | 'closed' } | null` (zod-parsed; everything else null,
   never throw).
 - `Orchestrator.handleGitHubWebhook(mapped, publish)`: match `PR_OPEN` units
   by normalized repoUrl + prNumber (same normalizer as git.ts), publish the
   existing idempotent topics, audit `webhook.received`. Unmatched → no-op.
 - `orchestrator-svc`: `POST /webhooks/github` — **raw body** captured for
   HMAC before JSON parse; secret from `GITHUB_WEBHOOK_SECRET` (endpoint
-  disabled with a boot log when unset); bad signature → 401 (audited), valid →
-  202. Reconciler stays wired as the backstop (default interval lengthened).
+  disabled with a boot log when unset); bad signature → 401 (audited), valid → 202. Reconciler stays wired as the backstop (default interval lengthened).
 - Tests: signature verify (valid/invalid/malformed/length-mismatch); payload
   mapping table (merged, closed-unmerged, opened→null, junk→null); handler
   publishes the right topic for the matching unit only + audits; svc endpoint
@@ -267,9 +266,9 @@ redaction layer. Lettered commits, one per workstream, like M4.
   strings in chat) are acceptable; the M5 egress proxy is the real
   exfiltration control.
 - Docs: roadmap M5 section marked landed (with the ports-proxy → M6 deferral
-  + rationale), M6 gains the preview proxy; security.md items ticked against
-  their workstreams; `.env.example`/README notes for the new env
-  (`SANDBOX_RUNTIME`, `EGRESS_PROXY_*`, `GITHUB_WEBHOOK_SECRET`).
+  - rationale), M6 gains the preview proxy; security.md items ticked against
+    their workstreams; `.env.example`/README notes for the new env
+    (`SANDBOX_RUNTIME`, `EGRESS_PROXY_*`, `GITHUB_WEBHOOK_SECRET`).
 - Tests: each pattern redacts inside surrounding text; non-matching text
   untouched; combined value+pattern pass.
 
@@ -300,7 +299,7 @@ redaction layer. Lettered commits, one per workstream, like M4.
   runtime class is per-deployment config with fail-fast boot detection;
   plain-Docker demo mode stays a flip away; incompatibilities surface as
   provision/exec failures already mapped to FAILED.
-- **`--storage-opt` is driver-gated** — that is *why* it stayed deferred from
+- **`--storage-opt` is driver-gated** — that is _why_ it stayed deferred from
   M1; it ships opt-in (`enforceDiskQuota`) and documented (overlay2-on-xfs
   with pquota), never default-on.
 - **The proxy is a boundary, so it must stay dumb.** No request rewriting, no

@@ -1,5 +1,10 @@
+import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import type { CommandRunner, RunResult } from './cli.js';
 import {
+  DevcontainerProvisioner,
   buildDevcontainerUpArgs,
   buildGitCloneArgs,
   mergeDevcontainerConfig,
@@ -7,6 +12,7 @@ import {
   parseDevcontainerUpOutput,
   resourceRunArgs,
 } from './provision.js';
+import type { DevcontainerConfig } from './provision.js';
 
 describe('resourceRunArgs', () => {
   it('maps cpu/mem to enforceable docker flags plus a pids cap', () => {
@@ -87,6 +93,44 @@ describe('mergeDevcontainerConfig', () => {
     });
     expect(config.image).toBeUndefined();
   });
+
+  it('appends hardening runArgs after resource args (never clobbering)', () => {
+    const config = mergeDevcontainerConfig({
+      repoConfig: { runArgs: ['--init'] },
+      resources: { cpu: 1, memMB: 1024, diskMB: 2048 },
+      mounts: [],
+      hardening: { runtime: 'runsc', noNewPrivileges: true, enforceDiskQuota: true },
+      networkName: 'devspace-net-e1',
+    });
+    expect(config.runArgs).toEqual([
+      '--init',
+      '--cpus=1',
+      '--memory=1024m',
+      '--pids-limit=4096',
+      '--runtime=runsc',
+      '--security-opt=no-new-privileges',
+      '--network=devspace-net-e1',
+      '--storage-opt=size=2048m',
+    ]);
+  });
+
+  it('merges policy containerEnv OVER the repo config (policy wins)', () => {
+    const config = mergeDevcontainerConfig({
+      repoConfig: { containerEnv: { HTTP_PROXY: 'http://evil:1', KEEP: 'yes' } },
+      resources: { cpu: 1, memMB: 1024, diskMB: 1024 },
+      mounts: [],
+      containerEnv: { HTTP_PROXY: 'http://gw:3128' },
+    });
+    expect(config.containerEnv).toEqual({ HTTP_PROXY: 'http://gw:3128', KEEP: 'yes' });
+  });
+
+  it('emits no containerEnv key when neither side sets one', () => {
+    const config = mergeDevcontainerConfig({
+      resources: { cpu: 1, memMB: 1024, diskMB: 1024 },
+      mounts: [],
+    });
+    expect('containerEnv' in config).toBe(false);
+  });
 });
 
 describe('argv builders', () => {
@@ -158,5 +202,101 @@ describe('parseDevcontainerUpOutput', () => {
 
   it('throws when no result is present', () => {
     expect(() => parseDevcontainerUpOutput('just logs, no json')).toThrow(/could not parse/);
+  });
+});
+
+describe('DevcontainerProvisioner with a per-env network profile', () => {
+  interface Call {
+    command: string;
+    args: readonly string[];
+  }
+
+  /** Scripted runner: succeed everything; `devcontainer up` may be failed. */
+  function fakeRunner(opts: { failUp?: boolean }): { runner: CommandRunner; calls: Call[] } {
+    const calls: Call[] = [];
+    const runner: CommandRunner = {
+      async run(command, args): Promise<RunResult> {
+        calls.push({ command, args });
+        if (command === 'devcontainer') {
+          return opts.failUp
+            ? { code: 1, stdout: '', stderr: 'boom' }
+            : { code: 0, stdout: '{"outcome":"success","containerId":"c1"}', stderr: '' };
+        }
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      stream() {
+        throw new Error('unused');
+      },
+    };
+    return { runner, calls };
+  }
+
+  const req = {
+    resources: { cpu: 1, memMB: 1024, diskMB: 1024 },
+    mounts: [],
+    secrets: [],
+  };
+
+  it('creates the internal network before `up` and reports it in the result', async () => {
+    const { runner, calls } = fakeRunner({});
+    const provisioner = new DevcontainerProvisioner(runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+      hardening: { network: 'per-env', egressProxyUrl: 'http://gw:3128' },
+    });
+
+    const result = await provisioner.provision('e1', req);
+    expect(result.containerId).toBe('c1');
+    expect(result.networkName).toBe('devspace-net-e1');
+
+    const networkCreate = calls.findIndex(
+      (c) => c.command === 'docker' && c.args[0] === 'network' && c.args[1] === 'create',
+    );
+    const up = calls.findIndex((c) => c.command === 'devcontainer');
+    expect(networkCreate).toBeGreaterThanOrEqual(0);
+    expect(up).toBeGreaterThan(networkCreate);
+    expect(calls[networkCreate]!.args).toEqual([
+      'network',
+      'create',
+      '--internal',
+      'devspace-net-e1',
+    ]);
+
+    // The synthesized config carries the network runArg + the proxy env.
+    const upArgs = calls[up]!.args;
+    const configPath = upArgs[upArgs.indexOf('--config') + 1]!;
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as DevcontainerConfig;
+    expect(config.runArgs).toContain('--network=devspace-net-e1');
+    expect(config.containerEnv?.HTTPS_PROXY).toBe('http://gw:3128');
+  });
+
+  it('removes the created network and the workspace when `up` fails', async () => {
+    const { runner, calls } = fakeRunner({ failUp: true });
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'prov-test-'));
+    const provisioner = new DevcontainerProvisioner(runner, {
+      workspaceRoot,
+      hardening: { network: 'per-env' },
+    });
+
+    await expect(provisioner.provision('e2', req)).rejects.toThrow(/exited 1/);
+    expect(
+      calls.some((c) => c.command === 'docker' && c.args[0] === 'network' && c.args[1] === 'rm'),
+    ).toBe(true);
+    expect(await readdir(workspaceRoot)).toEqual([]);
+  });
+
+  it('neither creates nor reports a network for a named-network profile', async () => {
+    const { runner, calls } = fakeRunner({});
+    const provisioner = new DevcontainerProvisioner(runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+      hardening: { network: 'shared-net' },
+    });
+
+    const result = await provisioner.provision('e3', req);
+    expect(result.networkName).toBeUndefined();
+    expect(calls.some((c) => c.args[0] === 'network')).toBe(false);
+    const upArgs = calls.find((c) => c.command === 'devcontainer')!.args;
+    const configPath = upArgs[upArgs.indexOf('--config') + 1]!;
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as DevcontainerConfig;
+    expect(config.runArgs).toContain('--network=shared-net');
   });
 });

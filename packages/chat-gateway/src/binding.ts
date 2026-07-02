@@ -50,10 +50,20 @@ export function decodeRef(externalChannelId: string): ThreadRef {
 /** Resolve an inbound cold miss (post-restart): externalChannelId → conversationId. */
 export type ResolveMiss = (externalChannelId: string) => Promise<string | null>;
 
+/** Post-restart cold-miss resolvers, both directions. Inbound covers new
+ * messages in a pre-restart thread; outbound covers renders that arrive with
+ * no prior inbound event (the PR poll reconciler's status updates). */
+export interface BindingResolvers {
+  /** externalChannelId → conversationId */
+  conversation?: ResolveMiss;
+  /** conversationId → externalChannelId */
+  ref?: (conversationId: string) => Promise<string | null>;
+}
+
 /**
  * Bidirectional in-memory cache. `bind` is called on every inbound event
- * (idempotent), `refFor` serves the render path synchronously, and
- * `conversationFor` resolves inbound lookups — consulting `resolveMiss`
+ * (idempotent), `refFor`/`refForAsync` serve the render path, and
+ * `conversationFor` resolves inbound lookups — consulting the resolver
  * exactly once per key on a cache miss (concurrent misses are de-duplicated;
  * a successful resolution is memoized, a `null` is not, so a thread that
  * becomes a conversation later is not masked by a stale negative).
@@ -63,7 +73,7 @@ export class ConversationBinding {
   private readonly conversationByRef = new Map<string, string>();
   private readonly inFlight = new Map<string, Promise<string | null>>();
 
-  constructor(private readonly resolveMiss?: ResolveMiss) {}
+  constructor(private readonly resolvers: BindingResolvers = {}) {}
 
   bind(conversationId: string, ref: ThreadRef): void {
     const key = encodeRef(ref);
@@ -71,8 +81,29 @@ export class ConversationBinding {
     this.conversationByRef.set(key, conversationId);
   }
 
-  /** Outbound: conversationId → thread address. Sync — cache only, by design. */
+  /** Outbound: conversationId → thread address. Sync — cache only. */
   refFor(conversationId: string): ThreadRef | undefined {
+    return this.refByConversation.get(conversationId);
+  }
+
+  /** Outbound with cold-miss resolution (reconciler renders after a restart). */
+  async refForAsync(conversationId: string): Promise<ThreadRef | undefined> {
+    const hit = this.refByConversation.get(conversationId);
+    if (hit) return hit;
+    const resolve = this.resolvers.ref;
+    if (!resolve) return undefined;
+
+    const key = `ref:${conversationId}`;
+    const lookup =
+      this.inFlight.get(key) ??
+      resolve(conversationId)
+        .then((externalChannelId) => {
+          if (externalChannelId !== null) this.bind(conversationId, decodeRef(externalChannelId));
+          return externalChannelId;
+        })
+        .finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, lookup);
+    await lookup;
     return this.refByConversation.get(conversationId);
   }
 
@@ -81,12 +112,13 @@ export class ConversationBinding {
     const key = encodeRef(ref);
     const hit = this.conversationByRef.get(key);
     if (hit !== undefined) return hit;
-    if (!this.resolveMiss) return null;
+    const resolve = this.resolvers.conversation;
+    if (!resolve) return null;
 
     const pending = this.inFlight.get(key);
     if (pending) return pending;
 
-    const lookup = this.resolveMiss(key)
+    const lookup = resolve(key)
       .then((conversationId) => {
         if (conversationId !== null) this.bind(conversationId, ref);
         return conversationId;

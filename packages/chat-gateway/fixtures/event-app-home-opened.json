@@ -1,0 +1,16 @@
+{
+  "token": "verification-token",
+  "team_id": "T0001",
+  "api_app_id": "A0001",
+  "type": "event_callback",
+  "event_id": "Ev0004HOME",
+  "event_time": 1712345684,
+  "authorizations": [{ "team_id": "T0001", "user_id": "UBOT", "is_bot": true }],
+  "event": {
+    "type": "app_home_opened",
+    "user": "U111",
+    "channel": "D0111",
+    "tab": "home",
+    "event_ts": "1712345684.000600"
+  }
+}

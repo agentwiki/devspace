@@ -1,0 +1,20 @@
+{
+  "token": "verification-token",
+  "team_id": "T0001",
+  "api_app_id": "A0001",
+  "type": "event_callback",
+  "event_id": "Ev0003SELF",
+  "event_time": 1712345681,
+  "authorizations": [{ "team_id": "T0001", "user_id": "UBOT", "is_bot": true }],
+  "event": {
+    "type": "message",
+    "channel": "C0123ABC",
+    "channel_type": "channel",
+    "user": "UBOT",
+    "bot_id": "B0001",
+    "text": "Turn complete.",
+    "ts": "1712345681.000450",
+    "thread_ts": "1712345678.000200",
+    "event_ts": "1712345681.000450"
+  }
+}

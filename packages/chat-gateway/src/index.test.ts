@@ -7,9 +7,16 @@ describe('SlackAdapter (primary)', () => {
     expect(adapter.platform).toBe('slack');
   });
 
-  it('does not implement live behavior yet (M4)', async () => {
-    const adapter = new SlackAdapter({ botToken: 'xoxb', appToken: 'xapp' });
-    await expect(adapter.start(async () => {})).rejects.toThrow(/not implemented/);
+  it('render before start() is a dropped no-op, never a throw', async () => {
+    const warnings: string[] = [];
+    const adapter = new SlackAdapter(
+      { botToken: 'xoxb', appToken: 'xapp' },
+      { warn: (m) => warnings.push(m) },
+    );
+    await expect(
+      adapter.render({ type: 'post_message', conversationId: 'c', text: 't' }),
+    ).resolves.toBeUndefined();
+    expect(warnings.length).toBeGreaterThan(0);
   });
 });
 
@@ -19,7 +26,7 @@ describe('DiscordAdapter (additional)', () => {
     expect(adapter.platform).toBe('discord');
   });
 
-  it('does not implement live behavior yet (M4)', async () => {
+  it('does not implement live behavior yet (M6)', async () => {
     const adapter = new DiscordAdapter({ token: 't', applicationId: 'a' });
     await expect(adapter.start(async () => {})).rejects.toThrow(/not implemented/);
   });

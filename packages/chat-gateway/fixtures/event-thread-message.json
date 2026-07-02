@@ -1,0 +1,19 @@
+{
+  "token": "verification-token",
+  "team_id": "T0001",
+  "api_app_id": "A0001",
+  "type": "event_callback",
+  "event_id": "Ev0002MSG",
+  "event_time": 1712345679,
+  "authorizations": [{ "team_id": "T0001", "user_id": "UBOT", "is_bot": true }],
+  "event": {
+    "type": "message",
+    "channel": "C0123ABC",
+    "channel_type": "channel",
+    "user": "U111",
+    "text": "add a healthcheck endpoint",
+    "ts": "1712345679.000300",
+    "thread_ts": "1712345678.000200",
+    "event_ts": "1712345679.000300"
+  }
+}

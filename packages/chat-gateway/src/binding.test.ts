@@ -47,7 +47,7 @@ describe('ConversationBinding', () => {
 
   it('cold miss invokes resolveMiss once, then serves from cache (both directions)', async () => {
     const resolveMiss = vi.fn(async () => 'conv-cold');
-    const binding = new ConversationBinding(resolveMiss);
+    const binding = new ConversationBinding({ conversation: resolveMiss });
 
     await expect(binding.conversationFor(ref)).resolves.toBe('conv-cold');
     await expect(binding.conversationFor(ref)).resolves.toBe('conv-cold');
@@ -60,7 +60,7 @@ describe('ConversationBinding', () => {
   it('concurrent cold misses are de-duplicated to one resolver call', async () => {
     let release!: (v: string | null) => void;
     const resolveMiss = vi.fn(() => new Promise<string | null>((r) => (release = r)));
-    const binding = new ConversationBinding(resolveMiss);
+    const binding = new ConversationBinding({ conversation: resolveMiss });
 
     const [a, b] = [binding.conversationFor(ref), binding.conversationFor(ref)];
     release('conv-dedup');
@@ -68,9 +68,26 @@ describe('ConversationBinding', () => {
     expect(resolveMiss).toHaveBeenCalledTimes(1);
   });
 
+  it('refForAsync resolves an outbound cold miss once and warms both directions', async () => {
+    const resolveRef = vi.fn(async () => 'C1:1.000100');
+    const binding = new ConversationBinding({ ref: resolveRef });
+
+    await expect(binding.refForAsync('conv-out')).resolves.toEqual(ref);
+    await expect(binding.refForAsync('conv-out')).resolves.toEqual(ref);
+    expect(resolveRef).toHaveBeenCalledTimes(1);
+    expect(resolveRef).toHaveBeenCalledWith('conv-out');
+    await expect(binding.conversationFor(ref)).resolves.toBe('conv-out');
+  });
+
+  it('refForAsync without a resolver (or on a negative) → undefined', async () => {
+    await expect(new ConversationBinding().refForAsync('conv-x')).resolves.toBeUndefined();
+    const binding = new ConversationBinding({ ref: async () => null });
+    await expect(binding.refForAsync('conv-x')).resolves.toBeUndefined();
+  });
+
   it('does not memoize a negative resolution (a later bind is not masked)', async () => {
     const resolveMiss = vi.fn(async () => null);
-    const binding = new ConversationBinding(resolveMiss);
+    const binding = new ConversationBinding({ conversation: resolveMiss });
 
     await expect(binding.conversationFor(ref)).resolves.toBeNull();
     await expect(binding.conversationFor(ref)).resolves.toBeNull();

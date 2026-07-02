@@ -73,7 +73,28 @@ export const events = pgTable(
   (t) => [index('events_topic_idx').on(t.topic), index('events_work_unit_idx').on(t.workUnitId)],
 );
 
+// Append-only audit trail of privileged operations (M5). One writer (the
+// orchestrator); detail payloads are built from ids/names/enums only — never
+// secret plaintext — so the log needs no redaction pass.
+export const auditLog = pgTable(
+  'audit_log',
+  {
+    id: text('id').primaryKey().notNull(),
+    at: timestamp('at', { withTimezone: true }).defaultNow().notNull(),
+    userId: text('user_id'),
+    conversationId: text('conversation_id'),
+    workUnitId: text('work_unit_id'),
+    action: text('action').notNull(), // e.g. secret.resolved, pr.opened
+    detail: jsonb('detail').notNull(),
+  },
+  (t) => [
+    index('audit_log_conversation_idx').on(t.conversationId),
+    index('audit_log_action_idx').on(t.action),
+  ],
+);
+
 export type ConversationRow = typeof conversations.$inferSelect;
 export type WorkUnitRow = typeof workUnits.$inferSelect;
 export type SecretRow = typeof secrets.$inferSelect;
 export type EventRow = typeof events.$inferSelect;
+export type AuditRow = typeof auditLog.$inferSelect;

@@ -84,11 +84,30 @@ export interface EventRepo {
   markConsumed(id: string): Promise<void>;
 }
 
+/** One privileged operation, as recorded in the append-only audit trail (M5). */
+export interface AuditRecord {
+  id: string;
+  at: string;
+  userId?: string;
+  conversationId?: string;
+  workUnitId?: string;
+  /** e.g. secret.resolved | approval.decided | pr.opened | teardown | webhook.received */
+  action: string;
+  /** Ids/names/enums only — never secret plaintext. */
+  detail: Record<string, unknown>;
+}
+
+export interface AuditRepo {
+  append(input: Omit<AuditRecord, 'id' | 'at'>): Promise<AuditRecord>;
+  listByConversation(conversationId: string): Promise<AuditRecord[]>;
+}
+
 export interface Repositories {
   conversations: ConversationRepo;
   workUnits: WorkUnitRepo;
   secrets: SecretRepo;
   events: EventRepo;
+  audit: AuditRepo;
 }
 
 export class IllegalTransitionError extends Error {
@@ -116,6 +135,7 @@ export function createInMemoryRepositories(
   const secretsById = new Map<string, SecretRecord>();
   const secretIdByKey = new Map<string, string>();
   const events: EventRecord[] = [];
+  const auditEntries: AuditRecord[] = [];
 
   const secretKey = (userId: string, conversationId: string | undefined, name: string): string =>
     `${userId}:${conversationId ?? ''}:${name}`;
@@ -210,6 +230,16 @@ export function createInMemoryRepositories(
       async markConsumed(eid) {
         const rec = events.find((e) => e.id === eid);
         if (rec) rec.consumedAt = now();
+      },
+    },
+    audit: {
+      async append(input) {
+        const rec: AuditRecord = { id: id('aud'), at: now(), ...input };
+        auditEntries.push(rec);
+        return rec;
+      },
+      async listByConversation(conversationId) {
+        return auditEntries.filter((a) => a.conversationId === conversationId);
       },
     },
   };

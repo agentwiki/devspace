@@ -377,3 +377,92 @@ describe('bus events + teardown', () => {
     expect(revoked).toEqual(['ghs_push_token']);
   });
 });
+
+describe('audit log (M5)', () => {
+  it('audits the full privileged path: secrets, approval, push+PR, teardown', async () => {
+    const revoked: string[] = [];
+    const h = harness({ revokeToken: async (t) => void revoked.push(t) });
+    const { conv } = await seed(h.repos, h.store, 'READY');
+
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'go',
+    });
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'approve:req-1',
+      payload: {},
+    });
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'create-pr',
+      payload: {},
+    });
+    await h.orch.teardown(conv.id);
+
+    const actions = (await h.repos.audit.listByConversation(conv.id)).map((a) => a.action);
+    expect(actions).toEqual([
+      'secret.resolved', // LLM key for the turn
+      'approval.decided',
+      'secret.resolved', // push/PR token
+      'pr.pushed',
+      'pr.opened',
+      'token.revoked',
+      'teardown',
+    ]);
+
+    const entries = await h.repos.audit.listByConversation(conv.id);
+    expect(entries.find((a) => a.action === 'approval.decided')?.detail).toEqual({
+      requestId: 'req-1',
+      decision: 'allow',
+    });
+    expect(entries.find((a) => a.action === 'pr.opened')?.detail).toMatchObject({ prNumber: 42 });
+    expect(entries.every((a) => a.userId === 'u1')).toBe(true);
+  });
+
+  it('audits a budget-aborted turn', async () => {
+    const agent = fakeAgent([
+      { type: 'message', text: 'runaway' },
+      { type: 'turn_end', reason: 'aborted' },
+    ]);
+    const h = harness({ agent });
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'loop forever',
+    });
+    const entries = await h.repos.audit.listByConversation(conv.id);
+    expect(entries.map((a) => a.action)).toContain('turn.aborted');
+  });
+
+  it('never writes secret plaintext into audit detail (regression guard)', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'READY');
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'go',
+    });
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'create-pr',
+      payload: {},
+    });
+    await h.orch.teardown(conv.id);
+
+    const dump = JSON.stringify(await h.repos.audit.listByConversation(conv.id));
+    expect(dump).not.toContain('sk-llm'); // the seeded LLM key
+    expect(dump).not.toContain('ghs_push_token'); // the seeded push token
+  });
+});

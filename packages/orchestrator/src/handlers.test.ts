@@ -250,6 +250,24 @@ describe('message.posted', () => {
     expect(h.rendered.some((r) => r.type === 'post_message')).toBe(true);
   });
 
+  it('redacts an agent echo of the LLM key — every turn, not just the first', async () => {
+    // The runner resolves the key by record id OUTSIDE the conversation
+    // registry; the handler must register the plaintext itself or an echo
+    // reaches chat unredacted. Found by the M4 wiring smoke.
+    const agent = fakeAgent([{ type: 'message', text: 'my key is sk-llm' }]);
+    const h = harness({ agent });
+    const { conv } = await seed(h.repos, h.store, 'WORKING'); // NOT the first message
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'echo your key',
+    });
+    const posted = h.rendered.filter((r) => r.type === 'post_message');
+    expect(posted.some((r) => r.text.includes('«redacted»'))).toBe(true);
+    expect(JSON.stringify(h.rendered)).not.toContain('sk-llm');
+  });
+
   it('rejects a tenant mismatch before touching state', async () => {
     const h = harness();
     const { conv } = await seed(h.repos, h.store, 'READY');

@@ -1,31 +1,16 @@
 /**
- * Deployable entrypoint for the orchestrator control plane (M3 wiring).
- *
- * Assembles the Postgres repositories, the LISTEN/NOTIFY event bus, the
- * envelope-encrypted secret store, and the real `Orchestrator`, applies pending
- * migrations before serving, exposes a `ChatEvent` ingest endpoint, subscribes
- * the bus to the orchestrator, and runs the PR poll reconciler on a schedule
- * (the webhook stand-in — without it PR_OPEN units never advance).
+ * Deployable entrypoint for the orchestrator control plane (M3 wiring, M4
+ * boot extraction). The assembly itself lives in @devspace/orchestrator's
+ * `bootOrchestrator` (shared with the chat-gateway demo service); this
+ * entrypoint owns the Pool, the HTTP surface (`/health` + the `ChatEvent`
+ * ingest endpoint), and the reconciler schedule. Standalone, render commands
+ * surface to logs — the Slack transport lives in chat-gateway-svc.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { execFile } from 'node:child_process';
 import { Pool } from 'pg';
 import { ChatEventSchema } from '@devspace/contracts';
-import {
-  createPgEventBus,
-  createPostgresRepositories,
-  runMigrations,
-  type EventBus,
-} from '@devspace/db';
-import {
-  createGitHubRestClient,
-  Orchestrator,
-  parseKeyring,
-  SecretStore,
-  type HostGitExec,
-} from '@devspace/orchestrator';
-import { DevcontainerSandboxCore } from '@devspace/sandbox-core';
-import { DefaultAgentRunner } from '@devspace/agent-runner';
+import type { EventBus } from '@devspace/db';
+import { bootOrchestrator, type Orchestrator } from '@devspace/orchestrator';
 
 const SERVICE = 'orchestrator';
 
@@ -56,28 +41,6 @@ function loadConfig(): Config {
   };
 }
 
-/** Host-side git executor. Never runs inside a container (Decision 1). */
-const nodeHostGit: HostGitExec = {
-  run(args, opts) {
-    return new Promise((resolve) => {
-      execFile(
-        'git',
-        args,
-        { cwd: opts?.cwd, env: { ...process.env, ...opts?.env } },
-        (err, stdout, stderr) => {
-          const code =
-            err && typeof (err as { code?: unknown }).code === 'number'
-              ? (err as { code: number }).code
-              : err
-                ? 1
-                : 0;
-          resolve({ stdout, stderr, code });
-        },
-      );
-    });
-  },
-};
-
 export interface BootedService {
   server: Server;
   bus: EventBus;
@@ -89,45 +52,18 @@ export interface BootedService {
 export async function start(config: Config = loadConfig()): Promise<BootedService> {
   const pool = new Pool({ connectionString: config.databaseUrl });
 
-  // Migrations first — never serve against an unmigrated schema.
-  await runMigrations(pool);
-
-  const repos = createPostgresRepositories(pool);
-  const keyring = parseKeyring(config.envelopeKey, config.retiredKeys);
-  const secrets = new SecretStore(repos.secrets, keyring);
-  const sandbox = new DevcontainerSandboxCore();
-  const agents = new DefaultAgentRunner({
-    exec: sandbox,
-    // llmKeyRef is a secret record id resolved through the envelope store.
-    resolveSecret: (ref) => secrets.resolveRef(ref),
-  });
-  const bus = createPgEventBus(pool, repos.events);
-
-  const orch = new Orchestrator({
-    repos,
-    sandbox,
-    agents,
-    secrets,
-    git: nodeHostGit,
-    githubRest: (token) => createGitHubRestClient(token, config.githubApiBase),
-    // A real render transport (Slack) lands in M4; for now surface to logs.
+  const booted = await bootOrchestrator(pool, {
+    envelopeKey: config.envelopeKey,
+    retiredKeys: config.retiredKeys,
+    githubApiBase: config.githubApiBase,
+    // A real render transport (Slack) lives in chat-gateway-svc; surface to logs.
     render: async (command) => {
       console.log(`[render] ${JSON.stringify(command)}`);
     },
   });
 
-  bus.subscribe((evt) => orch.handleBusEvent(evt));
-  await bus.start();
-
   // Poll reconciler — the webhook stand-in that advances PR_OPEN units.
-  const reconcile = setInterval(() => {
-    void orch
-      .reconcileOpenPrs(async (e) => {
-        await bus.publish({ topic: e.topic, workUnitId: e.workUnitId, payload: {} });
-      })
-      .catch((err) => console.error(`[reconcile] ${String(err)}`));
-  }, config.reconcileIntervalMs);
-  reconcile.unref();
+  const stopReconciler = booted.startReconciler(config.reconcileIntervalMs);
 
   const server = createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
@@ -136,7 +72,7 @@ export async function start(config: Config = loadConfig()): Promise<BootedServic
       return;
     }
     if (req.method === 'POST' && req.url === '/events') {
-      ingest(req, res, orch);
+      ingest(req, res, booted.orch);
       return;
     }
     res.writeHead(404, { 'content-type': 'application/json' });
@@ -148,12 +84,12 @@ export async function start(config: Config = loadConfig()): Promise<BootedServic
 
   return {
     server,
-    bus,
+    bus: booted.bus,
     pool,
     async close() {
-      clearInterval(reconcile);
+      stopReconciler();
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await bus.stop();
+      await booted.close();
       await pool.end();
     },
   };

@@ -41,6 +41,9 @@ export * from './stateMachine.js';
 export * from './secrets.js';
 export * from './git.js';
 export * from './render.js';
+// boot.js imports Orchestrator from this module; the cycle is benign (the
+// class is only referenced inside bootOrchestrator's body, after module init).
+export * from './boot.js';
 
 /** Well-known secret names. The push/PR token is host-only; clone token is the
  * only credential permitted inside a container (read-only). */
@@ -262,16 +265,24 @@ export class Orchestrator {
       return;
     }
 
+    // The agent runner resolves the LLM key itself (by record id, for
+    // injection), which bypasses this conversation's redaction registry — so
+    // register the plaintext here, EVERY turn, or an agent echoing its key
+    // would reach chat unredacted (B's 100%-of-outbound invariant). Every
+    // turn, not just the first: registries are in-memory, and a restart
+    // mid-conversation must not reopen the hole.
+    const llm = await this.deps.repos.secrets.get(
+      event.userId,
+      SECRET_LLM_KEY,
+      event.conversationId,
+    );
+    if (llm) await this.deps.secrets.resolveRef(llm.id, registry);
+
     // Ensure an agent session, transitioning READY --firstMessage--> WORKING on
     // the first message. Subsequent messages find WORKING and skip the transition.
     let unit = wu;
     let agentSessionId = wu.agentSessionId;
     if (!agentSessionId) {
-      const llm = await this.deps.repos.secrets.get(
-        event.userId,
-        SECRET_LLM_KEY,
-        event.conversationId,
-      );
       if (!llm) {
         await this.emit(
           messageCommand(

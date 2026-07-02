@@ -36,11 +36,13 @@ import { SecretRegistry } from './secrets.js';
 import type { SecretStore } from './secrets.js';
 import { GitWrapper, prStateToEvent, type GitHubRestClient, type HostGitExec } from './git.js';
 import { messageCommand, renderAgentEvent, statusCommand } from './render.js';
+import { sameRepo, type MappedPrWebhook } from './webhooks.js';
 
 export * from './stateMachine.js';
 export * from './secrets.js';
 export * from './git.js';
 export * from './render.js';
+export * from './webhooks.js';
 // boot.js imports Orchestrator from this module; the cycle is benign (the
 // class is only referenced inside bootOrchestrator's body, after module init).
 export * from './boot.js';
@@ -527,9 +529,41 @@ export class Orchestrator {
   }
 
   /**
+   * Apply a verified+mapped GitHub `pull_request` webhook (M5): find the
+   * matching PR_OPEN unit(s) by repo + PR number and publish the SAME
+   * idempotent bus topics the poll reconciler uses — webhook↔poll
+   * double-delivery is a no-op by construction (`handleBusEvent` → `advance`).
+   * Unmatched deliveries (foreign repos, already-advanced units) are ignored.
+   */
+  async handleGitHubWebhook(
+    mapped: MappedPrWebhook,
+    publish: (evt: { topic: string; workUnitId: string }) => Promise<void>,
+  ): Promise<{ matched: number }> {
+    const open = await this.workUnits.listByState('PR_OPEN');
+    let matched = 0;
+    for (const wu of open) {
+      if (wu.prNumber !== mapped.prNumber) continue;
+      if (!wu.repoUrl || !sameRepo(wu.repoUrl, mapped.repoUrl)) continue;
+      matched += 1;
+      await this.audit('webhook.received', {
+        conversationId: wu.conversationId,
+        workUnitId: wu.id,
+        detail: { event: 'pull_request', outcome: mapped.outcome, prNumber: mapped.prNumber },
+      });
+      await publish({
+        topic: mapped.outcome === 'merged' ? TOPIC_PR_MERGED : TOPIC_PR_CLOSED,
+        workUnitId: wu.id,
+      });
+    }
+    return { matched };
+  }
+
+  /**
    * Poll every PR_OPEN unit and publish idempotent prMerged/prClosed bus events.
-   * The bus is genuinely out-of-process here (a scheduled driver), unlike
-   * provisioning. E owns the schedule; this is the body it invokes.
+   * Since M5 this is the RECONCILIATION BACKSTOP for webhook gaps (missed
+   * deliveries, downtime) — webhooks are the source of truth; run this on a
+   * long interval. The bus is genuinely out-of-process here (a scheduled
+   * driver), unlike provisioning. The svc owns the schedule.
    */
   async reconcileOpenPrs(
     publish: (evt: { topic: string; workUnitId: string }) => Promise<void>,

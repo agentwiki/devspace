@@ -40,6 +40,12 @@ export class MultiHostSandboxCore implements SandboxCore {
   private readonly hosts: SandboxHost[];
   /** envId -> host name; the capacity count is this table grouped by host. */
   private readonly routes = new Map<string, string>();
+  /**
+   * In-flight placements per host. Provisioning takes minutes, so without a
+   * reservation every concurrent create would read the same (stale) load and
+   * pile onto one host past its capacity.
+   */
+  private readonly pending = new Map<string, number>();
 
   constructor(hosts: SandboxHost[]) {
     if (hosts.length === 0) throw new Error('MultiHostSandboxCore needs at least one host');
@@ -62,13 +68,31 @@ export class MultiHostSandboxCore implements SandboxCore {
 
   async createEnvironment(req: CreateEnvironmentRequest): Promise<Environment> {
     const host = this.place();
-    const env = await host.core.createEnvironment(req);
-    this.routes.set(env.envId, host.name);
-    return env;
+    this.pending.set(host.name, (this.pending.get(host.name) ?? 0) + 1);
+    try {
+      const env = await host.core.createEnvironment(req);
+      this.routes.set(env.envId, host.name);
+      return env;
+    } finally {
+      const left = (this.pending.get(host.name) ?? 1) - 1;
+      if (left > 0) this.pending.set(host.name, left);
+      else this.pending.delete(host.name);
+    }
   }
 
   async getEnvironment(envId: string): Promise<Environment | null> {
-    const host = await this.findHost(envId);
+    const routed = this.routes.get(envId);
+    if (routed) {
+      const host = this.hosts.find((h) => h.name === routed)!;
+      const env = await host.core.getEnvironment(envId);
+      if (env) return env;
+      // The owning host no longer knows the env (wiped/restarted): evict the
+      // route so a phantom entry does not inflate that host's load forever.
+      // Ids are host-generated — the env cannot have moved, so answer null.
+      this.routes.delete(envId);
+      return null;
+    }
+    const host = await this.probe(envId);
     if (!host) return null;
     return host.core.getEnvironment(envId);
   }
@@ -112,7 +136,7 @@ export class MultiHostSandboxCore implements SandboxCore {
 
   /** Least-loaded placement over non-draining hosts with free capacity. */
   private place(): SandboxHost {
-    const load = new Map<string, number>();
+    const load = new Map<string, number>(this.pending);
     for (const name of this.routes.values()) load.set(name, (load.get(name) ?? 0) + 1);
 
     let best: SandboxHost | undefined;
@@ -140,14 +164,37 @@ export class MultiHostSandboxCore implements SandboxCore {
   private async findHost(envId: string): Promise<SandboxHost | undefined> {
     const routed = this.routes.get(envId);
     if (routed) return this.hosts.find((h) => h.name === routed);
-    // Cold miss (orchestrator restart): the hosts still hold the containers.
-    // First hit wins and becomes sticky; probing is O(hosts), misses only.
+    return this.probe(envId);
+  }
+
+  /**
+   * Cold miss (orchestrator restart): the hosts still hold the containers.
+   * First hit wins and becomes sticky; probing is O(hosts), misses only. A
+   * probe FAILURE is not a miss — treating an unreachable host as "doesn't
+   * have it" would turn a transient blip into NOT_FOUND for a live env, so if
+   * nothing answered positively and anything errored, the error surfaces.
+   */
+  private async probe(envId: string): Promise<SandboxHost | undefined> {
+    const failed: string[] = [];
+    let firstError: unknown;
     for (const host of this.hosts) {
-      const env = await host.core.getEnvironment(envId).catch(() => null);
-      if (env) {
-        this.routes.set(envId, host.name);
-        return host;
+      try {
+        const env = await host.core.getEnvironment(envId);
+        if (env) {
+          this.routes.set(envId, host.name);
+          return host;
+        }
+      } catch (err) {
+        failed.push(host.name);
+        firstError ??= err;
       }
+    }
+    if (failed.length > 0) {
+      const message = firstError instanceof Error ? firstError.message : String(firstError);
+      throw new SandboxError(
+        'EXEC_FAILED',
+        `fleet probe for ${envId} failed on ${failed.join(', ')}: ${message}`,
+      );
     }
     return undefined;
   }

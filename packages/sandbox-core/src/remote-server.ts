@@ -10,8 +10,10 @@
  * serve: a full-duplex exec that injects per-env secrets never runs
  * unauthenticated.
  */
+import { STATUS_CODES } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
+import { constants as osConstants } from 'node:os';
 import {
   CreateEnvironmentRequestSchema,
   ExecClientFrameSchema,
@@ -28,6 +30,7 @@ import { FrameChannel } from './process-stream.js';
 import {
   EXEC_UPGRADE_PROTOCOL,
   LineDecoder,
+  safeJsonLine,
   socketDrain,
   verifyBearer,
   writeJsonLine,
@@ -98,7 +101,7 @@ async function handle(
   }
 
   if (segments[0] === 'environments') {
-    const envId = segments[1] ? decodeURIComponent(segments[1]) : undefined;
+    const envId = segments[1] ? tryDecode(segments[1]) : undefined;
 
     if (method === 'POST' && segments.length === 1) {
       const body = CreateEnvironmentRequestSchema.parse(await readJson(req));
@@ -117,6 +120,15 @@ async function handle(
         return;
       }
       if (method === 'POST' && segments[2] === 'exec') {
+        // Exec injects per-env secrets, so — like the upgrade stream — it
+        // never serves unauthenticated (Decision 5); fs/lifecycle stay open
+        // as the local ops surface they have been since M1.
+        if (!token) {
+          return sendJson(res, 503, {
+            code: 'INTERNAL',
+            message: 'exec requires DEVSPACE_INTERNAL_TOKEN',
+          });
+        }
         const execReq = ExecRequestSchema.parse(await readJson(req));
         const { code, stdout, stderr } = await captureExec(await core.exec(envId, execReq));
         return sendJson(res, 200, { code, stdout: toBase64(stdout), stderr: toBase64(stderr) });
@@ -195,7 +207,7 @@ async function serveUpgrade(
     return refuse(socket, 401, 'UNAUTHORIZED', 'bad or missing bearer token');
   }
 
-  const envId = decodeURIComponent(match[1]!);
+  const envId = tryDecode(match[1]!);
   const env = await core.getEnvironment(envId);
   if (!env) return refuse(socket, 404, 'NOT_FOUND', `no such environment: ${envId}`);
   if (env.status !== 'ready') {
@@ -249,16 +261,20 @@ async function serveUpgrade(
 
   // A client that vanishes mid-turn must not leave the local stream consumer
   // parked (docker-exec caveat: the in-container tree is reaped by destroy).
-  socket.on('close', () => stream.kill());
+  // 'close' may already have fired while core.exec was pending — events are
+  // not sticky, so check the flag as well as registering the handler.
+  socket.on('close', () => killQuietly(stream, undefined, opts.onLog));
+  if (socket.destroyed) killQuietly(stream, undefined, opts.onLog);
 
   // Client frames -> the stream. Honoring writeStdin's false with the stdin
   // drain keeps this pump bounded: meanwhile the line channel fills and pauses
-  // the socket.
+  // the socket. The chained catch makes `inbound` unrejectable — a pump error
+  // must never become an unhandled rejection that takes the whole svc down.
   const inbound = (async (): Promise<void> => {
     for (;;) {
       const next = await lines.pull();
       if (next.done) break;
-      const parsed = ExecClientFrameSchema.safeParse(safeJson(next.value));
+      const parsed = ExecClientFrameSchema.safeParse(safeJsonLine(next.value));
       if (!parsed.success) {
         opts.onLog?.(`dropping malformed client frame (${next.value.length} bytes)`);
         continue;
@@ -269,10 +285,12 @@ async function serveUpgrade(
       } else if (frame.kind === 'stdin_close') {
         stream.closeStdin();
       } else {
-        stream.kill(frame.signal as NodeJS.Signals | undefined);
+        killQuietly(stream, frame.signal, opts.onLog);
       }
     }
-  })();
+  })().catch((err) => {
+    opts.onLog?.(`inbound pump failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   // Stream frames -> the socket. Honoring write's false with socketDrain makes
   // a slow reader stop this loop; the M1 channel then pauses the child's pipes
@@ -280,7 +298,7 @@ async function serveUpgrade(
   try {
     for await (const frame of stream.frames as AsyncIterable<ExecFrame>) {
       if (socket.destroyed) {
-        stream.kill();
+        killQuietly(stream, undefined, opts.onLog);
         break;
       }
       if (!writeJsonLine(socket, frame)) await socketDrain(socket);
@@ -288,37 +306,51 @@ async function serveUpgrade(
     }
   } finally {
     socket.end();
-    await inbound.catch(() => {});
+    await inbound;
+  }
+}
+
+/**
+ * kill() with the wire's trust boundary applied: an unknown signal name from a
+ * peer must not throw ERR_UNKNOWN_SIGNAL through the pump (the schema only
+ * guarantees a string). An invalid name is a peer bug — it is dropped with a
+ * log line, never reinterpreted as some other signal.
+ */
+function killQuietly(
+  stream: ExecStream,
+  signal: string | undefined,
+  onLog?: (line: string) => void,
+): void {
+  if (signal !== undefined && !(signal in osConstants.signals)) {
+    onLog?.(`ignoring unknown kill signal "${signal}"`);
+    return;
+  }
+  try {
+    stream.kill(signal as NodeJS.Signals | undefined);
+  } catch (err) {
+    onLog?.(`kill failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
 /** Answer a not-yet-upgraded socket with a plain HTTP error and close it. */
 function refuse(socket: Socket, status: number, code: ErrorCode, message: string): void {
   const body = JSON.stringify({ code, message });
-  socket.write(
-    `HTTP/1.1 ${status} ${statusText(status)}\r\n` +
+  // end(), not write()+destroy(): destroy would race the kernel flush and can
+  // drop the response (the client then sees ECONNRESET instead of the error).
+  socket.once('error', () => {});
+  socket.end(
+    `HTTP/1.1 ${status} ${STATUS_CODES[status] ?? 'Error'}\r\n` +
       `content-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n` +
       `connection: close\r\n\r\n${body}`,
   );
-  socket.destroy();
 }
 
-function statusText(status: number): string {
-  return (
-    {
-      401: 'Unauthorized',
-      404: 'Not Found',
-      409: 'Conflict',
-      503: 'Service Unavailable',
-    }[status] ?? 'Error'
-  );
-}
-
-function safeJson(line: string): unknown {
+/** decodeURIComponent that treats malformed escapes as literals, not a 500. */
+function tryDecode(segment: string): string {
   try {
-    return JSON.parse(line);
+    return decodeURIComponent(segment);
   } catch {
-    return undefined;
+    return segment;
   }
 }
 
@@ -326,9 +358,22 @@ function safeJson(line: string): unknown {
 /* Plumbing                                                                    */
 /* -------------------------------------------------------------------------- */
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
+// Body cap: generous because fsWrite legitimately carries multi-MB base64
+// payloads (unlike the orchestrator's 1MB internal API), but still bounded so
+// a bad client cannot buffer arbitrary memory into the host.
+const MAX_BODY_BYTES = 64 * 1024 * 1024;
+
+async function readJson(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<unknown> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > limit) {
+      req.destroy();
+      throw new SandboxError('EXEC_FAILED', `request body exceeds ${limit} bytes`);
+    }
+    chunks.push(chunk as Buffer);
+  }
   const raw = Buffer.concat(chunks).toString('utf8').trim();
   return raw ? JSON.parse(raw) : {};
 }

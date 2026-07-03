@@ -182,7 +182,20 @@ export function spawnExecStream(
     },
     drain(): Promise<void> {
       if (!child.stdin.writableNeedDrain) return Promise.resolve();
-      return new Promise((resolve) => child.stdin.once('drain', () => resolve()));
+      // Also settle on close/error: a child that exits with its stdin buffer
+      // full never emits 'drain', and a parked writer must not hang forever
+      // (the stdin 'error' no-op above swallows the EPIPE that would tell us).
+      return new Promise((resolve) => {
+        const settle = (): void => {
+          child.stdin.off('drain', settle);
+          child.stdin.off('close', settle);
+          child.stdin.off('error', settle);
+          resolve();
+        };
+        child.stdin.once('drain', settle);
+        child.stdin.once('close', settle);
+        child.stdin.once('error', settle);
+      });
     },
     closeStdin(): void {
       if (child.stdin.writable) child.stdin.end();

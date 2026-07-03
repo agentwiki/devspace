@@ -317,8 +317,10 @@ NATS bus (now meaningful when the _orchestrator_ scales out — M8's fleet is
 sandbox hosts; LISTEN/NOTIFY already survives that split; `EventBus` is the
 seam); per-service identity on the internal API (mTLS — deployment-layer,
 replacing the shared token); warm pools / cold-start work (top-risk #4 —
-placement now exists to hang it on); resource-aware scheduling (capacity
-counts envs today, deliberately); Discord Forum-channel session dashboard
+placement now exists to hang it on); resource-aware scheduling + host-side
+capacity enforcement (capacity counts envs today, deliberately, and an
+orchestrator restart zeroes counted load until lazy re-adoption — see
+docs/m8-plan.md risks); Discord Forum-channel session dashboard
 (presentation upgrade over `/sessions`). UI surface remains chat only — no
 self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
 

@@ -130,6 +130,14 @@ export async function bootOrchestrator(
   if (sandboxHosts?.length) {
     const token = config.internalToken ?? process.env.DEVSPACE_INTERNAL_TOKEN;
     if (!token) throw new Error('SANDBOX_HOSTS requires DEVSPACE_INTERNAL_TOKEN');
+    // Explicitly-passed local sandbox options would be silently dead in fleet
+    // mode — refuse loudly instead (env-var equivalents are simply not read
+    // here: they may legitimately target the sandbox hosts' own boots).
+    if (config.sandboxHardening || config.preview) {
+      throw new Error(
+        'sandboxHosts is incompatible with sandboxHardening/preview — configure them on each sandbox host',
+      );
+    }
     sandbox = new MultiHostSandboxCore(
       sandboxHosts.map((h) => ({
         name: h.name,

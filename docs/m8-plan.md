@@ -86,13 +86,14 @@ Out (seeded to M9, with rationale):
    (orchestrator-svc ↔ sandbox-core-svc), and the contracts package is the
    single source of truth for exactly that surface. Server→client frames are
    the existing `ExecFrame` minus `stdin`.
-5. **The svc keeps working tokenless — but the exec stream never does.** With
-   `DEVSPACE_INTERNAL_TOKEN` set, every route except `/health` requires the
-   bearer (timing-safe, the M6 helper's discipline). Unset, the JSON surface
-   stays open exactly as it has been since M1 (a local ops/debug surface on a
-   trusted network) — but the upgrade endpoint refuses with 503: a
-   full-duplex exec that injects per-env secrets does not run unauthenticated,
-   ever. Fleet mode therefore _requires_ the token by construction.
+5. **The svc keeps working tokenless — but exec never does, in either form.**
+   With `DEVSPACE_INTERNAL_TOKEN` set, every route except `/health` requires
+   the bearer (timing-safe, the M6 helper's discipline). Unset, the
+   fs/lifecycle JSON surface stays open exactly as it has been since M1 (a
+   local ops/debug surface on a trusted network) — but BOTH exec paths refuse
+   with 503: the upgrade stream and the JSON capture exec alike inject
+   per-env secrets and do not run unauthenticated, ever. Fleet mode therefore
+   _requires_ the token by construction.
 6. **Placement is least-loaded with a per-host cap, and it is deliberately
    dumb.** Fewest live envs wins; ties break in config order; draining and
    full hosts are skipped; no host ⇒ `PROVISION_FAILED` with a message that
@@ -148,10 +149,11 @@ Out (seeded to M9, with rationale):
   `socket.write` false + `drain` (Decision 2). Either side's error/close
   kills the local stream and destroys the socket — no half-open pumps.
 - `remote-client.ts`: `RemoteSandboxCore implements SandboxCore`. JSON ops
-  via injected fetch (the internal-http pattern; no timeout on create —
-  provisioning takes minutes); `exec()` via `http.request` upgrade returning
-  a real `ExecStream` whose inbound side is a `FrameChannel` pausing/resuming
-  the socket. A connection lost before `exit` synthesizes
+  via `node:http(s)` requests with NO client timeout — global fetch (undici)
+  imposes a 300s headersTimeout that would sever a slow `createEnvironment`
+  and orphan the remote container; `exec()` via the `http.request` upgrade
+  returning a real `ExecStream` whose inbound side is a `FrameChannel`
+  pausing/resuming the socket. A connection lost before `exit` synthesizes
   `stderr("connection lost") + exit -1` — the M1 spawn-error convention.
   Error envelopes map back to `SandboxError` codes.
 - `process-stream.ts`: `FrameChannel` becomes exported (unchanged semantics).
@@ -208,7 +210,14 @@ Out (seeded to M9, with rationale):
   host by the capacity cap (an env is the unit that owns connections).
 - **Capacity counts envs, not resources.** cpu/mem-aware placement needs
   host-side accounting that belongs with warm pools (M9+); the cap prevents
-  the pathological case (one host absorbing the fleet) today.
+  the pathological case (one host absorbing the fleet) today. In-flight
+  placements are reserved (a concurrent burst cannot pile onto one host),
+  and stale routes are evicted when a host stops knowing an env — but an
+  orchestrator RESTART still zeroes the counted load until old envs are
+  lazily re-adopted, so a burst right after a restart can over-place onto a
+  full host. Host-side capacity enforcement (or a boot-time census) closes
+  that window and is seeded to M9 with the rest of resource-aware
+  scheduling.
 - **Rediscovery trusts host answers.** Two hosts claiming one envId cannot
   happen from this codebase (ids are host-generated UUIDs); first hit wins
   and is sticky, so even then behavior is deterministic.

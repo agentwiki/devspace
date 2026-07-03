@@ -11,6 +11,7 @@
  */
 import { timingSafeEqual } from 'node:crypto';
 import type { Socket } from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 
 /** Value of the `Upgrade:` header for the exec wire. */
 export const EXEC_UPGRADE_PROTOCOL = 'devspace-exec';
@@ -43,14 +44,28 @@ export function verifyBearer(header: string | undefined, token: string): boolean
 /**
  * Incremental newline splitter. Push raw chunks, get back complete lines
  * (without the terminator); a trailing partial line waits for its newline.
+ * Buffers go through a StringDecoder so a multi-byte UTF-8 character split
+ * across TCP segments is carried over intact, never mangled to U+FFFD
+ * (JSON.stringify emits raw UTF-8 — frames are not ASCII-safe).
  */
 export class LineDecoder {
+  private readonly utf8 = new StringDecoder('utf8');
   private tail = '';
 
   push(chunk: Buffer | string): string[] {
-    const parts = (this.tail + chunk.toString()).split('\n');
+    const text = typeof chunk === 'string' ? chunk : this.utf8.write(chunk);
+    const parts = (this.tail + text).split('\n');
     this.tail = parts.pop() ?? '';
     return parts.filter((line) => line.length > 0);
+  }
+}
+
+/** JSON.parse that answers `undefined` for protocol noise instead of throwing. */
+export function safeJsonLine(line: string): unknown {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return undefined;
   }
 }
 

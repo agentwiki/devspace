@@ -85,6 +85,50 @@ describe('MultiHostSandboxCore placement', () => {
     expect(order.map((id) => id.split('_')[1])).toEqual(['a', 'b', 'a', 'b']);
   });
 
+  it('reserves in-flight placements so a concurrent burst cannot exceed capacity', async () => {
+    // Slow provisioner: all three creates overlap, so without reservations
+    // they would all read the same load snapshot and pile onto host a.
+    function slowHost(name: string): SandboxCore {
+      let seq = 0;
+      const envs = new Map<string, Environment>();
+      return {
+        ...fakeHost(name),
+        async createEnvironment() {
+          await new Promise((r) => setTimeout(r, 30));
+          const envId = `env_${name}_${++seq}`;
+          const env: Environment = {
+            envId,
+            status: 'ready',
+            ports: [],
+            createdAt: new Date().toISOString(),
+          };
+          envs.set(envId, env);
+          return env;
+        },
+        async getEnvironment(envId) {
+          return envs.get(envId) ?? null;
+        },
+      };
+    }
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: slowHost('a'), capacity: 1 },
+      { name: 'b', core: slowHost('b'), capacity: 1 },
+    ]);
+
+    const results = await Promise.allSettled([
+      multi.createEnvironment(CREATE),
+      multi.createEnvironment(CREATE),
+      multi.createEnvironment(CREATE),
+    ]);
+    const placed = results
+      .filter((r): r is PromiseFulfilledResult<Environment> => r.status === 'fulfilled')
+      .map((r) => r.value.envId.split('_')[1]);
+    const failed = results.filter((r) => r.status === 'rejected');
+    // Exactly one per host; the third refused instead of over-placing.
+    expect(placed.sort()).toEqual(['a', 'b']);
+    expect(failed).toHaveLength(1);
+  });
+
   it('refuses placement when every host is at capacity', async () => {
     const a = fakeHost('a');
     const multi = new MultiHostSandboxCore([{ name: 'a', core: a, capacity: 1 }]);
@@ -182,6 +226,52 @@ describe('MultiHostSandboxCore routing', () => {
     expect((await multi.createEnvironment(CREATE)).envId).toContain('_a_');
     const err = await multi.createEnvironment(CREATE).catch((e: unknown) => e);
     expect((err as SandboxError).code).toBe('PROVISION_FAILED');
+  });
+
+  it('surfaces a probe failure instead of reporting a live env as NOT_FOUND', async () => {
+    const down: SandboxCore = {
+      ...fakeHost('down'),
+      async getEnvironment() {
+        throw new SandboxError('EXEC_FAILED', 'connection refused');
+      },
+    };
+    const multi = new MultiHostSandboxCore([
+      { name: 'down', core: down, capacity: 1 },
+      { name: 'up', core: fakeHost('up'), capacity: 1 },
+    ]);
+    const err = await multi.fsRead('env_unrouted', '/x').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SandboxError);
+    expect((err as SandboxError).code).toBe('EXEC_FAILED');
+    expect((err as SandboxError).message).toContain('probe');
+    expect((err as SandboxError).message).toContain('down');
+  });
+
+  it('still adopts an env found on a later host even when an earlier probe fails', async () => {
+    const down: SandboxCore = {
+      ...fakeHost('down'),
+      async getEnvironment() {
+        throw new SandboxError('EXEC_FAILED', 'connection refused');
+      },
+    };
+    const b = fakeHost('b');
+    const survivor = (await b.createEnvironment(CREATE)).envId;
+    const multi = new MultiHostSandboxCore([
+      { name: 'down', core: down, capacity: 1 },
+      { name: 'b', core: b, capacity: 1 },
+    ]);
+    expect((await multi.getEnvironment(survivor))?.envId).toBe(survivor);
+    expect(multi.hostOf(survivor)).toBe('b');
+  });
+
+  it('evicts a stale route when the owning host no longer knows the env', async () => {
+    const a = fakeHost('a');
+    const multi = new MultiHostSandboxCore([{ name: 'a', core: a, capacity: 1 }]);
+    const env = (await multi.createEnvironment(CREATE)).envId;
+    a.envs.clear(); // the host was wiped out from under the orchestrator
+    expect(await multi.getEnvironment(env)).toBeNull();
+    expect(multi.hostOf(env)).toBeUndefined();
+    // The phantom no longer counts against capacity.
+    await multi.createEnvironment(CREATE);
   });
 
   it('returns null for an env no host knows', async () => {

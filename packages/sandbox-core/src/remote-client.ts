@@ -4,15 +4,17 @@
  * another machine" is a constructor swap for the orchestrator and invisible to
  * agent-runner (its ExecProvider slice is exactly `exec()`).
  *
- * Lifecycle/fs/ports ride plain JSON over injected fetch (the internal-http
- * client pattern; no timeout on create — provisioning legitimately takes
- * minutes). `exec()` rides the `devspace-exec` upgrade: the returned
- * `ExecStream` is the real thing — inbound frames land in the M1 watermark
- * channel which pauses/resumes the SOCKET, so a slow consumer closes TCP's
- * receive window and the far end's pump stops pulling from the container
- * (backpressure end to end, m8-plan Decision 2).
+ * All calls ride node:http(s) requests with NO client-side timeout — global
+ * fetch (undici) imposes a 300s headersTimeout that would sever a slow
+ * `createEnvironment` (provisioning legitimately takes minutes) and orphan
+ * the remote container. `exec()` rides the `devspace-exec` upgrade: the
+ * returned `ExecStream` is the real thing — inbound frames land in the M1
+ * watermark channel which pauses/resumes the SOCKET, so a slow consumer
+ * closes TCP's receive window and the far end's pump stops pulling from the
+ * container (backpressure end to end, m8-plan Decision 2).
  */
 import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import type { Socket } from 'node:net';
 import {
   EnvironmentSchema,
@@ -25,27 +27,21 @@ import {
   type FsEntry,
 } from '@devspace/contracts';
 import { ExecFrameSchema } from '@devspace/contracts';
-import { fromBase64, toBase64 } from './exec.js';
+import { encodeStdin, fromBase64, toBase64 } from './exec.js';
 import type { ExecStream } from './exec.js';
 import { FrameChannel } from './process-stream.js';
 import {
   EXEC_UPGRADE_PROTOCOL,
   LineDecoder,
   execUpgradePath,
+  safeJsonLine,
   socketDrain,
   writeJsonLine,
 } from './remote-protocol.js';
 import { SandboxError } from './sandbox.js';
 import type { SandboxCore } from './sandbox.js';
 
-type FetchLike = (
-  url: string,
-  init: { method?: string; headers?: Record<string, string>; body?: string },
-) => Promise<{ ok: boolean; status: number; json(): Promise<unknown>; text(): Promise<string> }>;
-
 export interface RemoteSandboxCoreOptions {
-  /** Injected in tests. Defaults to global fetch (Node 22+). */
-  fetchImpl?: FetchLike;
   /** Watermarks for the client-side inbound frame channel (tests). */
   highWaterMark?: number;
   lowWaterMark?: number;
@@ -53,9 +49,13 @@ export interface RemoteSandboxCoreOptions {
 
 const SANDBOX_ERROR_CODES = new Set(['NOT_FOUND', 'CONFLICT', 'PROVISION_FAILED', 'EXEC_FAILED']);
 
+interface JsonResponse {
+  status: number;
+  text: string;
+}
+
 export class RemoteSandboxCore implements SandboxCore {
   private readonly base: string;
-  private readonly fetchImpl: FetchLike;
 
   constructor(
     baseUrl: string,
@@ -63,29 +63,24 @@ export class RemoteSandboxCore implements SandboxCore {
     private readonly opts: RemoteSandboxCoreOptions = {},
   ) {
     this.base = baseUrl.replace(/\/+$/, '');
-    this.fetchImpl = opts.fetchImpl ?? ((url, init) => fetch(url, init));
   }
 
   async createEnvironment(req: CreateEnvironmentRequest): Promise<Environment> {
-    const body = await this.json('POST', '/environments', req, 'PROVISION_FAILED');
-    return EnvironmentSchema.parse(body);
+    const res = await this.request('POST', '/environments', req);
+    if (res.status !== 201) throw this.toError(res, 'PROVISION_FAILED');
+    return EnvironmentSchema.parse(JSON.parse(res.text));
   }
 
   async getEnvironment(envId: string): Promise<Environment | null> {
-    const res = await this.fetchImpl(`${this.base}/environments/${encodeURIComponent(envId)}`, {
-      headers: this.headers(),
-    });
+    const res = await this.request('GET', `/environments/${encodeURIComponent(envId)}`);
     if (res.status === 404) return null;
-    if (!res.ok) throw await this.toError(res, 'EXEC_FAILED');
-    return EnvironmentSchema.parse(await res.json());
+    if (res.status !== 200) throw this.toError(res, 'EXEC_FAILED');
+    return EnvironmentSchema.parse(JSON.parse(res.text));
   }
 
   async destroyEnvironment(envId: string): Promise<void> {
-    const res = await this.fetchImpl(`${this.base}/environments/${encodeURIComponent(envId)}`, {
-      method: 'DELETE',
-      headers: this.headers(),
-    });
-    if (!res.ok) throw await this.toError(res, 'EXEC_FAILED');
+    const res = await this.request('DELETE', `/environments/${encodeURIComponent(envId)}`);
+    if (res.status !== 204) throw this.toError(res, 'EXEC_FAILED');
   }
 
   /** Full-duplex exec over the devspace-exec upgrade. */
@@ -95,14 +90,14 @@ export class RemoteSandboxCore implements SandboxCore {
   }
 
   async fsRead(envId: string, path: string): Promise<Uint8Array> {
-    const body = (await this.json('POST', `/environments/${encodeURIComponent(envId)}/fs/read`, {
+    const body = (await this.json(`/environments/${encodeURIComponent(envId)}/fs/read`, {
       path,
     })) as { data: string };
     return fromBase64(body.data);
   }
 
   async fsWrite(envId: string, path: string, data: Uint8Array, mode?: number): Promise<void> {
-    await this.json('POST', `/environments/${encodeURIComponent(envId)}/fs/write`, {
+    await this.json(`/environments/${encodeURIComponent(envId)}/fs/write`, {
       path,
       data: toBase64(data),
       mode,
@@ -110,7 +105,7 @@ export class RemoteSandboxCore implements SandboxCore {
   }
 
   async fsList(envId: string, path: string): Promise<FsEntry[]> {
-    const body = (await this.json('POST', `/environments/${encodeURIComponent(envId)}/fs/list`, {
+    const body = (await this.json(`/environments/${encodeURIComponent(envId)}/fs/list`, {
       path,
     })) as { entries: unknown[] };
     return body.entries.map((e) => FsEntrySchema.parse(e));
@@ -120,7 +115,7 @@ export class RemoteSandboxCore implements SandboxCore {
     envId: string,
     containerPort: number,
   ): Promise<{ proxyUrl: string; token: string }> {
-    const body = (await this.json('POST', `/environments/${encodeURIComponent(envId)}/ports`, {
+    const body = (await this.json(`/environments/${encodeURIComponent(envId)}/ports`, {
       containerPort,
     })) as { proxyUrl: string; token: string };
     return { proxyUrl: body.proxyUrl, token: body.token };
@@ -128,47 +123,57 @@ export class RemoteSandboxCore implements SandboxCore {
 
   /* ------------------------------------------------------------------------ */
 
-  private headers(): Record<string, string> {
-    return { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' };
+  /** One JSON request over node:http(s); no timeout by design (see header). */
+  private request(method: string, path: string, body?: unknown): Promise<JsonResponse> {
+    return new Promise((resolve, reject) => {
+      const url = new URL(`${this.base}${path}`);
+      const dial = url.protocol === 'https:' ? httpsRequest : httpRequest;
+      const req = dial(url, {
+        method,
+        headers: {
+          authorization: `Bearer ${this.token}`,
+          'content-type': 'application/json',
+        },
+      });
+      req.on('response', (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }),
+        );
+        res.on('error', reject);
+      });
+      req.on('error', reject);
+      req.end(body === undefined ? undefined : JSON.stringify(body));
+    });
   }
 
-  private async json(
-    method: string,
-    path: string,
-    body: unknown,
-    fallback: SandboxError['code'] = 'EXEC_FAILED',
-  ): Promise<unknown> {
-    const res = await this.fetchImpl(`${this.base}${path}`, {
-      method,
-      headers: this.headers(),
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw await this.toError(res, fallback);
-    if (res.status === 204) return undefined;
-    return res.json();
+  /** POST helper for the 2xx-JSON-or-error routes. */
+  private async json(path: string, body: unknown): Promise<unknown> {
+    const res = await this.request('POST', path, body);
+    if (res.status < 200 || res.status >= 300) throw this.toError(res, 'EXEC_FAILED');
+    return res.text ? JSON.parse(res.text) : undefined;
   }
 
   /** Map a remote error envelope back onto SandboxError, preserving known codes. */
-  private async toError(
-    res: { status: number; text(): Promise<string> },
-    fallback: SandboxError['code'],
-  ): Promise<SandboxError> {
-    const text = await res.text().catch(() => '');
+  private toError(res: JsonResponse, fallback: SandboxError['code']): SandboxError {
     try {
-      const body = JSON.parse(text) as { code?: string; message?: string };
+      const body = JSON.parse(res.text) as { code?: string; message?: string };
       const code = SANDBOX_ERROR_CODES.has(body.code ?? '')
         ? (body.code as SandboxError['code'])
         : fallback;
       return new SandboxError(code, body.message ?? `remote sandbox HTTP ${res.status}`);
     } catch {
-      return new SandboxError(fallback, `remote sandbox HTTP ${res.status}: ${text}`);
+      return new SandboxError(fallback, `remote sandbox HTTP ${res.status}: ${res.text}`);
     }
   }
 
   /** Dial the exec upgrade; a non-101 answer maps back onto SandboxError. */
   private upgrade(envId: string): Promise<Socket> {
     return new Promise((resolve, reject) => {
-      const req = httpRequest(`${this.base}${execUpgradePath(envId)}`, {
+      const url = new URL(`${this.base}${execUpgradePath(envId)}`);
+      const dial = url.protocol === 'https:' ? httpsRequest : httpRequest;
+      const req = dial(url, {
         method: 'GET',
         headers: {
           connection: 'Upgrade',
@@ -186,11 +191,12 @@ export class RemoteSandboxCore implements SandboxCore {
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
-          void this.toError(
-            { status: res.statusCode ?? 0, text: async () => text },
-            'EXEC_FAILED',
-          ).then(reject);
+          reject(
+            this.toError(
+              { status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') },
+              'EXEC_FAILED',
+            ),
+          );
         });
         res.on('error', reject);
       });
@@ -230,7 +236,7 @@ function clientExecStream(
   const decoder = new LineDecoder();
   socket.on('data', (chunk: Buffer) => {
     for (const line of decoder.push(chunk)) {
-      const parsed = ExecFrameSchema.safeParse(safeJson(line));
+      const parsed = ExecFrameSchema.safeParse(safeJsonLine(line));
       if (!parsed.success || parsed.data.kind === 'stdin') continue; // protocol noise
       if (parsed.data.kind === 'exit') {
         finish(parsed.data.code);
@@ -260,7 +266,7 @@ function clientExecStream(
   return {
     writeStdin(bytes: Uint8Array): boolean {
       if (exited) return false;
-      return send({ kind: 'stdin', data: toBase64(bytes) });
+      return send(encodeStdin(bytes));
     },
     drain(): Promise<void> {
       return socketDrain(socket);
@@ -280,12 +286,4 @@ function clientExecStream(
       send({ kind: 'kill', signal });
     },
   };
-}
-
-function safeJson(line: string): unknown {
-  try {
-    return JSON.parse(line);
-  } catch {
-    return undefined;
-  }
 }

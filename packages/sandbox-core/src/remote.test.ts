@@ -13,6 +13,7 @@ import { captureExec, createScriptedExecStream, fromBase64, toBase64 } from './e
 import type { ExecStream } from './exec.js';
 import { spawnExecStream } from './process-stream.js';
 import { RemoteSandboxCore } from './remote-client.js';
+import { LineDecoder } from './remote-protocol.js';
 import { createSandboxRequestHandler, createSandboxUpgradeHandler } from './remote-server.js';
 import { SandboxError } from './sandbox.js';
 import type { SandboxCore } from './sandbox.js';
@@ -178,6 +179,53 @@ describe('remote JSON control surface', () => {
     const { client } = await startLoopback(fakeCore(), { token: undefined });
     expect((await client.getEnvironment('e'))?.envId).toBe('e');
   });
+
+  it('refuses the capture exec tokenless — exec never runs unauthenticated', async () => {
+    const { url } = await startLoopback(fakeCore(), { token: undefined });
+    const res = await fetch(`${url}/environments/e/exec`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cmd: ['true'] }),
+    });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { message: string }).message).toContain(
+      'DEVSPACE_INTERNAL_TOKEN',
+    );
+  });
+
+  it('answers 404 (not 500) for a malformed percent-encoded envId', async () => {
+    const { url } = await startLoopback(fakeCore({ getEnvironment: async () => null }));
+    const res = await fetch(`${url}/environments/%zz`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('caps the request body instead of buffering without bound', async () => {
+    const { url } = await startLoopback(fakeCore());
+    const res = await fetch(`${url}/environments/e/fs/write`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: '/x', data: 'A'.repeat(70 * 1024 * 1024) }),
+    }).catch(() => null);
+    // Either the server answered with the error envelope or it destroyed the
+    // oversized request mid-flight; it must never 2xx.
+    if (res) expect(res.status).toBeGreaterThanOrEqual(400);
+  });
+});
+
+describe('LineDecoder', () => {
+  it('carries a multi-byte UTF-8 character split across chunks', () => {
+    const decoder = new LineDecoder();
+    const line = Buffer.from(JSON.stringify({ cwd: '/workspace/한글-café-🎉' }) + '\n');
+    // Split inside the emoji's 4-byte sequence.
+    const cut = line.length - 6;
+    const first = decoder.push(line.subarray(0, cut));
+    const rest = decoder.push(line.subarray(cut));
+    expect(first).toEqual([]);
+    expect(rest).toHaveLength(1);
+    expect(JSON.parse(rest[0]!)).toEqual({ cwd: '/workspace/한글-café-🎉' });
+  });
 });
 
 describe('the devspace-exec wire', () => {
@@ -300,6 +348,20 @@ describe('the devspace-exec wire', () => {
     await new Promise((r) => setTimeout(r, 200));
     stream.kill('SIGKILL');
     // 128 + SIGKILL(9) = 137, observed through two sockets and a child.
+    expect(await stream.done).toBe(137);
+  }, 30_000);
+
+  it('survives an unknown kill signal from the wire (no crash, stream stays live)', async () => {
+    const { core } = childCore(() => spawnExecStream('sh', ['-c', 'exec sleep 30']));
+    const { client } = await startLoopback(core);
+    const stream = await client.exec('env_1', { cmd: ['sleep'], tty: false });
+    await new Promise((r) => setTimeout(r, 200));
+    // ERR_UNKNOWN_SIGNAL territory: the server must drop it, not throw an
+    // unhandled rejection that takes the whole svc (and this test) down.
+    stream.kill('SIGBOGUS' as NodeJS.Signals);
+    await new Promise((r) => setTimeout(r, 200));
+    // The child is still running and the wire still works: a real kill lands.
+    stream.kill('SIGKILL');
     expect(await stream.done).toBe(137);
   }, 30_000);
 

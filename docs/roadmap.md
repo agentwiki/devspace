@@ -2,6 +2,7 @@
 
 Critical path to the end-to-end demo: **M0 → M1 → M2 → M3 → M4.**
 Release-blocking hardening for real multi-tenant use: **M5.**
+Expansion I (split, preview proxy, chat completion, 2nd agent): **M6.**
 
 ## M0 — Scaffolding (done)
 
@@ -182,13 +183,63 @@ and rootless dockerd/userns-remap (daemon-level deployment concerns).
 > an agent needs in-container termination (`docker exec <ctr> kill`) or
 > `destroy()` (`docker rm --force`).
 
-## M6+ — Expansion
+## M6 — Expansion I (done)
 
-Additional chat adapters (Slack, Discord); 2nd ACP agent backend; multi-host
-scheduling; NATS bus; the two-service HTTP split (gateway ⇄ orchestrator);
-**ports preview proxy** (deferred from M5 — needs authenticated ingress
-through the control plane, which the HTTP split provides). UI surface is chat
-only — no self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
+The two-service HTTP split, the ports preview proxy it unlocks, the real
+Discord adapter, the M4 chat-surface deferrals, and the second ACP agent
+backend. Design of record: docs/m6-plan.md.
+
+Landed:
+
+- **Two-service HTTP split** (`internal-http.ts`) — the cut at exactly the
+  seams M4 predicted: gateway → orchestrator authed synchronous
+  `POST /chat-events` (same `ChatEventResult` as the in-process seam),
+  orchestrator → gateway `POST /render` (retry then log-and-drop — the
+  "render path never throws" discipline moves up one level), plus the
+  binding cold-miss reads and `GET /sessions`. One shared bearer token
+  (`DEVSPACE_INTERNAL_TOKEN`), timing-safe, both directions; split mode is a
+  config flip (`ORCHESTRATOR_URL` / `GATEWAY_RENDER_URL`) and the M4
+  in-process demo stays the zero-config default. The M3 fire-and-forget
+  `POST /events` ingest was replaced by `/chat-events` (no known consumer).
+  The whole split is tested over real loopback HTTP servers driven by the
+  real clients.
+- **Ports preview proxy** (M1→M5→M6 deferral lands) — `forwardPort` works:
+  a host-side reverse proxy routes `/t/<token>/…` to the container's
+  per-env-network IP (the only address the M5 egress posture leaves
+  reachable), 32-byte capability tokens shown only in the owner's thread,
+  routes revoked with their env, 404-before-upstream-dial on unknown tokens,
+  dumb-boundary discipline throughout. `expose-port:<n>` action, `!port <n>`
+  chat ergonomics in both adapters, audited `port.exposed`. Live itest
+  serves a real in-container HTTP server through the proxy. (WebSocket
+  upgrade deferred → M7.)
+- **Discord adapter, real** — mirrors the Slack model (session = thread,
+  same stable action ids, status edit-in-place, coalesced stream edits with
+  a 2000-char tail window) behind a ~5-method `DiscordTransport` seam; all
+  adapter logic tested over a fake, discord.js glue is the thin
+  documented-untested boundary (the Bolt-internals line, redrawn).
+  chat-gateway-svc runs one platform per process (`CHAT_PLATFORM`).
+- **Chat-surface completion (M4 deferrals)** — `secret.submitted` ChatEvent
+  (contract-enforced name whitelist): values go straight to the envelope
+  store, are registered for redaction BEFORE storage (an echoed secret is
+  redacted from turn one — regression-tested), audited by name only. Slack:
+  `set-secrets` modal (pure platform UI; thread ref rides private_metadata),
+  bare-`/devspace` repo-picker modal (dismissal creates nothing), App Home
+  backed by the real `listSessions` read (`ConversationRepo.listByUser`).
+  Discord modal parity deferred (chat-platform-ui-parity.md).
+- **Second ACP agent backend** — `claude-code-acp` as `AgentKind 'claude'`:
+  launch/kill argv + `ANTHROPIC_*` env is the ENTIRE diff (top-risk #6 held:
+  the runner, handshake, event mapping, and permission gate are untouched;
+  proven by running the claude kind over the same loopback ACP agent). The
+  agent-runtime volume ships both adapters.
+
+## M7+ — Expansion II
+
+Multi-host scheduling (placement/capacity/drain — meaningless before a
+second sandbox host); NATS bus (pays for itself only alongside multi-host;
+`EventBus` is the seam); preview-proxy WebSocket upgrade; Discord modal /
+session-list parity; per-service identity on the internal API (mTLS —
+deployment-layer, replacing the shared token). UI surface remains chat only
+— no self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 

@@ -671,3 +671,107 @@ describe('expose-port (M6)', () => {
     expect((h.rendered.at(-1) as { text: string }).text).toContain('Could not expose port 3000');
   });
 });
+
+describe('secret.submitted (M6)', () => {
+  const created = async (h: Harness): Promise<string> => {
+    const res = (await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C1:1',
+      userId: 'u1',
+    })) as { conversationId: string };
+    return res.conversationId;
+  };
+
+  it('stores the value encrypted, audits the name only, and confirms without the value', async () => {
+    const h = harness();
+    const conversationId = await created(h);
+    await h.orch.handleChatEvent({
+      type: 'secret.submitted',
+      conversationId,
+      userId: 'u1',
+      name: 'LLM_KEY',
+      value: 'sk-live-submitted-via-modal',
+    });
+
+    // Stored and resolvable through the envelope store.
+    await expect(h.store.resolve('u1', 'LLM_KEY', conversationId)).resolves.toBe(
+      'sk-live-submitted-via-modal',
+    );
+    // At rest it is ciphertext, not plaintext.
+    const rec = await h.repos.secrets.get('u1', 'LLM_KEY', conversationId);
+    expect(rec?.ciphertext).not.toContain('sk-live-submitted-via-modal');
+
+    // Audit carries the name and NEVER the value.
+    const audits = await h.repos.audit.listByConversation(conversationId);
+    const stored = audits.find((a) => a.action === 'secret.stored');
+    expect(stored?.detail).toEqual({ name: 'LLM_KEY' });
+    expect(JSON.stringify(audits)).not.toContain('sk-live-submitted-via-modal');
+
+    // The confirmation message names the secret but not the value.
+    const confirm = h.rendered.at(-1) as { type: string; text: string };
+    expect(confirm).toMatchObject({ type: 'post_message' });
+    expect(confirm.text).toContain('LLM_KEY');
+    expect(confirm.text).not.toContain('sk-live-submitted-via-modal');
+  });
+
+  it('registers the plaintext immediately: an echo in the SAME conversation is redacted', async () => {
+    const value = 'sk-live-echo-me-please';
+    const agent = fakeAgent([{ type: 'message', text: `your key is ${value}` }]);
+    const h = harness({ agent });
+    const conversationId = (
+      (await h.orch.handleChatEvent({
+        type: 'conversation.created',
+        platform: 'slack',
+        externalChannelId: 'C1:1',
+        userId: 'u1',
+        repoChoice: { repoUrl: 'https://github.com/a/b', empty: false },
+      })) as { conversationId: string }
+    ).conversationId;
+
+    await h.orch.handleChatEvent({
+      type: 'secret.submitted',
+      conversationId,
+      userId: 'u1',
+      name: 'LLM_KEY',
+      value,
+    });
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId,
+      userId: 'u1',
+      text: 'go',
+    });
+
+    const echoed = h.rendered.filter(
+      (c): c is Extract<typeof c, { type: 'post_message' }> => c.type === 'post_message',
+    );
+    expect(echoed.some((c) => c.text.includes('your key is'))).toBe(true);
+    expect(JSON.stringify(h.rendered)).not.toContain(value);
+  });
+
+  it('rejects a submission from a non-owner', async () => {
+    const h = harness();
+    const conversationId = await created(h);
+    await expect(
+      h.orch.handleChatEvent({
+        type: 'secret.submitted',
+        conversationId,
+        userId: 'intruder',
+        name: 'GITHUB_TOKEN',
+        value: 'ghp_stolen',
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(await h.repos.secrets.get('intruder', 'GITHUB_TOKEN', conversationId)).toBeNull();
+  });
+
+  it('posts the set-secrets entry point with the conversation status (M6-D)', async () => {
+    const h = harness();
+    await created(h);
+    const actionsCmd = h.rendered.find((c) => c.type === 'post_actions') as {
+      actions: Array<{ actionId: string }>;
+    };
+    expect(actionsCmd).toBeTruthy();
+    expect(actionsCmd.actions).toEqual([expect.objectContaining({ actionId: 'set-secrets' })]);
+  });
+});

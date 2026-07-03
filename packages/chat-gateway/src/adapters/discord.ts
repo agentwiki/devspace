@@ -205,6 +205,15 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
         const ref: ThreadRef = { channel: event.parentChannelId, threadTs: event.channelId };
         const conversationId = await this.binding.conversationFor(ref);
         if (!conversationId) return;
+        // Modal-based secret entry is Slack-only in M6 (m6-plan: Discord
+        // modal parity deferred) — answer with a hint instead of a dead click.
+        if (event.customId === 'set-secrets') {
+          await this.transport.postMessage(event.channelId, {
+            content:
+              'In-chat secret entry is Slack-only for now — seed secrets out-of-band or use the Slack surface.',
+          });
+          return;
+        }
         await this.emitSafe({
           type: 'action.invoked',
           conversationId,

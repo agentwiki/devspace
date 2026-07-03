@@ -153,6 +153,17 @@ export class Orchestrator {
     return this.deps.render(command);
   }
 
+  /** The in-chat entry point for secret setup (M6-D) — a single stable action
+   * id the platform adapter turns into its own UI (Slack: a modal). */
+  private emitSecretsPrompt(conversationId: string): Promise<void> {
+    return this.emit({
+      type: 'post_actions',
+      conversationId,
+      text: 'Configure credentials for this session — stored encrypted, never echoed.',
+      actions: [{ actionId: 'set-secrets', label: 'Set secrets', style: 'primary' }],
+    });
+  }
+
   /**
    * Apply a forward transition idempotently: if the unit is already in or past
    * the target state, no-op (redelivery), never call `transition` (which would
@@ -190,6 +201,8 @@ export class Orchestrator {
         return this.onConversationCreated(event);
       case 'message.posted':
         return this.onMessagePosted(event);
+      case 'secret.submitted':
+        return this.onSecretSubmitted(event);
       case 'action.invoked':
         return this.onActionInvoked(event);
     }
@@ -246,6 +259,7 @@ export class Orchestrator {
     const choice = event.repoChoice;
     if (!choice || choice.empty || !choice.repoUrl) {
       await this.emit(statusCommand(conv.id, 'CREATED', 'Conversation ready.', registry));
+      await this.emitSecretsPrompt(conv.id);
       return created;
     }
 
@@ -258,6 +272,7 @@ export class Orchestrator {
       await this.emit(
         statusCommand(conv.id, 'PROVISIONING', 'Provisioning environment…', registry),
       );
+      await this.emitSecretsPrompt(conv.id);
 
       // Only the read-only clone token (if any) enters the container.
       const cloneToken = await this.deps.secrets.resolve(
@@ -291,6 +306,34 @@ export class Orchestrator {
       await this.failWorkUnit(wu.id, conv.id, err, registry);
     }
     return created;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* secret.submitted (M6, m6-plan Decision 8)                               */
+  /* ---------------------------------------------------------------------- */
+
+  private async onSecretSubmitted(
+    event: Extract<ChatEvent, { type: 'secret.submitted' }>,
+  ): Promise<void> {
+    await this.assertOwnership(event.conversationId, event.userId);
+    const registry = this.registryFor(event.conversationId);
+    // Register the plaintext BEFORE anything else can render: an agent (or
+    // user) echoing the value is redacted from the moment it exists here.
+    registry.register(event.value);
+    await this.deps.secrets.put(event.userId, event.conversationId, event.name, event.value);
+    // Name only — never the value (the M5 audit-hygiene invariant).
+    await this.audit('secret.stored', {
+      userId: event.userId,
+      conversationId: event.conversationId,
+      detail: { name: event.name },
+    });
+    await this.emit(
+      messageCommand(
+        event.conversationId,
+        `Stored ${event.name} for this conversation (encrypted at rest, never echoed).`,
+        registry,
+      ),
+    );
   }
 
   /* ---------------------------------------------------------------------- */

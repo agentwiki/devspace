@@ -258,6 +258,16 @@ export const ChatEventSchema = z.discriminatedUnion('type', [
     actionId: z.string().describe('stable id, e.g. "create-pr" | "view-pr" | "approve:<reqId>"'),
     payload: z.record(z.unknown()).default({}),
   }),
+  // M6: in-chat secret entry (m6-plan Decision 8). The value flows the same
+  // authed path as every other event, straight into the envelope store; the
+  // name whitelist is enforced at the contract so nothing else is storable.
+  z.object({
+    type: z.literal('secret.submitted'),
+    conversationId: ConversationIdSchema,
+    userId: UserIdSchema,
+    name: z.enum(['LLM_KEY', 'GITHUB_TOKEN', 'GITHUB_CLONE_TOKEN']),
+    value: z.string().min(1).describe('secret plaintext — stored encrypted, never logged/echoed'),
+  }),
 ]);
 export type ChatEvent = z.infer<typeof ChatEventSchema>;
 

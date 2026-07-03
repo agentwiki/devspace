@@ -186,3 +186,122 @@ export function homeView(sessions: HomeSession[]): HomeView {
     ],
   };
 }
+
+/* -------------------------------------------------------------------------- */
+/* Modals (M6-D): in-chat secret entry + the bare-command repo picker          */
+/* -------------------------------------------------------------------------- */
+
+export const SECRETS_CALLBACK_ID = 'devspace-secrets';
+export const REPO_PICKER_CALLBACK_ID = 'devspace-repo-picker';
+
+/** The storable names — mirrors the `secret.submitted` contract whitelist. */
+export const SECRET_INPUTS = [
+  { blockId: 'llm_key', name: 'LLM_KEY', label: 'LLM API key' },
+  { blockId: 'github_token', name: 'GITHUB_TOKEN', label: 'GitHub token (push + PR)' },
+  {
+    blockId: 'github_clone_token',
+    name: 'GITHUB_CLONE_TOKEN',
+    label: 'GitHub clone token (read-only, in-container)',
+  },
+] as const;
+
+export type SecretName = (typeof SECRET_INPUTS)[number]['name'];
+
+interface InputBlock {
+  type: 'input';
+  block_id: string;
+  optional: boolean;
+  label: PlainText;
+  element: { type: 'plain_text_input'; action_id: 'value'; placeholder?: PlainText };
+}
+
+export interface SlackModalView {
+  type: 'modal';
+  callback_id: string;
+  /** Carries the thread/channel context through the modal round trip. */
+  private_metadata: string;
+  title: PlainText;
+  submit: PlainText;
+  close: PlainText;
+  blocks: (InputBlock | SectionBlock)[];
+}
+
+const plain = (text: string): PlainText => ({ type: 'plain_text', text });
+
+const input = (
+  blockId: string,
+  label: string,
+  optional: boolean,
+  placeholder?: string,
+): InputBlock => ({
+  type: 'input',
+  block_id: blockId,
+  optional,
+  label: plain(label),
+  element: {
+    type: 'plain_text_input',
+    action_id: 'value',
+    ...(placeholder ? { placeholder: plain(placeholder) } : {}),
+  },
+});
+
+/** The `set-secrets` modal: every field optional; values go straight to the
+ * envelope store as `secret.submitted` events and are never echoed. */
+export function secretsModal(privateMetadata: string): SlackModalView {
+  return {
+    type: 'modal',
+    callback_id: SECRETS_CALLBACK_ID,
+    private_metadata: privateMetadata,
+    title: plain('devspace secrets'),
+    submit: plain('Save'),
+    close: plain('Cancel'),
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: 'Values are envelope-encrypted at rest and redacted from all output. Leave a field empty to keep its current value.',
+        },
+      },
+      ...SECRET_INPUTS.map((s) => input(s.blockId, s.label, true)),
+    ],
+  };
+}
+
+/** The bare-`/devspace` repo picker (m6-plan Decision 9). */
+export function repoPickerModal(privateMetadata: string): SlackModalView {
+  return {
+    type: 'modal',
+    callback_id: REPO_PICKER_CALLBACK_ID,
+    private_metadata: privateMetadata,
+    title: plain('New devspace session'),
+    submit: plain('Start'),
+    close: plain('Cancel'),
+    blocks: [
+      input('repo', 'Repository', false, 'https://github.com/owner/repo or owner/repo'),
+      input('ref', 'Branch or ref (optional)', true, 'main'),
+    ],
+  };
+}
+
+/** Bolt's view_submission state shape: values[blockId][actionId].value. */
+export type ViewStateValues = Record<string, Record<string, { value?: string | null }>>;
+
+/** Extract the filled secret fields from a secrets-modal submission. */
+export function parseSecretsSubmission(
+  values: ViewStateValues,
+): Array<{ name: SecretName; value: string }> {
+  const out: Array<{ name: SecretName; value: string }> = [];
+  for (const s of SECRET_INPUTS) {
+    const value = values[s.blockId]?.value?.value?.trim();
+    if (value) out.push({ name: s.name, value });
+  }
+  return out;
+}
+
+/** Extract the "<repo> [ref]" text from a repo-picker submission. */
+export function parseRepoPickerSubmission(values: ViewStateValues): string {
+  const repo = values.repo?.value?.value?.trim() ?? '';
+  const ref = values.ref?.value?.value?.trim() ?? '';
+  return [repo, ref].filter(Boolean).join(' ');
+}

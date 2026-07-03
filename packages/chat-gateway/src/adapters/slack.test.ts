@@ -49,6 +49,7 @@ function fakeWebClient() {
       async (_args: { channel: string; ts: string; text: string; blocks?: unknown[] }) => {},
     ),
     publishHome: vi.fn(async (_args: { userId: string; view: unknown }) => {}),
+    openView: vi.fn(async (_args: { trigger_id: string; view: unknown }) => {}),
   };
 }
 
@@ -196,6 +197,79 @@ describe('SlackAdapter inbound (recorded payloads through real Bolt)', () => {
         payload: {},
       },
     ]);
+  });
+
+  it('bare /devspace opens the repo picker modal instead of an empty session (M6)', async () => {
+    const h = await startAdapter();
+    await h.receiver.dispatch(fixture('command-devspace-bare.json'));
+    expect(h.events).toEqual([]); // nothing created on open
+    expect(h.client.postMessage).not.toHaveBeenCalled();
+    expect(h.client.openView).toHaveBeenCalledTimes(1);
+    const view = h.client.openView.mock.calls[0]![0].view as {
+      callback_id: string;
+      private_metadata: string;
+    };
+    expect(view.callback_id).toBe('devspace-repo-picker');
+    expect(view.private_metadata).toBe('C0123ABC');
+  });
+
+  it('repo picker submission roots the thread exactly like the arg path (M6)', async () => {
+    const h = await startAdapter();
+    await h.receiver.dispatch(fixture('view-repo-picker-submit.json'));
+    expect(h.client.postMessage).toHaveBeenCalledTimes(1); // the root message
+    expect(h.events).toEqual([
+      {
+        type: 'conversation.created',
+        platform: 'slack',
+        externalChannelId: 'C0123ABC:9999.000001',
+        userId: 'U111',
+        repoChoice: { repoUrl: 'https://github.com/acme/widgets', ref: 'main', empty: false },
+      },
+    ]);
+  });
+
+  it('the set-secrets button opens the modal with the thread ref in private_metadata (M6)', async () => {
+    const binding = new ConversationBinding();
+    binding.bind('conv-s', { channel: 'C0123ABC', threadTs: '1712345678.000200' });
+    const h = await startAdapter({ binding });
+    await h.receiver.dispatch(fixture('action-set-secrets.json'));
+    expect(h.events).toEqual([]); // pure platform UI — never reaches the orchestrator
+    expect(h.client.openView).toHaveBeenCalledTimes(1);
+    const view = h.client.openView.mock.calls[0]![0].view as {
+      callback_id: string;
+      private_metadata: string;
+    };
+    expect(view.callback_id).toBe('devspace-secrets');
+    expect(view.private_metadata).toBe('C0123ABC:1712345678.000200');
+  });
+
+  it('secrets submission emits secret.submitted per filled field, none for empty (M6)', async () => {
+    const binding = new ConversationBinding();
+    binding.bind('conv-s', { channel: 'C0123ABC', threadTs: '1712345678.000200' });
+    const h = await startAdapter({ binding });
+    await h.receiver.dispatch(fixture('view-secrets-submit.json'));
+    expect(h.events).toEqual([
+      {
+        type: 'secret.submitted',
+        conversationId: 'conv-s',
+        userId: 'U111',
+        name: 'LLM_KEY',
+        value: 'sk-live-supersecret',
+      },
+      {
+        type: 'secret.submitted',
+        conversationId: 'conv-s',
+        userId: 'U111',
+        name: 'GITHUB_TOKEN',
+        value: 'ghp_tokentokentoken',
+      },
+    ]);
+  });
+
+  it('a secrets submission for an unbound thread is dropped, not misrouted (M6)', async () => {
+    const h = await startAdapter(); // nothing bound
+    await h.receiver.dispatch(fixture('view-secrets-submit.json'));
+    expect(h.events).toEqual([]);
   });
 
   it('ignores replies in unbound threads and the bot’s own messages', async () => {

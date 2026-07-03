@@ -31,6 +31,17 @@ cut at exactly those two seam functions — the in-process demo wiring and the
 two-service split are the same graph, differing only in transport
 (docs/m6-plan.md, workstream A).
 
+Since M8 the orchestrator→sandbox-core edge has one too: the sandbox tier is
+1..N hosts, each a sandbox-core-svc over its own Docker daemon. The JSON
+control surface rides the same bearer regime, and the full-duplex exec stream
+crosses machines as ndjson `ExecFrame`s over a `devspace-exec` HTTP Upgrade
+with backpressure preserved end to end (TCP's window is the kernel-enforced
+middle; the M1 watermark channel sits at both rims). `MultiHostSandboxCore`
+places envs (least-loaded, capacity-capped, drain-aware) and routes stickily
+behind the unchanged `SandboxCore` interface — fleet mode is a config flip
+(`SANDBOX_HOSTS`), and unset, everything stays in-process as in M4
+(docs/m8-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

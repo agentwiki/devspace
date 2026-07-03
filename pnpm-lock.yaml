@@ -97,15 +97,9 @@ importers:
 
   apps/sandbox-core-svc:
     dependencies:
-      '@devspace/contracts':
-        specifier: workspace:*
-        version: link:../../packages/contracts
       '@devspace/sandbox-core':
         specifier: workspace:*
         version: link:../../packages/sandbox-core
-      zod:
-        specifier: ^3.24.1
-        version: 3.25.76
 
   packages/agent-runner:
     dependencies:
@@ -179,6 +173,9 @@ importers:
       '@devspace/contracts':
         specifier: workspace:*
         version: link:../contracts
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
 
 packages:
 

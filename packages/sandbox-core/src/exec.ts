@@ -48,7 +48,9 @@ export function fromBase64(data: string): Uint8Array {
   return new Uint8Array(Buffer.from(data, 'base64'));
 }
 
-export function encodeStdin(bytes: Uint8Array): ExecFrame {
+// Narrow return type: the stdin variant is a member of both ExecFrame and the
+// remote wire's ExecClientFrame, so callers on either union can use it.
+export function encodeStdin(bytes: Uint8Array): { kind: 'stdin'; data: string } {
   return { kind: 'stdin', data: toBase64(bytes) };
 }
 

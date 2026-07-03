@@ -21,13 +21,18 @@ import {
 } from '@devspace/db';
 import {
   DevcontainerSandboxCore,
+  MultiHostSandboxCore,
   PreviewProxy,
+  RemoteSandboxCore,
   assertRuntimeAvailable,
   hardeningFromEnv,
   nodeCommandRunner,
   previewProxyFromEnv,
+  sandboxHostsFromEnv,
   type PreviewProxyOptions,
+  type SandboxCore,
   type SandboxHardening,
+  type SandboxHostConfig,
 } from '@devspace/sandbox-core';
 import { DefaultAgentRunner } from '@devspace/agent-runner';
 import { Orchestrator } from './index.js';
@@ -83,6 +88,16 @@ export interface OrchestratorBootConfig {
    * `forwardPort` then rejects with a clear message.
    */
   preview?: PreviewProxyOptions;
+  /**
+   * Sandbox fleet (M8, m8-plan Decision 8). Defaults to
+   * `sandboxHostsFromEnv(process.env)` (SANDBOX_HOSTS). When set, the sandbox
+   * is MultiHostSandboxCore over RemoteSandboxCore clients and everything
+   * host-local (hardening assert, egress/preview proxies) is each sandbox
+   * host's own concern; unset, the zero-config in-process boot is unchanged.
+   */
+  sandboxHosts?: SandboxHostConfig[];
+  /** Bearer for the sandbox hosts (defaults to DEVSPACE_INTERNAL_TOKEN). */
+  internalToken?: string;
 }
 
 export interface BootedOrchestrator {
@@ -106,20 +121,38 @@ export async function bootOrchestrator(
   const repos = createPostgresRepositories(pool);
   const keyring = parseKeyring(config.envelopeKey, config.retiredKeys ?? []);
   const secrets = new SecretStore(repos.secrets, keyring);
-  // Hardening is boot-time host policy; a configured runtime class (gVisor/
-  // Kata) must exist on the daemon or we refuse to serve at all.
-  const hardening = config.sandboxHardening ?? hardeningFromEnv(process.env);
-  if (hardening?.runtime) {
-    await assertRuntimeAvailable(nodeCommandRunner, hardening.runtime);
-  }
-  // The ports preview proxy (M6) — started before anything can forwardPort.
-  const previewOptions = config.preview ?? previewProxyFromEnv(process.env);
+  // Fleet mode (M8): SANDBOX_HOSTS makes the sandbox a placement layer over
+  // remote sandbox-core-svc hosts. Hardening, egress, and preview are host
+  // policy and live where the daemons live, so nothing local starts here.
+  const sandboxHosts = config.sandboxHosts ?? sandboxHostsFromEnv(process.env);
+  let sandbox: SandboxCore;
   let preview: PreviewProxy | undefined;
-  if (previewOptions) {
-    preview = new PreviewProxy(previewOptions);
-    await preview.start();
+  if (sandboxHosts?.length) {
+    const token = config.internalToken ?? process.env.DEVSPACE_INTERNAL_TOKEN;
+    if (!token) throw new Error('SANDBOX_HOSTS requires DEVSPACE_INTERNAL_TOKEN');
+    sandbox = new MultiHostSandboxCore(
+      sandboxHosts.map((h) => ({
+        name: h.name,
+        capacity: h.capacity,
+        draining: h.draining,
+        core: new RemoteSandboxCore(h.url, token),
+      })),
+    );
+  } else {
+    // Hardening is boot-time host policy; a configured runtime class (gVisor/
+    // Kata) must exist on the daemon or we refuse to serve at all.
+    const hardening = config.sandboxHardening ?? hardeningFromEnv(process.env);
+    if (hardening?.runtime) {
+      await assertRuntimeAvailable(nodeCommandRunner, hardening.runtime);
+    }
+    // The ports preview proxy (M6) — started before anything can forwardPort.
+    const previewOptions = config.preview ?? previewProxyFromEnv(process.env);
+    if (previewOptions) {
+      preview = new PreviewProxy(previewOptions);
+      await preview.start();
+    }
+    sandbox = new DevcontainerSandboxCore({ hardening, preview });
   }
-  const sandbox = new DevcontainerSandboxCore({ hardening, preview });
   const agents = new DefaultAgentRunner({
     exec: sandbox,
     // llmKeyRef is a secret record id resolved through the envelope store.

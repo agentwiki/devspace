@@ -42,6 +42,12 @@ services:
       # transport + internal API light up; unset, render surfaces to logs.
       DEVSPACE_INTERNAL_TOKEN: ${DEVSPACE_INTERNAL_TOKEN:-}
       GATEWAY_RENDER_URL: ${DEVSPACE_INTERNAL_TOKEN:+http://chat-gateway:4002/render}
+      # Fleet mode (M8): comma-separated name=url[|capacity][|drain] entries,
+      # e.g. SANDBOX_HOSTS=local=http://sandbox-core:4001|8 — the orchestrator
+      # then places envs on remote sandbox hosts and execs ride the
+      # devspace-exec wire (requires DEVSPACE_INTERNAL_TOKEN). Unset: the
+      # zero-config in-process sandbox (M4) is unchanged.
+      SANDBOX_HOSTS: ${SANDBOX_HOSTS:-}
     ports:
       - '4000:4000'
 
@@ -50,6 +56,10 @@ services:
     command: ['node', 'apps/sandbox-core-svc/dist/main.js']
     environment:
       PORT: '4001'
+      # M8: with the shared token set, the whole surface requires the bearer
+      # and the devspace-exec stream serves; unset, the JSON surface stays a
+      # local ops tool and the exec stream refuses (m8-plan Decision 5).
+      DEVSPACE_INTERNAL_TOKEN: ${DEVSPACE_INTERNAL_TOKEN:-}
       # Ports preview proxy (M6): set PREVIEW_PROXY_PORT (e.g. 4010) and map
       # it below; PREVIEW_BASE_URL is what users reach (TLS in front).
       PREVIEW_PROXY_PORT: ${PREVIEW_PROXY_PORT:-}

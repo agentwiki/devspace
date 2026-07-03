@@ -55,7 +55,7 @@ suite('postgres repositories', () => {
 
   // Isolate every test from the others and from prior runs.
   afterEach(async () => {
-    await pool.query('TRUNCATE events, secrets, work_units, conversations CASCADE');
+    await pool.query('TRUNCATE audit_log, events, secrets, work_units, conversations CASCADE');
   });
 
   it('round-trips conversations, work units, secrets, and events', async () => {
@@ -105,6 +105,30 @@ suite('postgres repositories', () => {
     expect(await repos.events.listUnconsumed()).toHaveLength(1);
     await repos.events.markConsumed(evt.id);
     expect(await repos.events.listUnconsumed()).toHaveLength(0);
+  });
+
+  it('round-trips audit entries in insertion order (M5)', async () => {
+    const repos = createPostgresRepositories(pool);
+    const first = await repos.audit.append({
+      userId: 'u1',
+      conversationId: 'c-audit',
+      workUnitId: 'wu-1',
+      action: 'secret.resolved',
+      detail: { name: 'GITHUB_TOKEN', purpose: 'pr.create' },
+    });
+    await repos.audit.append({ conversationId: 'c-audit', action: 'teardown', detail: {} });
+    await repos.audit.append({ conversationId: 'c-other', action: 'teardown', detail: {} });
+
+    const rows = await repos.audit.listByConversation('c-audit');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      id: first.id,
+      action: 'secret.resolved',
+      userId: 'u1',
+      workUnitId: 'wu-1',
+      detail: { name: 'GITHUB_TOKEN', purpose: 'pr.create' },
+    });
+    expect(rows[1]?.action).toBe('teardown');
   });
 
   it('rejects a genuinely illegal transition', async () => {

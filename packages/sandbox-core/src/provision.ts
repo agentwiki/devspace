@@ -20,6 +20,18 @@ import { join } from 'node:path';
 import type { CreateEnvironmentRequest, MountSpec, ResourceLimits } from '@devspace/contracts';
 import type { CommandRunner } from './cli.js';
 import { runOrThrow } from './cli.js';
+import type { SandboxHardening } from './hardening.js';
+import {
+  DEMO_HARDENING,
+  dockerNetworkCreateArgs,
+  dockerNetworkGatewayArgs,
+  dockerNetworkRmArgs,
+  hardeningRunArgs,
+  ownsNetworkLifecycle,
+  parseNetworkGateway,
+  proxyContainerEnv,
+  resolveNetworkName,
+} from './hardening.js';
 
 /** A JSON-ish devcontainer.json shape — we only touch a few known keys. */
 export type DevcontainerConfig = Record<string, unknown> & {
@@ -28,6 +40,7 @@ export type DevcontainerConfig = Record<string, unknown> & {
   dockerComposeFile?: unknown;
   runArgs?: string[];
   mounts?: string[];
+  containerEnv?: Record<string, string>;
 };
 
 /** Hard cap on process count — a cheap first line of defense vs fork bombs. */
@@ -59,8 +72,11 @@ export function mountConfigEntries(mounts: readonly MountSpec[]): string[] {
 
 /**
  * Merge the repo's devcontainer.json with our overrides and injected
- * runArgs/mounts. `override` wins over the repo config; our resource runArgs and
- * generic mounts are appended so they never clobber what the repo/override set.
+ * runArgs/mounts. `override` wins over the repo config; our resource runArgs,
+ * hardening runArgs, and generic mounts are appended so they never clobber
+ * what the repo/override set. `containerEnv` is the one exception to the
+ * append rule: our entries (the egress proxy vars) MERGE OVER the repo's —
+ * they are policy, and a repo config must not be able to unset them.
  */
 export function mergeDevcontainerConfig(input: {
   repoConfig?: DevcontainerConfig;
@@ -68,6 +84,12 @@ export function mergeDevcontainerConfig(input: {
   baseImage?: string;
   resources: ResourceLimits;
   mounts: readonly MountSpec[];
+  /** Host hardening profile (m5-plan Decision 1); omitted = demo mode. */
+  hardening?: SandboxHardening;
+  /** Resolved network for this env (per-env profiles resolve by envId). */
+  networkName?: string;
+  /** Policy env for every in-container process (e.g. egress proxy vars). */
+  containerEnv?: Record<string, string>;
 }): DevcontainerConfig {
   const base: DevcontainerConfig = { ...input.repoConfig, ...input.override };
 
@@ -76,9 +98,24 @@ export function mergeDevcontainerConfig(input: {
     base.image = input.baseImage;
   }
 
-  const runArgs = [...(base.runArgs ?? []), ...resourceRunArgs(input.resources)];
+  const runArgs = [
+    ...(base.runArgs ?? []),
+    ...resourceRunArgs(input.resources),
+    ...(input.hardening
+      ? hardeningRunArgs(input.hardening, {
+          diskMB: input.resources.diskMB,
+          networkName: input.networkName,
+        })
+      : []),
+  ];
   const mounts = [...(base.mounts ?? []), ...mountConfigEntries(input.mounts)];
-  return { ...base, runArgs, mounts };
+  const containerEnv = { ...base.containerEnv, ...input.containerEnv };
+  return {
+    ...base,
+    runArgs,
+    mounts,
+    ...(Object.keys(containerEnv).length > 0 ? { containerEnv } : {}),
+  };
 }
 
 export function buildGitCloneArgs(repoUrl: string, dest: string, ref?: string): string[] {
@@ -143,6 +180,8 @@ export interface ProvisionResult {
   containerId: string;
   workspaceFolder: string;
   remoteUser?: string;
+  /** Per-env network created for this env (owner: sandbox teardown). */
+  networkName?: string;
 }
 
 export interface Provisioner {
@@ -152,18 +191,26 @@ export interface Provisioner {
 export interface DevcontainerProvisionerOptions {
   devcontainerPath?: string;
   gitPath?: string;
+  dockerPath?: string;
   /** Root under which per-env workspaces are created. */
   workspaceRoot?: string;
   /** Timeout for the (potentially slow) `devcontainer up`. */
   upTimeoutMs?: number;
+  /**
+   * Host isolation policy applied to EVERY env (m5-plan Decision 1). Defaults
+   * to demo mode (plain Docker); production boots pass a hardened profile.
+   */
+  hardening?: SandboxHardening;
 }
 
 /** Provisions containers via `git` + `devcontainers/cli`. */
 export class DevcontainerProvisioner implements Provisioner {
   private readonly devcontainer: string;
   private readonly git: string;
+  private readonly docker: string;
   private readonly workspaceRoot: string;
   private readonly upTimeoutMs: number;
+  private readonly hardening: SandboxHardening;
 
   constructor(
     private readonly runner: CommandRunner,
@@ -171,12 +218,16 @@ export class DevcontainerProvisioner implements Provisioner {
   ) {
     this.devcontainer = options.devcontainerPath ?? 'devcontainer';
     this.git = options.gitPath ?? 'git';
+    this.docker = options.dockerPath ?? 'docker';
     this.workspaceRoot = options.workspaceRoot ?? tmpdir();
     this.upTimeoutMs = options.upTimeoutMs ?? 10 * 60 * 1000;
+    this.hardening = options.hardening ?? DEMO_HARDENING;
   }
 
   async provision(envId: string, req: CreateEnvironmentRequest): Promise<ProvisionResult> {
     const workspaceFolder = await mkdtemp(join(this.workspaceRoot, `devspace-${sanitize(envId)}-`));
+    const networkName = resolveNetworkName(this.hardening, envId);
+    let createdNetwork = false;
     try {
       if (req.repoUrl) {
         await runOrThrow(
@@ -186,11 +237,37 @@ export class DevcontainerProvisioner implements Provisioner {
         );
       }
 
+      // Per-env isolated network before `up` — no route out, no env↔env.
+      if (networkName && ownsNetworkLifecycle(this.hardening)) {
+        await runOrThrow(
+          this.runner,
+          this.docker,
+          dockerNetworkCreateArgs(networkName, { internal: true }),
+        );
+        createdNetwork = true;
+      }
+
+      // The egress proxy address: static when configured, otherwise resolved
+      // from the per-env network's OWN gateway — an `--internal` network can
+      // reach the host only on its own bridge subnet.
+      let proxyUrl = this.hardening.egressProxyUrl;
+      if (!proxyUrl && this.hardening.egressProxyPort && createdNetwork && networkName) {
+        const inspect = await runOrThrow(
+          this.runner,
+          this.docker,
+          dockerNetworkGatewayArgs(networkName),
+        );
+        proxyUrl = `http://${parseNetworkGateway(inspect.stdout)}:${this.hardening.egressProxyPort}`;
+      }
+
       const config = mergeDevcontainerConfig({
         override: req.devcontainerOverride,
         baseImage: req.baseImage,
         resources: req.resources,
         mounts: req.mounts,
+        hardening: this.hardening,
+        networkName,
+        containerEnv: proxyUrl ? proxyContainerEnv(proxyUrl) : undefined,
       });
 
       // Write our synthesized config to a sibling path and point `--config` at
@@ -211,10 +288,18 @@ export class DevcontainerProvisioner implements Provisioner {
         { timeoutMs: this.upTimeoutMs },
       );
       const parsed = parseDevcontainerUpOutput(result.stdout);
-      return { containerId: parsed.containerId, workspaceFolder, remoteUser: parsed.remoteUser };
+      return {
+        containerId: parsed.containerId,
+        workspaceFolder,
+        remoteUser: parsed.remoteUser,
+        networkName: createdNetwork ? networkName : undefined,
+      };
     } catch (err) {
-      // Best-effort cleanup of the scratch workspace on a failed provision.
+      // Best-effort cleanup of the scratch workspace + network on failure.
       await rm(workspaceFolder, { recursive: true, force: true }).catch(() => {});
+      if (createdNetwork && networkName) {
+        await this.runner.run(this.docker, dockerNetworkRmArgs(networkName)).catch(() => {});
+      }
       throw err;
     }
   }

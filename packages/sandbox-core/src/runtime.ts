@@ -12,6 +12,7 @@ import type { ExecRequest } from '@devspace/contracts';
 import type { CommandRunner } from './cli.js';
 import { runOrThrow } from './cli.js';
 import type { ExecStream } from './exec.js';
+import { dockerNetworkRmArgs } from './hardening.js';
 
 export interface ContainerRuntime {
   /** Full-duplex exec inside the container (the load-bearing primitive). */
@@ -20,6 +21,8 @@ export interface ContainerRuntime {
   destroy(containerId: string): Promise<void>;
   /** True if the container still exists (any state). */
   exists(containerId: string): Promise<boolean>;
+  /** Remove a per-env network created at provision time (M5 hardening). */
+  removeNetwork?(name: string): Promise<void>;
 }
 
 /**
@@ -80,5 +83,9 @@ export class DockerRuntime implements ContainerRuntime {
   async exists(containerId: string): Promise<boolean> {
     const result = await this.runner.run(this.docker, dockerInspectArgs(containerId));
     return result.code === 0;
+  }
+
+  async removeNetwork(name: string): Promise<void> {
+    await runOrThrow(this.runner, this.docker, dockerNetworkRmArgs(name));
   }
 }

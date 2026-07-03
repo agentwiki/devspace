@@ -22,21 +22,41 @@ agent must not exfiltrate secrets or escape the container.
   **tmpfs files** (not image layers). `redactSecrets()` strips known secret values
   from any output streamed back to chat.
 
-## Container isolation (release-blocking before real users — M5)
+## Container isolation (release-blocking before real users — landed in M5)
 
-- Per-env container: rootless/userns-remap, `no-new-privileges`, dropped caps,
-  seccomp + AppArmor, read-only root fs where feasible, **no docker socket inside**.
-- **Run tenant envs under gVisor (runsc) or Kata** — the single highest-value
-  upgrade over plain Docker on a shared host.
-- Per-env network namespace + **egress filtering proxy** (allowlist GitHub, the LLM
-  endpoint, registries). Deny env↔env and env→control-plane traffic.
-- cgroup CPU/mem/pids/disk limits to prevent noisy-neighbor / fork-bomb DoS.
+Implemented as the host-side `SandboxHardening` profile (m5-plan Decision 1 —
+policy on the provisioner, never on the tenant request):
+
+- Per-env container: `no-new-privileges`, cap-drop ALL + minimal add-back
+  (M5-A). Docker's default seccomp/AppArmor stay on; custom profiles are
+  deliberately out (gVisor is the boundary). rootless/userns-remap is a
+  daemon-level deployment concern (deployment docs), not a per-container flag.
+  **No docker socket inside** (nothing ever mounts it).
+- **Run tenant envs under gVisor (runsc) or Kata** — `--runtime` from the
+  profile, asserted available at boot (fail-fast), pure-builder tested (M5-A).
+- Per-env `--internal` network + **egress allowlist proxy** (GitHub, the LLM
+  endpoint, registries — `DEFAULT_EGRESS_ALLOWLIST`). No route out except the
+  proxy at the env's own bridge gateway; per-env networks deny env↔env
+  traffic (M5-A/B).
+- cgroup CPU/mem/pids limits (M1) + opt-in disk quota (`--storage-opt`,
+  driver-gated; M5-A) against noisy-neighbor / fork-bomb DoS.
+- **Turn budgets + real auto-abort** (M5-C): tool-call + wall-clock budgets on
+  every turn; breach ⇒ in-container kill (never `ExecStream.kill()`).
 
 ## Multi-tenant authZ & audit
 
-- Every action checked against the requesting `userId ↔ conversation` binding in
-  the orchestrator. Per-env named volumes. Audit-log all privileged ops
-  (push, PR, denylisted-adjacent commands).
+- Every action checked against the requesting `userId ↔ conversation` binding
+  in the orchestrator (M3). Per-env named volumes.
+- **Append-only `audit_log`** of all privileged ops (M5-D): secret
+  resolutions (name+purpose, never plaintext), approval decisions, push/PR,
+  token revoke/teardown, aborted turns, webhook ingress. Guardrail-denied
+  commands are auto-rejected at the permission gate before execution (M5-C).
+- Output redaction is two-layer (M3 + M5-F): every resolved plaintext is
+  scrubbed from 100% of outbound chat, plus a token-shape pattern pass for
+  values never registered. Defense-in-depth only — the egress proxy is the
+  exfiltration control.
 
-> Plain Docker single-host is acceptable for the demo only. Do not expose to real
-> multi-tenant users without the M5 items above.
+> Plain Docker single-host remains acceptable for the demo only. The M5 items
+> above are implemented but OFF by default (demo mode); production must set
+> `SANDBOX_HARDENED=1` (+ `EGRESS_PROXY_PORT`, `GITHUB_WEBHOOK_SECRET`) — see
+> `.env.example`.

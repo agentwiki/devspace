@@ -23,8 +23,12 @@ import {
   TEST_IMAGE,
   detectAvailability,
   forceRemoveByEnvLabel,
+  forceRemoveNetwork,
+  inspectHardening,
   inspectHostLimits,
+  networkIsInternal,
 } from './itest-support.js';
+import { perEnvNetworkName } from './hardening.js';
 
 const availability = detectAvailability();
 if (!availability.ok) {
@@ -144,4 +148,74 @@ describe.skipIf(!availability.ok)('sandbox-core live integration', () => {
     expect((await core.getEnvironment(throwaway.envId))?.status).toBe('stopped');
     expect(await runtime.exists(containerId)).toBe(false);
   }, 300_000);
+
+  it('kills a runaway process tree via in-container pkill (the abort mechanism)', async () => {
+    // The M5 auto-abort caveat: ExecStream.kill() only signals the local
+    // `docker exec` client. Prove the REAL mechanism — a second exec running
+    // pkill inside the container — terminates the first process. The target
+    // must carry the marker in its REAL argv (no shell wrapper — a comment
+    // would vanish at exec), and the pkill pattern uses the `[s]leep`
+    // self-exclusion trick so it cannot match its own parent shell (which
+    // would SIGTERM the killer itself and exit 143 — the codex killCommand
+    // does the same with `[/]opt/...`).
+    const runaway = await core.exec(env.envId, { cmd: ['sleep', '312512'], tty: false });
+    // Give the process a moment to appear.
+    await new Promise((r) => setTimeout(r, 500));
+    const kill = await captureExec(
+      await core.exec(env.envId, {
+        cmd: ['sh', '-c', "pkill -TERM -f '[s]leep 312512' || true"],
+        tty: false,
+      }),
+    );
+    expect(kill.code).toBe(0);
+    const exitCode = await runaway.done;
+    expect(exitCode).not.toBe(0); // SIGTERM'd, never ran the full 312512s
+  }, 60_000);
+});
+
+// A separate hardened provision: no gVisor in CI (pure builders + the boot
+// assertion cover that), but no-new-privileges + the per-env --internal
+// network ARE assertable against a real daemon.
+describe.skipIf(!availability.ok)('sandbox-core hardened provision (no gVisor)', () => {
+  let core: DevcontainerSandboxCore;
+  let env: Environment;
+
+  afterAll(async () => {
+    if (env) {
+      await core?.destroyEnvironment(env.envId).catch(() => {});
+      forceRemoveByEnvLabel(env.envId);
+      forceRemoveNetwork(perEnvNetworkName(env.envId));
+    }
+  }, 120_000);
+
+  beforeAll(async () => {
+    const runner = nodeCommandRunner;
+    core = new DevcontainerSandboxCore({
+      runtime: new DockerRuntime(runner),
+      provisioner: new DevcontainerProvisioner(runner, {
+        devcontainerPath: availability.devcontainerBin,
+        upTimeoutMs: 240_000,
+        hardening: { noNewPrivileges: true, network: 'per-env' },
+      }),
+    });
+    env = await core.createEnvironment({
+      baseImage: TEST_IMAGE,
+      resources: { cpu: 1, memMB: 512, diskMB: 1024 },
+    });
+  }, 300_000);
+
+  it('applies no-new-privileges and attaches the per-env internal network', () => {
+    const hardening = inspectHardening(env.containerId!);
+    expect(hardening.securityOpt).toContain('no-new-privileges');
+    const networkName = perEnvNetworkName(env.envId);
+    expect(hardening.networkMode).toBe(networkName);
+    expect(networkIsInternal(networkName)).toBe(true);
+  });
+
+  it('removes the per-env network on teardown', async () => {
+    const networkName = perEnvNetworkName(env.envId);
+    expect(networkIsInternal(networkName)).toBe(true);
+    await core.destroyEnvironment(env.envId);
+    expect(networkIsInternal(networkName)).toBe(false); // gone (inspect fails)
+  }, 120_000);
 });

@@ -90,6 +90,26 @@ describe('in-memory repositories', () => {
     await expect(repos.secrets.delete(rec.id)).resolves.toBeUndefined(); // idempotent
   });
 
+  it('appends and lists audit entries by conversation (M5)', async () => {
+    const repos = createInMemoryRepositories();
+    const rec = await repos.audit.append({
+      userId: 'u1',
+      conversationId: 'c1',
+      workUnitId: 'wu1',
+      action: 'secret.resolved',
+      detail: { name: 'GITHUB_TOKEN', purpose: 'pr.create' },
+    });
+    expect(rec.id).toBeTruthy();
+    expect(rec.at).toBeTruthy();
+    await repos.audit.append({ conversationId: 'c2', action: 'teardown', detail: {} });
+
+    const forC1 = await repos.audit.listByConversation('c1');
+    expect(forC1).toHaveLength(1);
+    expect(forC1[0]).toMatchObject({ action: 'secret.resolved', workUnitId: 'wu1' });
+    expect(await repos.audit.listByConversation('c2')).toHaveLength(1);
+    expect(await repos.audit.listByConversation('nope')).toHaveLength(0);
+  });
+
   it('tracks event consumption', async () => {
     const repos = createInMemoryRepositories();
     const e = await repos.events.append({ topic: 't', payload: {} });

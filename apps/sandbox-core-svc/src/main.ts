@@ -18,10 +18,15 @@ import {
 } from '@devspace/contracts';
 import type { ErrorCode } from '@devspace/contracts';
 import {
+  DEFAULT_EGRESS_ALLOWLIST,
   DevcontainerSandboxCore,
+  EgressProxy,
   SandboxError,
+  assertRuntimeAvailable,
   captureExec,
   fromBase64,
+  hardeningFromEnv,
+  nodeCommandRunner,
   toBase64,
 } from '@devspace/sandbox-core';
 import { z } from 'zod';
@@ -29,7 +34,34 @@ import { z } from 'zod';
 const SERVICE = 'sandbox-core';
 const PORT = Number(process.env.PORT ?? 4001);
 
-const core = new DevcontainerSandboxCore();
+// M5 hardening is boot-time host policy (m5-plan Decision 1). Fail fast when
+// the configured runtime class (gVisor/Kata) is absent from the daemon.
+const hardening = hardeningFromEnv(process.env);
+if (hardening?.runtime) {
+  await assertRuntimeAvailable(nodeCommandRunner, hardening.runtime);
+  console.log(`[${SERVICE}] container runtime: ${hardening.runtime}`);
+}
+
+// The egress allowlist proxy — the only door out of an --internal env network.
+// EGRESS_ALLOWLIST extends the sandbox defaults (comma-separated hostnames).
+if (hardening?.egressProxyPort) {
+  const allowlist = [
+    ...DEFAULT_EGRESS_ALLOWLIST,
+    ...(process.env.EGRESS_ALLOWLIST ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  ];
+  const proxy = new EgressProxy({
+    allowlist,
+    port: hardening.egressProxyPort,
+    onLog: (line) => console.log(`[${SERVICE}] egress: ${line}`),
+  });
+  await proxy.start();
+  console.log(`[${SERVICE}] egress proxy on :${hardening.egressProxyPort}`);
+}
+
+const core = new DevcontainerSandboxCore({ hardening });
 
 const ERROR_STATUS: Record<ErrorCode, number> = {
   BAD_REQUEST: 400,

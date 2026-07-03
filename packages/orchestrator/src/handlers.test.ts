@@ -377,3 +377,164 @@ describe('bus events + teardown', () => {
     expect(revoked).toEqual(['ghs_push_token']);
   });
 });
+
+describe('audit log (M5)', () => {
+  it('audits the full privileged path: secrets, approval, push+PR, teardown', async () => {
+    const revoked: string[] = [];
+    const h = harness({ revokeToken: async (t) => void revoked.push(t) });
+    const { conv } = await seed(h.repos, h.store, 'READY');
+
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'go',
+    });
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'approve:req-1',
+      payload: {},
+    });
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'create-pr',
+      payload: {},
+    });
+    await h.orch.teardown(conv.id);
+
+    const actions = (await h.repos.audit.listByConversation(conv.id)).map((a) => a.action);
+    expect(actions).toEqual([
+      'secret.resolved', // LLM key for the turn
+      'approval.decided',
+      'secret.resolved', // push/PR token
+      'pr.pushed',
+      'pr.opened',
+      'token.revoked',
+      'teardown',
+    ]);
+
+    const entries = await h.repos.audit.listByConversation(conv.id);
+    expect(entries.find((a) => a.action === 'approval.decided')?.detail).toEqual({
+      requestId: 'req-1',
+      decision: 'allow',
+    });
+    expect(entries.find((a) => a.action === 'pr.opened')?.detail).toMatchObject({ prNumber: 42 });
+    expect(entries.every((a) => a.userId === 'u1')).toBe(true);
+  });
+
+  it('audits a budget-aborted turn', async () => {
+    const agent = fakeAgent([
+      { type: 'message', text: 'runaway' },
+      { type: 'turn_end', reason: 'aborted' },
+    ]);
+    const h = harness({ agent });
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'loop forever',
+    });
+    const entries = await h.repos.audit.listByConversation(conv.id);
+    expect(entries.map((a) => a.action)).toContain('turn.aborted');
+  });
+
+  it('never writes secret plaintext into audit detail (regression guard)', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'READY');
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'go',
+    });
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'create-pr',
+      payload: {},
+    });
+    await h.orch.teardown(conv.id);
+
+    const dump = JSON.stringify(await h.repos.audit.listByConversation(conv.id));
+    expect(dump).not.toContain('sk-llm'); // the seeded LLM key
+    expect(dump).not.toContain('ghs_push_token'); // the seeded push token
+  });
+});
+
+describe('GitHub webhooks (M5)', () => {
+  async function seedPrOpen(h: Harness) {
+    const { conv, wu } = await seed(h.repos, h.store, 'WORKING');
+    await h.repos.workUnits.transition(wu.id, 'committedAndPushed');
+    await h.repos.workUnits.transition(wu.id, 'prCreated', {
+      prNumber: 42,
+      prUrl: 'https://github.com/a/b/pull/42',
+    });
+    return { conv, wu };
+  }
+
+  it('publishes the merged topic for the matching PR_OPEN unit and audits it', async () => {
+    const h = harness();
+    const { conv, wu } = await seedPrOpen(h);
+
+    const published: Array<{ topic: string; workUnitId: string }> = [];
+    const result = await h.orch.handleGitHubWebhook(
+      // The seeded unit's repoUrl is https://github.com/a/b.git — the webhook
+      // carries the html form; sameRepo must bridge them.
+      { repoUrl: 'https://github.com/a/b', prNumber: 42, outcome: 'merged' },
+      async (e) => void published.push(e),
+    );
+
+    expect(result.matched).toBe(1);
+    expect(published).toEqual([{ topic: TOPIC_PR_MERGED, workUnitId: wu.id }]);
+    const audited = await h.repos.audit.listByConversation(conv.id);
+    expect(audited.map((a) => a.action)).toContain('webhook.received');
+  });
+
+  it('ignores non-matching deliveries (wrong repo or PR number)', async () => {
+    const h = harness();
+    await seedPrOpen(h);
+    const published: unknown[] = [];
+    const wrongRepo = await h.orch.handleGitHubWebhook(
+      { repoUrl: 'https://github.com/other/repo', prNumber: 42, outcome: 'merged' },
+      async (e) => void published.push(e),
+    );
+    const wrongNumber = await h.orch.handleGitHubWebhook(
+      { repoUrl: 'https://github.com/a/b', prNumber: 999, outcome: 'closed' },
+      async (e) => void published.push(e),
+    );
+    expect(wrongRepo.matched).toBe(0);
+    expect(wrongNumber.matched).toBe(0);
+    expect(published).toEqual([]);
+  });
+
+  it('webhook + poll double-delivery stays a no-op (shared idempotent topics)', async () => {
+    const h = harness();
+    const { wu } = await seedPrOpen(h);
+
+    const deliver = async () => {
+      await h.orch.handleGitHubWebhook(
+        { repoUrl: 'https://github.com/a/b.git', prNumber: 42, outcome: 'merged' },
+        async (e) => {
+          const evt = await h.repos.events.append({
+            topic: e.topic,
+            workUnitId: e.workUnitId,
+            payload: {},
+          });
+          await h.orch.handleBusEvent(evt);
+        },
+      );
+    };
+
+    await deliver();
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_MERGED');
+    // The reconciler (or a redelivered webhook) publishing again must no-op.
+    await expect(deliver()).resolves.toBeUndefined();
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_MERGED');
+  });
+});

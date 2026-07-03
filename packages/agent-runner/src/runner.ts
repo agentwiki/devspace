@@ -27,6 +27,10 @@ import type { AcpSession } from './acp/connection.js';
 import { connectAgent } from './acp/connection.js';
 import type { AgentBackend } from './backends/codex.js';
 import { AGENT_RUNTIME_PATH, codexBackend } from './backends/codex.js';
+import type { GuardTurnOptions } from './budget.js';
+import { guardTurn } from './budget.js';
+import type { GuardrailPolicy } from './guardrails.js';
+import { DEFAULT_POLICY } from './guardrails.js';
 import type { AgentRunner } from './index.js';
 
 /** The exact slice of sandbox-core the runner needs: launch a process, get a stream. */
@@ -44,10 +48,15 @@ export interface AgentRunnerDeps {
   /** Resolve `llmKeyRef` -> key. When omitted, the key is assumed pre-injected. */
   resolveSecret?: SecretResolver;
   onLog?: (line: string) => void;
+  /** Guardrail policy: per-turn budgets + the permission gate's auto-deny (M5). */
+  policy?: GuardrailPolicy;
+  /** Budget timer seams, injected by tests (real clock/timers otherwise). */
+  budget?: Pick<GuardTurnOptions, 'clock' | 'setTimeoutFn' | 'clearTimeoutFn'>;
 }
 
 interface SessionRecord {
   envId: string;
+  backend: AgentBackend;
   session: AcpSession;
 }
 
@@ -65,6 +74,8 @@ export class DefaultAgentRunner implements AgentRunner {
   private readonly backends: Record<string, AgentBackend>;
   private readonly resolveSecret?: SecretResolver;
   private readonly onLog: (line: string) => void;
+  private readonly policy: GuardrailPolicy;
+  private readonly budget: Pick<GuardTurnOptions, 'clock' | 'setTimeoutFn' | 'clearTimeoutFn'>;
   private readonly sessions = new Map<string, SessionRecord>();
 
   constructor(deps: AgentRunnerDeps) {
@@ -72,6 +83,8 @@ export class DefaultAgentRunner implements AgentRunner {
     this.backends = deps.backends ?? { [codexBackend.kind]: codexBackend };
     this.resolveSecret = deps.resolveSecret;
     this.onLog = deps.onLog ?? (() => {});
+    this.policy = deps.policy ?? DEFAULT_POLICY;
+    this.budget = deps.budget ?? {};
   }
 
   async createSession(req: CreateAgentSessionRequest): Promise<{ agentSessionId: string }> {
@@ -87,16 +100,42 @@ export class DefaultAgentRunner implements AgentRunner {
     const session = await connectAgent(stream, backend, {
       workspacePath: req.workspacePath,
       onLog: this.onLog,
+      policy: this.policy,
     });
 
     const agentSessionId = `agent_${randomUUID()}`;
-    this.sessions.set(agentSessionId, { envId: req.envId, session });
+    this.sessions.set(agentSessionId, { envId: req.envId, backend, session });
     return { agentSessionId };
   }
 
   runTurn(agentSessionId: string, req: TurnRequest): AsyncIterable<AgentEvent> {
     const record = this.require(agentSessionId);
-    return record.session.runTurn(req.prompt);
+    // Budget guard (M5): breach ⇒ the REAL abort below, then a clean
+    // `turn_end { reason: 'aborted' }` tail for the consumer.
+    return guardTurn(record.session.runTurn(req.prompt), {
+      policy: this.policy,
+      ...this.budget,
+      onBreach: () => this.abortTurn(agentSessionId),
+    });
+  }
+
+  /**
+   * Hard-stop a session's in-flight turn: cancel parked permissions + ACP
+   * `session/cancel`, THEN kill the agent's process tree inside the container
+   * via the backend's kill command over the ordinary exec provider. Per the
+   * roadmap caveat, `ExecStream.kill()` is never the mechanism — docker-exec
+   * does not propagate signals into the container.
+   */
+  async abortTurn(agentSessionId: string): Promise<void> {
+    const record = this.require(agentSessionId);
+    await record.session.abort();
+    try {
+      const stream = await this.exec.exec(record.envId, record.backend.killCommand());
+      await stream.done;
+    } catch (err) {
+      // The env may already be gone; the ACP cancel above still unblocked us.
+      this.onLog(`abort kill failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async decidePermission(agentSessionId: string, decision: PermissionDecision): Promise<void> {

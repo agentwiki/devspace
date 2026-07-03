@@ -17,13 +17,14 @@ import type { WorkUnit } from '@devspace/contracts';
 import { nextWorkState } from '@devspace/contracts';
 import {
   IllegalTransitionError,
+  type AuditRecord,
   type ConversationRecord,
   type EventRecord,
   type Repositories,
   type SecretRecord,
 } from './index.js';
-import { conversations, events, secrets, workUnits } from './schema.js';
-import type { ConversationRow, EventRow, SecretRow, WorkUnitRow } from './schema.js';
+import { auditLog, conversations, events, secrets, workUnits } from './schema.js';
+import type { AuditRow, ConversationRow, EventRow, SecretRow, WorkUnitRow } from './schema.js';
 
 const iso = (d: Date): string => d.toISOString();
 const opt = <T>(v: T | null): T | undefined => (v === null ? undefined : v);
@@ -62,6 +63,18 @@ function mapSecret(r: SecretRow): SecretRecord {
     name: r.name,
     ciphertext: r.ciphertext,
     keyId: r.keyId,
+  };
+}
+
+function mapAudit(r: AuditRow): AuditRecord {
+  return {
+    id: r.id,
+    at: iso(r.at),
+    userId: opt(r.userId),
+    conversationId: opt(r.conversationId),
+    workUnitId: opt(r.workUnitId),
+    action: r.action,
+    detail: r.detail as Record<string, unknown>,
   };
 }
 
@@ -245,6 +258,31 @@ export function createPostgresRepositories(pool: Pool): Repositories {
           .update(events)
           .set({ consumedAt: new Date() })
           .where(and(eq(events.id, id), isNull(events.consumedAt)));
+      },
+    },
+
+    audit: {
+      async append(input) {
+        const [row] = await db
+          .insert(auditLog)
+          .values({
+            id: `aud_${randomUUID()}`,
+            userId: input.userId,
+            conversationId: input.conversationId,
+            workUnitId: input.workUnitId,
+            action: input.action,
+            detail: input.detail,
+          })
+          .returning();
+        return mapAudit(row!);
+      },
+      async listByConversation(conversationId) {
+        const rows = await db
+          .select()
+          .from(auditLog)
+          .where(eq(auditLog.conversationId, conversationId))
+          .orderBy(auditLog.at);
+        return rows.map(mapAudit);
       },
     },
   };

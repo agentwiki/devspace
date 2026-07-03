@@ -36,11 +36,13 @@ import { SecretRegistry } from './secrets.js';
 import type { SecretStore } from './secrets.js';
 import { GitWrapper, prStateToEvent, type GitHubRestClient, type HostGitExec } from './git.js';
 import { messageCommand, renderAgentEvent, statusCommand } from './render.js';
+import { sameRepo, type MappedPrWebhook } from './webhooks.js';
 
 export * from './stateMachine.js';
 export * from './secrets.js';
 export * from './git.js';
 export * from './render.js';
+export * from './webhooks.js';
 // boot.js imports Orchestrator from this module; the cycle is benign (the
 // class is only referenced inside bootOrchestrator's body, after module init).
 export * from './boot.js';
@@ -108,6 +110,30 @@ export class Orchestrator {
   constructor(private readonly deps: OrchestratorDeps) {
     this.machine = new WorkUnitMachine(deps.repos.workUnits);
     this.workUnits = deps.repos.workUnits;
+  }
+
+  /**
+   * Record a privileged operation in the append-only audit trail (M5,
+   * m5-plan Decision 6). `detail` is built from ids/names/enums only — never
+   * secret plaintext — so the log needs no redaction pass. Awaited normally:
+   * an audit of a privileged effect must not silently vanish.
+   */
+  private audit(
+    action: string,
+    ctx: {
+      userId?: string;
+      conversationId?: string;
+      workUnitId?: string;
+      detail?: Record<string, unknown>;
+    },
+  ): Promise<unknown> {
+    return this.deps.repos.audit.append({
+      action,
+      userId: ctx.userId,
+      conversationId: ctx.conversationId,
+      workUnitId: ctx.workUnitId,
+      detail: ctx.detail ?? {},
+    });
   }
 
   /** Per-conversation redaction registry (accumulates resolved plaintext). */
@@ -214,6 +240,14 @@ export class Orchestrator {
         conv.id,
         registry,
       );
+      if (cloneToken) {
+        await this.audit('secret.resolved', {
+          userId: event.userId,
+          conversationId: conv.id,
+          workUnitId: wu.id,
+          detail: { name: SECRET_GH_CLONE, purpose: 'env.provision' },
+        });
+      }
       const env = await this.deps.sandbox.createEnvironment(
         CreateEnvironmentRequestSchema.parse({
           repoUrl: choice.repoUrl,
@@ -276,7 +310,15 @@ export class Orchestrator {
       SECRET_LLM_KEY,
       event.conversationId,
     );
-    if (llm) await this.deps.secrets.resolveRef(llm.id, registry);
+    if (llm) {
+      await this.deps.secrets.resolveRef(llm.id, registry);
+      await this.audit('secret.resolved', {
+        userId: event.userId,
+        conversationId: event.conversationId,
+        workUnitId: wu.id,
+        detail: { name: SECRET_LLM_KEY, purpose: 'agent.turn' },
+      });
+    }
 
     // Ensure an agent session, transitioning READY --firstMessage--> WORKING on
     // the first message. Subsequent messages find WORKING and skip the transition.
@@ -305,6 +347,15 @@ export class Orchestrator {
       prompt: event.text,
       attachments: [],
     })) {
+      // A budget-aborted turn is a privileged intervention worth an audit row.
+      if (agentEvent.type === 'turn_end' && agentEvent.reason === 'aborted') {
+        await this.audit('turn.aborted', {
+          userId: event.userId,
+          conversationId: event.conversationId,
+          workUnitId: unit.id,
+          detail: { agentSessionId },
+        });
+      }
       await this.renderMany(event.conversationId, agentEvent, registry);
     }
   }
@@ -338,6 +389,12 @@ export class Orchestrator {
           requestId: action.requestId,
           decision: action.decision,
           scope: 'once',
+        });
+        await this.audit('approval.decided', {
+          userId: event.userId,
+          conversationId: event.conversationId,
+          workUnitId: wu.id,
+          detail: { requestId: action.requestId, decision: action.decision },
         });
         return;
       }
@@ -406,6 +463,12 @@ export class Orchestrator {
       await this.emit(messageCommand(conversationId, 'No GitHub token configured.', registry));
       return;
     }
+    await this.audit('secret.resolved', {
+      userId,
+      conversationId,
+      workUnitId: wu.id,
+      detail: { name: SECRET_GH_TOKEN, purpose: 'pr.create' },
+    });
 
     const wrapper = new GitWrapper(this.deps.git, this.deps.githubRest(token));
     const result = await wrapper.pushAndOpenPr({
@@ -416,6 +479,18 @@ export class Orchestrator {
       body: 'Opened by the devspace agent.',
       token,
       workdir: this.deps.workdirFor?.(wu.id) ?? '/workspace',
+    });
+    await this.audit('pr.pushed', {
+      userId,
+      conversationId,
+      workUnitId: wu.id,
+      detail: { branch: wu.branch },
+    });
+    await this.audit('pr.opened', {
+      userId,
+      conversationId,
+      workUnitId: wu.id,
+      detail: { prNumber: result.prNumber, prUrl: result.prUrl, adopted: result.adopted },
     });
 
     let unit = await this.advance(wu, 'committedAndPushed', 'PRE_PR', { branch: wu.branch });
@@ -454,9 +529,41 @@ export class Orchestrator {
   }
 
   /**
+   * Apply a verified+mapped GitHub `pull_request` webhook (M5): find the
+   * matching PR_OPEN unit(s) by repo + PR number and publish the SAME
+   * idempotent bus topics the poll reconciler uses — webhook↔poll
+   * double-delivery is a no-op by construction (`handleBusEvent` → `advance`).
+   * Unmatched deliveries (foreign repos, already-advanced units) are ignored.
+   */
+  async handleGitHubWebhook(
+    mapped: MappedPrWebhook,
+    publish: (evt: { topic: string; workUnitId: string }) => Promise<void>,
+  ): Promise<{ matched: number }> {
+    const open = await this.workUnits.listByState('PR_OPEN');
+    let matched = 0;
+    for (const wu of open) {
+      if (wu.prNumber !== mapped.prNumber) continue;
+      if (!wu.repoUrl || !sameRepo(wu.repoUrl, mapped.repoUrl)) continue;
+      matched += 1;
+      await this.audit('webhook.received', {
+        conversationId: wu.conversationId,
+        workUnitId: wu.id,
+        detail: { event: 'pull_request', outcome: mapped.outcome, prNumber: mapped.prNumber },
+      });
+      await publish({
+        topic: mapped.outcome === 'merged' ? TOPIC_PR_MERGED : TOPIC_PR_CLOSED,
+        workUnitId: wu.id,
+      });
+    }
+    return { matched };
+  }
+
+  /**
    * Poll every PR_OPEN unit and publish idempotent prMerged/prClosed bus events.
-   * The bus is genuinely out-of-process here (a scheduled driver), unlike
-   * provisioning. E owns the schedule; this is the body it invokes.
+   * Since M5 this is the RECONCILIATION BACKSTOP for webhook gaps (missed
+   * deliveries, downtime) — webhooks are the source of truth; run this on a
+   * long interval. The bus is genuinely out-of-process here (a scheduled
+   * driver), unlike provisioning. The svc owns the schedule.
    */
   async reconcileOpenPrs(
     publish: (evt: { topic: string; workUnitId: string }) => Promise<void>,
@@ -509,6 +616,12 @@ export class Orchestrator {
           try {
             const token = await this.deps.secrets.resolveRef(rec.id);
             await this.deps.revokeToken(token);
+            await this.audit('token.revoked', {
+              userId: conv.userId,
+              conversationId,
+              workUnitId: wu.id,
+              detail: { name },
+            });
           } catch {
             /* best-effort revoke */
           }
@@ -518,6 +631,12 @@ export class Orchestrator {
     }
 
     this.registries.delete(conversationId);
+    await this.audit('teardown', {
+      userId: conv?.userId,
+      conversationId,
+      workUnitId: wu.id,
+      detail: { envId: wu.envId ?? null },
+    });
     await this.advance(wu, 'end', 'TORN_DOWN');
   }
 

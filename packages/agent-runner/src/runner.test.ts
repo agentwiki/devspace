@@ -23,11 +23,25 @@ function textOf(p: { prompt: Array<{ type: string }> }): string {
   return block?.text ?? '';
 }
 
+/** A non-ACP exec (the in-container kill): resolves `done` immediately. */
+function immediateExecStream(): ExecStream {
+  return {
+    writeStdin: () => true,
+    drain: () => Promise.resolve(),
+    closeStdin: () => {},
+    frames: (async function* () {})(),
+    done: Promise.resolve(0),
+    kill: () => {},
+  };
+}
+
 /** ExecProvider that echoes the prompt back via a real SDK agent on each launch. */
-function fakeExecProvider() {
+function fakeExecProvider(opts: { toolCallsPerPrompt?: number } = {}) {
   const launches: Launched[] = [];
   const exec = async (envId: string, req: ExecRequest): Promise<ExecStream> => {
     launches.push({ envId, req });
+    // The M5 abort path execs the backend's kill command — not an ACP launch.
+    if (req.cmd[0] === 'sh') return immediateExecStream();
     const { execStream, agentStream } = createAcpLoopback();
     new AgentSideConnection(
       (conn): Agent => ({
@@ -41,6 +55,19 @@ function fakeExecProvider() {
           return {};
         },
         async prompt(p) {
+          for (let i = 0; i < (opts.toolCallsPerPrompt ?? 0); i++) {
+            await conn.sessionUpdate({
+              sessionId: p.sessionId,
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: `tc-${i}`,
+                title: `run ${i}`,
+                kind: 'execute',
+                status: 'pending',
+                rawInput: { command: `cmd-${i}` },
+              },
+            });
+          }
           await conn.sessionUpdate({
             sessionId: p.sessionId,
             update: {
@@ -115,6 +142,55 @@ describe('DefaultAgentRunner', () => {
     await expect(
       runner.decidePermission(agentSessionId, { requestId: 'x', decision: 'allow', scope: 'once' }),
     ).rejects.toThrow(/unknown agent session/);
+  });
+
+  it('abortTurn cancels the protocol AND kills the agent inside the container', async () => {
+    const provider = fakeExecProvider();
+    const runner = new DefaultAgentRunner({ exec: provider });
+    const { agentSessionId } = await runner.createSession({
+      envId: 'env-abort',
+      agentKind: 'codex',
+      workspacePath: '/workspace',
+      llmKeyRef: 'r',
+    });
+
+    await runner.abortTurn(agentSessionId);
+
+    // The kill runs via the ordinary exec provider INTO the env — never
+    // ExecStream.kill() (docker-exec does not propagate signals inward).
+    const kill = provider.launches.find((l) => l.req.cmd[0] === 'sh');
+    expect(kill?.envId).toBe('env-abort');
+    expect(kill?.req.cmd[2]).toContain('pkill');
+    // The `[/]` prefix keeps pkill from matching its own parent shell.
+    expect(kill?.req.cmd[2]).toContain('[/]opt/agent-runtime/codex-acp');
+  });
+
+  it('aborts a turn that blows the tool-call budget and kills the agent', async () => {
+    const provider = fakeExecProvider({ toolCallsPerPrompt: 3 });
+    const runner = new DefaultAgentRunner({
+      exec: provider,
+      policy: {
+        ...(await import('./guardrails.js')).DEFAULT_POLICY,
+        maxToolCallsPerTurn: 1,
+      },
+    });
+    const { agentSessionId } = await runner.createSession({
+      envId: 'env-budget',
+      agentKind: 'codex',
+      workspacePath: '/workspace',
+      llmKeyRef: 'r',
+    });
+
+    const events = await drain(runner.runTurn(agentSessionId, { prompt: 'go', attachments: [] }));
+
+    expect(events[0]).toMatchObject({ type: 'command_run', cmd: 'cmd-0' });
+    expect(events.at(-2)).toMatchObject({
+      type: 'message',
+      text: expect.stringContaining('aborted'),
+    });
+    expect(events.at(-1)).toEqual({ type: 'turn_end', reason: 'aborted' });
+    const kill = provider.launches.find((l) => l.req.cmd[0] === 'sh');
+    expect(kill?.envId).toBe('env-budget');
   });
 
   it('creates a session without a secret resolver (key assumed pre-injected)', async () => {

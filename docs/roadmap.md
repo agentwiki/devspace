@@ -1,6 +1,7 @@
 # Roadmap
 
 Critical path to the end-to-end demo: **M0 → M1 → M2 → M3 → M4.**
+Release-blocking hardening for real multi-tenant use: **M5.**
 
 ## M0 — Scaffolding (done)
 
@@ -118,22 +119,76 @@ Deferred: in-chat secret entry (seeded out-of-band for the demo), modal repo
 picker, App Home session-list data source (a conversations-by-user read), the
 two-service HTTP split (M6).
 
-## M5 — Hardening (release-blocking for real multi-tenant use)
+## M5 — Hardening (release-blocking for real multi-tenant use) (done)
 
-gVisor/Kata, egress allowlist, output redaction, turn budgets, audit log, ports
-preview proxy, GitHub webhooks.
+gVisor/Kata, egress allowlist, output redaction, turn budgets, audit log,
+GitHub webhooks. Design of record: docs/m5-plan.md. Zero changes to
+`@devspace/contracts` — everything is host policy, an agent-runner internal,
+or a db repo.
 
-> Auto-abort caveat: turn-budget/runaway kill must NOT rely on `ExecStream.kill()`
-> alone. Over the docker-exec transport that signals only the local `docker exec`
-> client; Docker does not propagate it into the container, so the agent's
-> in-container process tree survives. Hard-stopping an agent needs in-container
-> termination (`docker exec <ctr> kill`) or `destroy()` (`docker rm --force`).
+Landed:
+
+- **Hardened container profile** (`hardening.ts`) — host policy on the
+  provisioner, never on `CreateEnvironmentRequest` (a tenant request cannot
+  weaken its own sandbox): `--runtime=runsc`/Kata (asserted available at BOOT,
+  fail-fast), `no-new-privileges`, cap-drop ALL + minimal add-back, per-env
+  `--internal` network (created before `up`, removed on teardown; denies
+  env↔env), and the M1-deferred opt-in disk quota (`--storage-opt`,
+  driver-gated). Config via `SANDBOX_*` env through every boot path; plain-
+  Docker demo mode stays the default. Live itest asserts the flags + network
+  via `docker inspect`.
+- **Egress allowlist proxy** (`egress-proxy.ts`) — deny-by-default: an
+  `--internal` network has no route out; the only door is a ~150-line Node
+  CONNECT/absolute-form proxy (zero deps) allowlisting exact hosts and
+  `*.suffix`. Per-env networks reach the host only at their OWN bridge
+  gateway, so the provisioner resolves the created network's gateway and
+  injects `HTTP(S)_PROXY` containerEnv (policy merges OVER repo config).
+  Tested over real loopback sockets in CI.
+- **Turn budgets + real auto-abort** (`budget.ts`) — `guardTurn` wraps every
+  `runTurn`: tool-call count + wall clock (fake-clock checks per event AND a
+  real timer race, so a silent hung agent still aborts). Breach ⇒ cancel
+  parked permissions + ACP `session/cancel` + **in-container `pkill`** via the
+  backend's `killCommand()` over the ordinary exec provider (the caveat below,
+  honored and itested), then a clean `turn_end { aborted }` tail.
+- **Guardrail auto-deny at the permission gate** — `checkCommand`/
+  `checkFileWrite` consulted BEFORE parking; policy-denied ops are rejected
+  immediately with an explanatory message and never render approval buttons.
+- **Append-only audit log** — `audit_log` table + `AuditRepo` (in-memory ↔ Pg,
+  itested); the orchestrator audits every privileged effect (secret.resolved
+  with name+purpose only, approval.decided, pr.pushed/pr.opened,
+  token.revoked/teardown, turn.aborted, webhook.received/rejected). A
+  regression test proves no audit detail ever contains secret plaintext.
+- **GitHub webhooks as PR source of truth** — signature-verified
+  (`X-Hub-Signature-256`, constant-time over the raw body) `pull_request`
+  ingress mapped onto the SAME idempotent bus topics as the reconciler, so
+  webhook↔poll double-delivery no-ops by construction; the poll survives as
+  the drift backstop on a long interval (top-risk #7).
+- **Pattern-based redaction** — well-known token shapes (`ghp_…`,
+  `github_pat_…`, `gh[ousr]_…`, `sk-…`, `xox…`) scrubbed from 100% of outbound
+  text even when never registered; registered values still redact first (and
+  whole).
+
+Deferred: **ports preview proxy → M6.** It is a product feature (authenticated
+preview URLs), not release-blocking hardening — and under the M5 egress
+posture ingress must route through the control plane, which is exactly the M6
+HTTP-split work. Also out, as documented in docs/m5-plan.md: custom
+seccomp/AppArmor profiles (gVisor is the boundary; Docker defaults stay on)
+and rootless dockerd/userns-remap (daemon-level deployment concerns).
+
+> Auto-abort caveat (honored by M5-C): turn-budget/runaway kill must NOT rely
+> on `ExecStream.kill()` alone. Over the docker-exec transport that signals
+> only the local `docker exec` client; Docker does not propagate it into the
+> container, so the agent's in-container process tree survives. Hard-stopping
+> an agent needs in-container termination (`docker exec <ctr> kill`) or
+> `destroy()` (`docker rm --force`).
 
 ## M6+ — Expansion
 
 Additional chat adapters (Slack, Discord); 2nd ACP agent backend; multi-host
-scheduling; NATS bus. UI surface is chat only — no self-hosted web UI (see
-docs/analysis/chat-platform-ui-parity.md).
+scheduling; NATS bus; the two-service HTTP split (gateway ⇄ orchestrator);
+**ports preview proxy** (deferred from M5 — needs authenticated ingress
+through the control plane, which the HTTP split provides). UI surface is chat
+only — no self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 

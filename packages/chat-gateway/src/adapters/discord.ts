@@ -27,7 +27,7 @@ import type {
   StreamHandle,
 } from '../index.js';
 import { parsePortCommand } from '../index.js';
-import { ConversationBinding, encodeRef, type ThreadRef } from '../binding.js';
+import { ConversationBinding, decodeRef, encodeRef, type ThreadRef } from '../binding.js';
 import { StatusRegistry, StreamCoalescer, type Clock } from '../status.js';
 import {
   actionsBodies,
@@ -36,6 +36,17 @@ import {
   streamBody,
   type DiscordMessageBody,
 } from '../discord/messages.js';
+import {
+  REPO_PICKER_MODAL_PREFIX,
+  SECRETS_MODAL_PREFIX,
+  decodeModalId,
+  parseRepoPickerSubmission,
+  parseSecretsSubmission,
+  repoPickerModal,
+  secretsModal,
+  type DiscordModal,
+  type ModalFields,
+} from '../discord/modals.js';
 import { parseRepoChoice } from './slack.js';
 
 /* -------------------------------------------------------------------------- */
@@ -47,6 +58,8 @@ export interface DiscordSlashEvent {
   userId: string;
   /** The command's raw argument text ("<repoUrl> [ref]", possibly empty). */
   text: string;
+  /** Opaque handle for `openModal` (Discord's trigger_id equivalent, M7-B). */
+  interactionId: string;
 }
 
 export interface DiscordMessageEvent {
@@ -65,12 +78,23 @@ export interface DiscordButtonEvent {
   parentChannelId?: string;
   userId: string;
   customId: string;
+  /** Opaque handle for `openModal` (Discord's trigger_id equivalent, M7-B). */
+  interactionId: string;
+}
+
+/** A modal submission (M7-B): the modal's custom_id carries the context —
+ * `devspace-secrets:<ref>` / `devspace-repo-picker:<channel>` (Decision 5). */
+export interface DiscordModalSubmitEvent {
+  customId: string;
+  userId: string;
+  fields: ModalFields;
 }
 
 export interface DiscordInboundHandlers {
   slashCommand(event: DiscordSlashEvent): Promise<void>;
   message(event: DiscordMessageEvent): Promise<void>;
   button(event: DiscordButtonEvent): Promise<void>;
+  modalSubmit(event: DiscordModalSubmitEvent): Promise<void>;
 }
 
 /**
@@ -88,6 +112,8 @@ export interface DiscordTransport {
     name: string,
   ): Promise<{ threadId: string }>;
   editMessage(channelId: string, messageId: string, body: DiscordMessageBody): Promise<void>;
+  /** Show a modal AS the response to a still-unacked interaction (M7-B). */
+  openModal(interactionId: string, modal: DiscordModal): Promise<void>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -109,6 +135,15 @@ export interface DiscordAdapterOptions {
 /** Strip <@…> user/role mentions (Discord's wire form matches Slack's shape). */
 function stripMentions(text: string): string {
   return text.replace(/<@[!&]?[^>]+>/g, ' ').trim();
+}
+
+/** decodeRef that maps a malformed modal context to null instead of throwing. */
+function decodeRefSafe(externalChannelId: string): ThreadRef | null {
+  try {
+    return decodeRef(externalChannelId);
+  } catch {
+    return null;
+  }
 }
 
 interface StreamState {
@@ -149,7 +184,13 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
   async start(emit: EmitChatEvent): Promise<void> {
     this.emit = emit;
     await this.transport.start({
-      slashCommand: async ({ channelId, userId, text }) => {
+      slashCommand: async ({ channelId, userId, text, interactionId }) => {
+        // Bare `/devspace` opens the repo picker instead of an empty session
+        // (m6-plan Decision 9, Discord edition) — dismissal creates nothing.
+        if (!text.trim()) {
+          await this.transport.openModal(interactionId, repoPickerModal(channelId));
+          return;
+        }
         await this.rootConversation(channelId, userId, parseRepoChoice(text));
       },
 
@@ -203,17 +244,14 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
       button: async (event) => {
         if (event.parentChannelId === undefined) return; // session buttons live in threads
         const ref: ThreadRef = { channel: event.parentChannelId, threadTs: event.channelId };
-        const conversationId = await this.binding.conversationFor(ref);
-        if (!conversationId) return;
-        // Modal-based secret entry is Slack-only in M6 (m6-plan: Discord
-        // modal parity deferred) — answer with a hint instead of a dead click.
+        // set-secrets is pure platform UI (m6-plan Decision 8): the modal IS
+        // the interaction response — no orchestrator round-trip here (M7-B).
         if (event.customId === 'set-secrets') {
-          await this.transport.postMessage(event.channelId, {
-            content:
-              'In-chat secret entry is Slack-only for now — seed secrets out-of-band or use the Slack surface.',
-          });
+          await this.transport.openModal(event.interactionId, secretsModal(encodeRef(ref)));
           return;
         }
+        const conversationId = await this.binding.conversationFor(ref);
+        if (!conversationId) return;
         await this.emitSafe({
           type: 'action.invoked',
           conversationId,
@@ -222,7 +260,39 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
           payload: {},
         });
       },
+
+      modalSubmit: async (event) => {
+        const decoded = decodeModalId(event.customId);
+        if (!decoded) return;
+        if (decoded.prefix === SECRETS_MODAL_PREFIX) {
+          await this.onSecretsSubmitted(decoded.context, event.userId, event.fields);
+          return;
+        }
+        if (decoded.prefix === REPO_PICKER_MODAL_PREFIX) {
+          await this.rootConversation(
+            decoded.context,
+            event.userId,
+            parseRepoChoice(parseRepoPickerSubmission(event.fields)),
+          );
+        }
+      },
     });
+  }
+
+  /** One `secret.submitted` per filled field — same semantics as the Slack
+   * modal (the event path, whitelist and redaction hooks are shared). */
+  private async onSecretsSubmitted(
+    encodedRef: string,
+    userId: string,
+    fields: ModalFields,
+  ): Promise<void> {
+    const ref = decodeRefSafe(encodedRef);
+    if (!ref) return;
+    const conversationId = await this.binding.conversationFor(ref);
+    if (!conversationId) return;
+    for (const { name, value } of parseSecretsSubmission(fields)) {
+      await this.emitSafe({ type: 'secret.submitted', conversationId, userId, name, value });
+    }
   }
 
   async stop(): Promise<void> {

@@ -59,4 +59,7 @@ export * from './slack/blocks.js';
 export * from './adapters/slack.js';
 export * from './adapters/discord.js';
 export * from './discord/messages.js';
+// discord/modals.js is intentionally NOT star-exported: its builders/parsers
+// mirror slack/blocks.js names (secretsModal, parseSecretsSubmission, …) and
+// nothing outside the package needs them — adapters import them directly.
 export * from './discord/transport.js';

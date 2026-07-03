@@ -17,6 +17,11 @@ import {
   type DiscordTransport,
 } from './discord.js';
 import { actionsBodies, messageBodies, statusBody, streamBody } from '../discord/messages.js';
+import {
+  REPO_PICKER_MODAL_PREFIX,
+  SECRETS_MODAL_PREFIX,
+  type DiscordModal,
+} from '../discord/modals.js';
 
 /* -------------------------------------------------------------------------- */
 /* Fake transport                                                              */
@@ -34,6 +39,7 @@ class FakeTransport implements DiscordTransport {
   posted: Posted[] = [];
   edits: Posted[] = [];
   threads: Array<{ channelId: string; rootMessageId: string; name: string }> = [];
+  modals: Array<{ interactionId: string; modal: DiscordModal }> = [];
   stopped = false;
   private counter = 0;
 
@@ -65,6 +71,9 @@ class FakeTransport implements DiscordTransport {
     body: { content: string; components?: unknown[] },
   ): Promise<void> {
     this.edits.push({ channelId, messageId, ...body });
+  }
+  async openModal(interactionId: string, modal: DiscordModal): Promise<void> {
+    this.modals.push({ interactionId, modal });
   }
 }
 
@@ -132,6 +141,7 @@ describe('DiscordAdapter inbound', () => {
       channelId: 'C100',
       userId: 'U7',
       text: 'acme/widgets main',
+      interactionId: 'i1',
     });
 
     expect(h.transport.posted[0]).toMatchObject({
@@ -225,6 +235,7 @@ describe('DiscordAdapter inbound', () => {
       parentChannelId: 'C100',
       userId: 'U7',
       customId: 'approve:req-42',
+      interactionId: 'i2',
     });
     expect(h.events).toEqual([
       {
@@ -236,12 +247,18 @@ describe('DiscordAdapter inbound', () => {
       },
     ]);
     // Buttons outside threads (or unbound threads) are ignored.
-    await handlers(h).button({ channelId: 'C100', userId: 'U7', customId: 'view-pr' });
+    await handlers(h).button({
+      channelId: 'C100',
+      userId: 'U7',
+      customId: 'view-pr',
+      interactionId: 'i3',
+    });
     await handlers(h).button({
       channelId: 'thread-of-m9',
       parentChannelId: 'C100',
       userId: 'U7',
       customId: 'view-pr',
+      interactionId: 'i4',
     });
     expect(h.events).toHaveLength(1);
   });
@@ -253,9 +270,128 @@ describe('DiscordAdapter inbound', () => {
       },
     });
     await expect(
-      handlers(h).slashCommand({ channelId: 'C100', userId: 'U7', text: '' }),
+      handlers(h).slashCommand({
+        channelId: 'C100',
+        userId: 'U7',
+        text: 'acme/widgets',
+        interactionId: 'i5',
+      }),
     ).resolves.toBeUndefined();
     expect(h.warnings.some((w) => w.includes('orchestrator down'))).toBe(true);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Modals (M7-B)                                                               */
+/* -------------------------------------------------------------------------- */
+
+describe('DiscordAdapter modals', () => {
+  it('bare /devspace opens the repo picker and creates nothing', async () => {
+    const h = await startAdapter();
+    await handlers(h).slashCommand({
+      channelId: 'C100',
+      userId: 'U7',
+      text: '',
+      interactionId: 'i1',
+    });
+    expect(h.transport.modals).toEqual([
+      {
+        interactionId: 'i1',
+        modal: expect.objectContaining({ custom_id: `${REPO_PICKER_MODAL_PREFIX}:C100` }),
+      },
+    ]);
+    // Dismissal-shaped flow: no submission ever arrives — nothing was created.
+    expect(h.events).toEqual([]);
+    expect(h.transport.threads).toEqual([]);
+  });
+
+  it('a repo-picker submission roots a session exactly like the arg path', async () => {
+    const h = await startAdapter();
+    await handlers(h).modalSubmit({
+      customId: `${REPO_PICKER_MODAL_PREFIX}:C100`,
+      userId: 'U7',
+      fields: { repo: 'acme/widgets', ref: 'main' },
+    });
+    expect(h.transport.threads).toEqual([
+      { channelId: 'C100', rootMessageId: 'm1', name: 'devspace session' },
+    ]);
+    expect(h.events).toEqual([
+      {
+        type: 'conversation.created',
+        platform: 'discord',
+        externalChannelId: 'C100:thread-of-m1',
+        userId: 'U7',
+        repoChoice: { repoUrl: 'https://github.com/acme/widgets', ref: 'main', empty: false },
+      },
+    ]);
+  });
+
+  it('the set-secrets button opens the secrets modal with the thread ref in its custom_id', async () => {
+    const h = await startAdapter();
+    await handlers(h).button({
+      channelId: 'thread-of-m1',
+      parentChannelId: 'C100',
+      userId: 'U7',
+      customId: 'set-secrets',
+      interactionId: 'i9',
+    });
+    expect(h.transport.modals).toEqual([
+      {
+        interactionId: 'i9',
+        modal: expect.objectContaining({
+          custom_id: `${SECRETS_MODAL_PREFIX}:C100:thread-of-m1`,
+        }),
+      },
+    ]);
+    // Pure platform UI: nothing reached the orchestrator.
+    expect(h.events).toEqual([]);
+  });
+
+  it('a secrets submission emits one secret.submitted per FILLED field', async () => {
+    const h = await startAdapter();
+    h.binding.bind('conv-s', { channel: 'C100', threadTs: 'thread-of-m1' });
+    await handlers(h).modalSubmit({
+      customId: `${SECRETS_MODAL_PREFIX}:C100:thread-of-m1`,
+      userId: 'U7',
+      fields: { llm_key: ' sk-123 ', github_token: '', github_clone_token: 'ghp_ro' },
+    });
+    expect(h.events).toEqual([
+      {
+        type: 'secret.submitted',
+        conversationId: 'conv-s',
+        userId: 'U7',
+        name: 'LLM_KEY',
+        value: 'sk-123',
+      },
+      {
+        type: 'secret.submitted',
+        conversationId: 'conv-s',
+        userId: 'U7',
+        name: 'GITHUB_CLONE_TOKEN',
+        value: 'ghp_ro',
+      },
+    ]);
+  });
+
+  it('malformed or unbound modal submissions are dropped, never thrown', async () => {
+    const h = await startAdapter();
+    // No prefix separator at all.
+    await handlers(h).modalSubmit({ customId: 'garbage', userId: 'U7', fields: {} });
+    // Unknown prefix.
+    await handlers(h).modalSubmit({ customId: 'other:thing', userId: 'U7', fields: {} });
+    // Secrets for a thread that is not a devspace session (unbound).
+    await handlers(h).modalSubmit({
+      customId: `${SECRETS_MODAL_PREFIX}:C9:T9`,
+      userId: 'U7',
+      fields: { llm_key: 'sk-x' },
+    });
+    // Malformed ref inside a secrets id (no channel:thread shape).
+    await handlers(h).modalSubmit({
+      customId: `${SECRETS_MODAL_PREFIX}:noshape`,
+      userId: 'U7',
+      fields: { llm_key: 'sk-x' },
+    });
+    expect(h.events).toEqual([]);
   });
 });
 

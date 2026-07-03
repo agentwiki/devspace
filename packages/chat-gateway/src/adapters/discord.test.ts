@@ -16,12 +16,19 @@ import {
   type DiscordMessageEvent,
   type DiscordTransport,
 } from './discord.js';
-import { actionsBodies, messageBodies, statusBody, streamBody } from '../discord/messages.js';
+import {
+  actionsBodies,
+  messageBodies,
+  sessionListBody,
+  statusBody,
+  streamBody,
+} from '../discord/messages.js';
 import {
   REPO_PICKER_MODAL_PREFIX,
   SECRETS_MODAL_PREFIX,
   type DiscordModal,
 } from '../discord/modals.js';
+import type { HomeSession } from '../slack/blocks.js';
 
 /* -------------------------------------------------------------------------- */
 /* Fake transport                                                              */
@@ -40,6 +47,7 @@ class FakeTransport implements DiscordTransport {
   edits: Posted[] = [];
   threads: Array<{ channelId: string; rootMessageId: string; name: string }> = [];
   modals: Array<{ interactionId: string; modal: DiscordModal }> = [];
+  ephemeral: Array<{ interactionId: string; content: string; components?: unknown[] }> = [];
   stopped = false;
   private counter = 0;
 
@@ -75,6 +83,12 @@ class FakeTransport implements DiscordTransport {
   async openModal(interactionId: string, modal: DiscordModal): Promise<void> {
     this.modals.push({ interactionId, modal });
   }
+  async replyEphemeral(
+    interactionId: string,
+    body: { content: string; components?: unknown[] },
+  ): Promise<void> {
+    this.ephemeral.push({ interactionId, ...body });
+  }
 }
 
 interface Harness {
@@ -91,6 +105,7 @@ async function startAdapter(
     emit?: EmitChatEvent;
     clock?: Clock;
     minStreamIntervalMs?: number;
+    listSessions?: (userId: string) => Promise<HomeSession[]>;
   } = {},
 ): Promise<Harness> {
   const transport = new FakeTransport();
@@ -102,6 +117,7 @@ async function startAdapter(
     warn: (m) => warnings.push(m),
     clock: opts.clock,
     minStreamIntervalMs: opts.minStreamIntervalMs,
+    listSessions: opts.listSessions,
   });
   const emit: EmitChatEvent =
     opts.emit ??
@@ -138,6 +154,7 @@ describe('DiscordAdapter inbound', () => {
   it('/devspace roots a message, threads it, and emits conversation.created', async () => {
     const h = await startAdapter();
     await handlers(h).slashCommand({
+      command: 'devspace',
       channelId: 'C100',
       userId: 'U7',
       text: 'acme/widgets main',
@@ -271,6 +288,7 @@ describe('DiscordAdapter inbound', () => {
     });
     await expect(
       handlers(h).slashCommand({
+        command: 'devspace',
         channelId: 'C100',
         userId: 'U7',
         text: 'acme/widgets',
@@ -289,6 +307,7 @@ describe('DiscordAdapter modals', () => {
   it('bare /devspace opens the repo picker and creates nothing', async () => {
     const h = await startAdapter();
     await handlers(h).slashCommand({
+      command: 'devspace',
       channelId: 'C100',
       userId: 'U7',
       text: '',
@@ -393,6 +412,118 @@ describe('DiscordAdapter modals', () => {
     });
     expect(h.events).toEqual([]);
   });
+});
+
+/* -------------------------------------------------------------------------- */
+/* /sessions (M7-C)                                                            */
+/* -------------------------------------------------------------------------- */
+
+describe('DiscordAdapter /sessions', () => {
+  const sessions: HomeSession[] = [
+    {
+      conversationId: 'c1',
+      state: 'WORKING',
+      repoUrl: 'https://github.com/acme/widgets',
+    },
+    {
+      conversationId: 'c2',
+      state: 'PR_OPEN',
+      repoUrl: 'https://github.com/acme/api',
+      prUrl: 'https://github.com/acme/api/pull/7',
+    },
+  ];
+
+  it('replies ephemerally with the injected session list — nothing posted to the channel', async () => {
+    const seen: string[] = [];
+    const h = await startAdapter({
+      listSessions: async (userId) => {
+        seen.push(userId);
+        return sessions;
+      },
+    });
+    await handlers(h).slashCommand({
+      command: 'sessions',
+      channelId: 'C100',
+      userId: 'U7',
+      text: '',
+      interactionId: 'i7',
+    });
+    expect(seen).toEqual(['U7']);
+    expect(h.transport.ephemeral).toEqual([
+      { interactionId: 'i7', ...sessionListBody(sessions) },
+    ]);
+    expect(h.transport.posted).toEqual([]);
+    expect(h.events).toEqual([]); // gateway UI only — no orchestrator event
+  });
+
+  it('renders the empty-state hint without a source', async () => {
+    const h = await startAdapter();
+    await handlers(h).slashCommand({
+      command: 'sessions',
+      channelId: 'C100',
+      userId: 'U7',
+      text: '',
+      interactionId: 'i8',
+    });
+    expect(h.transport.ephemeral[0]!.content).toContain('No active sessions');
+  });
+
+  it('the source is not consulted for /devspace', async () => {
+    let calls = 0;
+    const h = await startAdapter({
+      listSessions: async () => {
+        calls += 1;
+        return [];
+      },
+    });
+    await handlers(h).slashCommand({
+      command: 'devspace',
+      channelId: 'C100',
+      userId: 'U7',
+      text: 'acme/widgets',
+      interactionId: 'i9',
+    });
+    expect(calls).toBe(0);
+  });
+});
+
+describe('sessionListBody', () => {
+  it('one line per session: state · repo · PR link', () => {
+    const { content } = sessionListBody(sessions2());
+    expect(content).toContain('**Sessions** (2)');
+    expect(content).toContain('**WORKING** · <https://github.com/acme/widgets>');
+    expect(content).toContain(
+      '**PR_OPEN** · <https://github.com/acme/api> · [PR](https://github.com/acme/api/pull/7)',
+    );
+  });
+
+  it('marks a missing repository instead of dropping the field', () => {
+    const { content } = sessionListBody([{ conversationId: 'c', state: 'CREATED' }]);
+    expect(content).toContain('**CREATED** · (no repository)');
+  });
+
+  it('truncates a too-long list under the 2000-char cap with an explicit remainder', () => {
+    const many: HomeSession[] = Array.from({ length: 100 }, (_, i) => ({
+      conversationId: `c${i}`,
+      state: 'WORKING',
+      repoUrl: `https://github.com/acme/repository-with-a-long-name-${i}`,
+    }));
+    const { content } = sessionListBody(many);
+    expect(content.length).toBeLessThanOrEqual(2000);
+    expect(content).toMatch(/…and \d+ more$/);
+  });
+
+  function sessions2(): HomeSession[] {
+    return [
+      { conversationId: 'c1', state: 'WORKING', repoUrl: 'https://github.com/acme/widgets' },
+      {
+        conversationId: 'c2',
+        state: 'PR_OPEN',
+        repoUrl: 'https://github.com/acme/api',
+        prUrl: 'https://github.com/acme/api/pull/7',
+      },
+    ];
+  }
 });
 
 /* -------------------------------------------------------------------------- */

@@ -32,10 +32,12 @@ import { StatusRegistry, StreamCoalescer, type Clock } from '../status.js';
 import {
   actionsBodies,
   messageBodies,
+  sessionListBody,
   statusBody,
   streamBody,
   type DiscordMessageBody,
 } from '../discord/messages.js';
+import type { HomeSession } from '../slack/blocks.js';
 import {
   REPO_PICKER_MODAL_PREFIX,
   SECRETS_MODAL_PREFIX,
@@ -54,11 +56,13 @@ import { parseRepoChoice } from './slack.js';
 /* -------------------------------------------------------------------------- */
 
 export interface DiscordSlashEvent {
+  /** Which slash command fired: `/devspace` or `/sessions` (M7-C). */
+  command: 'devspace' | 'sessions';
   channelId: string;
   userId: string;
   /** The command's raw argument text ("<repoUrl> [ref]", possibly empty). */
   text: string;
-  /** Opaque handle for `openModal` (Discord's trigger_id equivalent, M7-B). */
+  /** Opaque handle for `openModal`/`replyEphemeral` (the trigger_id equivalent). */
   interactionId: string;
 }
 
@@ -114,6 +118,8 @@ export interface DiscordTransport {
   editMessage(channelId: string, messageId: string, body: DiscordMessageBody): Promise<void>;
   /** Show a modal AS the response to a still-unacked interaction (M7-B). */
   openModal(interactionId: string, modal: DiscordModal): Promise<void>;
+  /** Reply ephemerally to a still-unacked interaction (`/sessions`, M7-C). */
+  replyEphemeral(interactionId: string, body: DiscordMessageBody): Promise<void>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -123,6 +129,8 @@ export interface DiscordTransport {
 export interface DiscordAdapterOptions {
   /** Wired with orchestrator-backed cold-miss resolvers by the service. */
   binding?: ConversationBinding;
+  /** `/sessions` list source (the App Home read); default = empty-state hint. */
+  listSessions?: (discordUserId: string) => Promise<HomeSession[]>;
   /** Stream flush interval (default 1000ms — Discord edits are rate-limited too). */
   minStreamIntervalMs?: number;
   clock?: Clock;
@@ -160,6 +168,7 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
   private readonly streams = new Map<string, StreamState>();
   private readonly warn: (message: string) => void;
   private readonly threadName: string;
+  private readonly listSessions?: (discordUserId: string) => Promise<HomeSession[]>;
   private streamCounter = 0;
   private emit?: EmitChatEvent;
 
@@ -170,6 +179,7 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
     this.binding = opts.binding ?? new ConversationBinding();
     this.warn = opts.warn ?? ((message) => console.warn(`[discord] ${message}`));
     this.threadName = opts.threadName ?? 'devspace session';
+    this.listSessions = opts.listSessions;
     this.coalescer = new StreamCoalescer((streamId, text) => this.flushStream(streamId, text), {
       minIntervalMs: opts.minStreamIntervalMs,
       clock: opts.clock,
@@ -184,7 +194,13 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
   async start(emit: EmitChatEvent): Promise<void> {
     this.emit = emit;
     await this.transport.start({
-      slashCommand: async ({ channelId, userId, text, interactionId }) => {
+      slashCommand: async ({ command, channelId, userId, text, interactionId }) => {
+        // `/sessions` (M7-C): the ephemeral session list, same read as App Home.
+        if (command === 'sessions') {
+          const sessions = (await this.listSessions?.(userId)) ?? [];
+          await this.transport.replyEphemeral(interactionId, sessionListBody(sessions));
+          return;
+        }
         // Bare `/devspace` opens the repo picker instead of an empty session
         // (m6-plan Decision 9, Discord edition) — dismissal creates nothing.
         if (!text.trim()) {

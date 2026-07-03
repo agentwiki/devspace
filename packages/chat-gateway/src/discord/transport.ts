@@ -52,6 +52,13 @@ const DEVSPACE_COMMAND = {
   ],
 };
 
+/** `/sessions` — the Discord session-list surface (M7-C, no Home tab). */
+const SESSIONS_COMMAND = {
+  name: 'sessions',
+  description: 'List your devspace sessions',
+  options: [],
+};
+
 /** A channel we can post/edit in (guild text or thread). */
 type Postable = TextChannel | ThreadChannel;
 
@@ -106,9 +113,23 @@ export function discordJsTransport(config: DiscordConfig): DiscordTransport {
             }
             if (!interaction.channelId) return;
             await handlers.slashCommand({
+              command: 'devspace',
               channelId: interaction.channelId,
               userId: interaction.user.id,
               text: [repo, ref].filter(Boolean).join(' '),
+              interactionId: interaction.id,
+            });
+            return;
+          }
+          if (interaction.isChatInputCommand() && interaction.commandName === 'sessions') {
+            // The adapter's ephemeral list IS the response — stay un-acked.
+            track(interaction);
+            if (!interaction.channelId) return;
+            await handlers.slashCommand({
+              command: 'sessions',
+              channelId: interaction.channelId,
+              userId: interaction.user.id,
+              text: '',
               interactionId: interaction.id,
             });
             return;
@@ -163,10 +184,10 @@ export function discordJsTransport(config: DiscordConfig): DiscordTransport {
         })().catch((err) => console.warn(`[discord] message handling failed: ${String(err)}`));
       });
 
-      // Register /devspace (idempotent full PUT), then connect the gateway.
+      // Register the commands (idempotent full PUT), then connect the gateway.
       const rest = new REST().setToken(config.token);
       await rest.put(Routes.applicationCommands(config.applicationId), {
-        body: [DEVSPACE_COMMAND],
+        body: [DEVSPACE_COMMAND, SESSIONS_COMMAND],
       });
       await client.login(config.token);
     },
@@ -203,6 +224,13 @@ export function discordJsTransport(config: DiscordConfig): DiscordTransport {
       pending.delete(interactionId);
       // The builders emit the raw API (snake_case) modal shape directly.
       await interaction.showModal(modal as unknown as ModalComponentData);
+    },
+
+    async replyEphemeral(interactionId, body) {
+      const interaction = pending.get(interactionId);
+      if (!interaction) throw new Error(`interaction ${interactionId} expired or unknown`);
+      pending.delete(interactionId);
+      await interaction.reply({ ...(toOptions(body) as object), flags: MessageFlags.Ephemeral });
     },
   };
 }

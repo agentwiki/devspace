@@ -6,7 +6,7 @@
  * plus button components; there is no Block Kit equivalent.
  */
 import type { ActionButton } from '@devspace/contracts';
-import { chunkText } from '../slack/blocks.js';
+import { chunkText, type HomeSession } from '../slack/blocks.js';
 
 /** Discord hard limits the builders enforce. */
 export const CONTENT_MAX = 2000;
@@ -75,4 +75,33 @@ export function actionsBodies(text: string, actions: ActionButton[]): DiscordMes
 export function streamBody(text: string): DiscordMessageBody {
   if (text.length <= CONTENT_MAX) return { content: text };
   return { content: `…${text.slice(-(CONTENT_MAX - 1))}` };
+}
+
+/**
+ * The `/sessions` reply (M7-C) — Discord's session-list surface. There is no
+ * Home tab; an on-demand ephemeral message over the SAME `listSessions` read
+ * that feeds Slack's App Home is the platform-native equivalent
+ * (chat-platform-ui-parity.md). One line per session; a list that would blow
+ * the 2000-char cap is truncated with an explicit remainder — never silently.
+ */
+export function sessionListBody(sessions: HomeSession[]): DiscordMessageBody {
+  if (sessions.length === 0) {
+    return { content: 'No active sessions. Run `/devspace <repoUrl>` in a channel to start one.' };
+  }
+  const header = `**Sessions** (${sessions.length})`;
+  const lines = sessions.map((s) =>
+    [`**${s.state}**`, s.repoUrl ? `<${s.repoUrl}>` : '(no repository)', s.prUrl && `[PR](${s.prUrl})`]
+      .filter(Boolean)
+      .join(' · '),
+  );
+  let content = header;
+  for (const [i, line] of lines.entries()) {
+    const remainder = `\n…and ${lines.length - i} more`;
+    if (content.length + 1 + line.length + remainder.length > CONTENT_MAX) {
+      content += remainder;
+      break;
+    }
+    content += `\n${line}`;
+  }
+  return { content };
 }

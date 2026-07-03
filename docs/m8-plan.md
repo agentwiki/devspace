@@ -39,9 +39,9 @@ In (per roadmap M8+):
 
 Out (seeded to M9, with rationale):
 
-- **NATS bus.** M8's multi-host is *sandbox* hosts; the event bus stays a
+- **NATS bus.** M8's multi-host is _sandbox_ hosts; the event bus stays a
   single-orchestrator concern and Postgres LISTEN/NOTIFY already survives the
-  split. NATS pays for itself when the *orchestrator* scales out; `EventBus`
+  split. NATS pays for itself when the _orchestrator_ scales out; `EventBus`
   remains the seam.
 - **mTLS / per-service identity.** Deployment layer replacing the shared
   token (m6-plan Decision 3) — unchanged by this milestone; the sandbox hosts
@@ -55,8 +55,8 @@ Out (seeded to M9, with rationale):
 
 1. **The wire is ndjson `ExecFrame`s over an HTTP/1.1 Upgrade — no gRPC, no
    WebSocket framing.** The roadmap's default answer to top-risk #1 was "gRPC
-   bidi w/ flow control"; what actually matters is a *byte channel with
-   kernel-enforced flow control in both directions*, and a raw upgraded TCP
+   bidi w/ flow control"; what actually matters is a _byte channel with
+   kernel-enforced flow control in both directions_, and a raw upgraded TCP
    socket IS that channel — with zero new dependencies (the repo has none and
    M5/M6/M7 kept it that way). `ExecFrame` has been base64-armored for JSON
    transport since M0, so the framing is one `JSON.stringify` + newline per
@@ -70,12 +70,12 @@ Out (seeded to M9, with rationale):
    its high-water mark, pauses the pipes, and the kernel blocks the producer.
    Client→server: the exported `FrameChannel` (the M1 watermark channel,
    now a public primitive) buffers inbound frames and pauses/resumes the
-   *socket*, so TCP's receive window closes against the server. stdin runs
+   _socket_, so TCP's receive window closes against the server. stdin runs
    the same protocol mirrored. No hop buffers unboundedly.
 3. **Everything checkable is checked before the 101.** Bearer token, env
    existence, env readiness — all answered as plain HTTP (401/404/409) on the
    not-yet-upgraded socket, mirroring the preview proxy's 404-before-dial.
-   The `ExecRequest` itself is the FIRST ndjson line the client sends *after*
+   The `ExecRequest` itself is the FIRST ndjson line the client sends _after_
    the upgrade — not a header — because `launchCommand` env carries the LLM
    key and headers leak into logs. Post-upgrade failures (bad first line)
    are an in-band `stderr` frame + `exit -1`, the same shape M1 gave spawn
@@ -92,17 +92,17 @@ Out (seeded to M9, with rationale):
    stays open exactly as it has been since M1 (a local ops/debug surface on a
    trusted network) — but the upgrade endpoint refuses with 503: a
    full-duplex exec that injects per-env secrets does not run unauthenticated,
-   ever. Fleet mode therefore *requires* the token by construction.
+   ever. Fleet mode therefore _requires_ the token by construction.
 6. **Placement is least-loaded with a per-host cap, and it is deliberately
    dumb.** Fewest live envs wins; ties break in config order; draining and
    full hosts are skipped; no host ⇒ `PROVISION_FAILED` with a message that
    names the reason (all draining vs. at capacity). Bin-packing, affinity,
    and cost models belong to the warm-pool milestone; what M8 must get right
-   is the *seam* — placement lives entirely inside `MultiHostSandboxCore`,
+   is the _seam_ — placement lives entirely inside `MultiHostSandboxCore`,
    so a smarter scheduler is an internal swap.
 7. **Routing is in-memory with cold-miss rediscovery, matching the existing
    persistence posture.** `DevcontainerSandboxCore` has always kept its env
-   table in memory; the remote hosts now durably *are* that table (they hold
+   table in memory; the remote hosts now durably _are_ that table (they hold
    the containers). On a routing miss the multi-host core probes each host's
    `GET /environments/:id` and adopts the hit, so an orchestrator restart
    re-learns its fleet lazily instead of orphaning envs. Probing is O(hosts)

@@ -4,6 +4,7 @@ Critical path to the end-to-end demo: **M0 → M1 → M2 → M3 → M4.**
 Release-blocking hardening for real multi-tenant use: **M5.**
 Expansion I (split, preview proxy, chat completion, 2nd agent): **M6.**
 Expansion II (preview WS upgrade, Discord UI parity): **M7.**
+Expansion III (exec over the wire, multi-host placement): **M8.**
 
 ## M0 — Scaffolding (done)
 
@@ -268,20 +269,64 @@ Landed:
   equivalent). 2000-char cap enforced with an explicit "…and N more"
   remainder — never silent truncation. Gateway UI only: no new contract.
 
-## M8+ — Expansion III
+## M8 — Expansion III: multi-host foundations (done)
 
-Multi-host scheduling (placement/capacity/drain — meaningless before a
-second sandbox host; must anchor the milestone that exposes the in-process
-exec stream over the network, top-risk #1); NATS bus (pays for itself only
-alongside multi-host; `EventBus` is the seam); per-service identity on the
-internal API (mTLS — deployment-layer, replacing the shared token); Discord
-Forum-channel session dashboard (presentation upgrade over `/sessions`).
-UI surface remains chat only — no self-hosted web UI (see
-docs/analysis/chat-platform-ui-parity.md).
+The milestone the roadmap reserved for top-risk #1: the in-process exec
+stream goes over the network, and multi-host placement/capacity/drain lands
+on top — all behind the existing `SandboxCore`/`ExecProvider` seams, so the
+orchestrator FSM, agent-runner, and both chat adapters are untouched.
+Design of record: docs/m8-plan.md.
+
+Landed:
+
+- **The exec wire** — a `devspace-exec` HTTP Upgrade on sandbox-core-svc
+  carries the full-duplex stream as ndjson `ExecFrame`s (base64-armored for
+  exactly this since M0) over a raw upgraded TCP socket: zero new deps, no
+  WebSocket/gRPC ceremony. **Backpressure survives end to end** — the server
+  honors `socket.write()`'s verdict, the client's `FrameChannel` (the M1
+  watermark channel, now exported) pauses the socket, and TCP's window
+  replaces the OS pipe as the kernel-enforced middle. Proven over loopback:
+  a parked consumer halts the remote producer, measured at the source.
+- **Remote sandbox surface, authed** — the svc's routing moved into the
+  package (`remote-server.ts`, loopback-tested); with
+  `DEVSPACE_INTERNAL_TOKEN` set everything but `/health` requires the
+  bearer; tokenless keeps the JSON surface as the local ops tool it always
+  was but the exec stream refuses to serve, ever (secrets ride it). All
+  pre-flight checks (401/404/409) answer BEFORE the 101; the `ExecRequest`
+  is the first post-upgrade line, never a header (it can carry the LLM key).
+- **`RemoteSandboxCore`** — the complete `SandboxCore` interface against a
+  remote host (lifecycle/fs/ports over JSON, exec over the upgrade, error
+  envelopes mapped back onto `SandboxError`); a lost connection synthesizes
+  `stderr` + `exit -1`, the M1 spawn-error convention, so consumers never
+  hang. `kill()` crosses the wire (the docker-exec caveat applies remotely,
+  unchanged — aborts still use `killCommand()`).
+- **Multi-host placement** — `MultiHostSandboxCore`: capacity-bounded
+  least-loaded placement (ties in config order; draining/full hosts skipped
+  with distinct fail-fast messages), sticky env→host routing with cold-miss
+  rediscovery (an orchestrator restart re-learns its fleet by probing
+  `GET /environments/:id` — never orphans live envs), runtime
+  `setDraining`. Fleet mode is a config flip:
+  `SANDBOX_HOSTS=name=url[|capacity][|drain],…` + the token switches
+  `bootOrchestrator` to remote clients and leaves hardening/egress/preview
+  where the daemons live; unset, the zero-config in-process boot is
+  byte-for-byte unchanged.
+
+## M9+ — Expansion IV
+
+NATS bus (now meaningful when the _orchestrator_ scales out — M8's fleet is
+sandbox hosts; LISTEN/NOTIFY already survives that split; `EventBus` is the
+seam); per-service identity on the internal API (mTLS — deployment-layer,
+replacing the shared token); warm pools / cold-start work (top-risk #4 —
+placement now exists to hang it on); resource-aware scheduling (capacity
+counts envs today, deliberately); Discord Forum-channel session dashboard
+(presentation upgrade over `/sessions`). UI surface remains chat only — no
+self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 
-1. exec-stream backpressure/framing deadlocks → gRPC bidi w/ flow control; stress test in M1.
+1. exec-stream backpressure/framing deadlocks → stress test in M1; answered in M8
+   (ndjson frames over an upgraded TCP socket, watermark channels at both rims —
+   loopback-proven; gRPC turned out unnecessary).
 2. container escape → gVisor from M5; never ship plain-Docker multi-tenant.
 3. PAT leakage → short-lived OAuth; read-only in-container; push/PR via wrapper; redact output.
 4. cold-start latency → prebuilt images + warm pool + cached agent-runtime volume (<15s warm).

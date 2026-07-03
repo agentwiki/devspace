@@ -42,10 +42,14 @@ const DEFAULT_LOW_WATER = 64;
  * high/low-water crossings. Invariant: the internal queue is only non-empty
  * when no puller is parked (a push hands straight to a waiting puller), so the
  * two arrays are never both non-empty.
+ *
+ * Exported since M8: the remote exec client (`remote-client.ts`) puts the same
+ * watermark channel at the TCP rim — pause/resume the socket instead of the
+ * child's pipes — so backpressure semantics are identical on both transports.
  */
-class FrameChannel {
-  private readonly queue: ExecFrame[] = [];
-  private readonly pullers: Array<(r: IteratorResult<ExecFrame>) => void> = [];
+export class FrameChannel<T = ExecFrame> {
+  private readonly queue: T[] = [];
+  private readonly pullers: Array<(r: IteratorResult<T>) => void> = [];
   private ended = false;
   private paused = false;
 
@@ -56,7 +60,7 @@ class FrameChannel {
     private readonly onResume: () => void,
   ) {}
 
-  push(frame: ExecFrame): void {
+  push(frame: T): void {
     if (this.ended) return;
     const puller = this.pullers.shift();
     if (puller) {
@@ -78,7 +82,7 @@ class FrameChannel {
     while (this.pullers.length) this.pullers.shift()!({ value: undefined as never, done: true });
   }
 
-  pull(): Promise<IteratorResult<ExecFrame>> {
+  pull(): Promise<IteratorResult<T>> {
     const frame = this.queue.shift();
     if (frame !== undefined) {
       if (this.paused && this.queue.length <= this.low) {

@@ -136,6 +136,21 @@ export const ExecFrameSchema = z.discriminatedUnion('kind', [
 ]);
 export type ExecFrame = z.infer<typeof ExecFrameSchema>;
 
+/**
+ * Client→server control frames on the remote exec wire (M8): `stdin` is the
+ * ExecFrame variant reused verbatim; `stdin_close` signals EOF; `kill`
+ * forwards to the underlying stream's kill() — which, over the docker-exec
+ * transport, reaches only the local `docker exec` client (see the M5
+ * auto-abort caveat; hard stops still go through killCommand()/destroy()).
+ * Server→client frames are the existing ExecFrame minus `stdin`.
+ */
+export const ExecClientFrameSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('stdin'), data: z.string().describe('base64') }),
+  z.object({ kind: z.literal('stdin_close') }),
+  z.object({ kind: z.literal('kill'), signal: z.string().optional() }),
+]);
+export type ExecClientFrame = z.infer<typeof ExecClientFrameSchema>;
+
 export const FsReadRequestSchema = z.object({ path: z.string() });
 export const FsWriteRequestSchema = z.object({
   path: z.string(),

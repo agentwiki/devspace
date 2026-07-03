@@ -1,40 +1,32 @@
 /**
- * Deployable entrypoint for sandbox-core.
+ * Deployable entrypoint for sandbox-core — one host of the (possibly 1-sized)
+ * sandbox fleet.
  *
- * The load-bearing full-duplex exec stream is consumed IN-PROCESS by
- * agent-runner (a workspace dependency, per the DAG in docs/architecture.md),
- * so it is not exposed over the network here. This service exposes the JSON
- * control surface — environment lifecycle, fs ops, and a capture-only exec for
- * ops/debugging — so the sandbox can be driven and inspected out-of-band.
+ * Since M8 the full surface lives in the package (`remote-server.ts`) and this
+ * file is config + wiring: the JSON control surface plus the `devspace-exec`
+ * upgrade endpoint that carries the load-bearing full-duplex exec stream over
+ * the network to the orchestrator's RemoteSandboxCore. With
+ * DEVSPACE_INTERNAL_TOKEN set, everything except /health requires the internal
+ * bearer; without it, the JSON surface stays a local ops/debug tool and the
+ * exec stream refuses to serve (m8-plan Decision 5).
  */
 import { createServer } from 'node:http';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import {
-  CreateEnvironmentRequestSchema,
-  ExecRequestSchema,
-  FsListRequestSchema,
-  FsReadRequestSchema,
-  FsWriteRequestSchema,
-} from '@devspace/contracts';
-import type { ErrorCode } from '@devspace/contracts';
 import {
   DEFAULT_EGRESS_ALLOWLIST,
   DevcontainerSandboxCore,
   EgressProxy,
   PreviewProxy,
-  SandboxError,
   assertRuntimeAvailable,
-  captureExec,
-  fromBase64,
+  createSandboxRequestHandler,
+  createSandboxUpgradeHandler,
   hardeningFromEnv,
   nodeCommandRunner,
   previewProxyFromEnv,
-  toBase64,
 } from '@devspace/sandbox-core';
-import { z } from 'zod';
 
 const SERVICE = 'sandbox-core';
 const PORT = Number(process.env.PORT ?? 4001);
+const TOKEN = process.env.DEVSPACE_INTERNAL_TOKEN || undefined;
 
 // M5 hardening is boot-time host policy (m5-plan Decision 1). Fail fast when
 // the configured runtime class (gVisor/Kata) is absent from the daemon.
@@ -75,117 +67,20 @@ if (previewOptions) {
 
 const core = new DevcontainerSandboxCore({ hardening, preview });
 
-const ERROR_STATUS: Record<ErrorCode, number> = {
-  BAD_REQUEST: 400,
-  UNAUTHORIZED: 401,
-  FORBIDDEN: 403,
-  NOT_FOUND: 404,
-  CONFLICT: 409,
-  PROVISION_FAILED: 500,
-  EXEC_FAILED: 500,
-  AGENT_FAILED: 500,
-  GUARDRAIL_BLOCKED: 403,
-  INTERNAL: 500,
-};
-
-const server = createServer((req, res) => {
-  handle(req, res).catch((err) => sendError(res, err));
-});
-
-async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const url = new URL(req.url ?? '/', 'http://localhost');
-  const segments = url.pathname.split('/').filter(Boolean);
-  const method = req.method ?? 'GET';
-
-  if (method === 'GET' && url.pathname === '/health') {
-    return sendJson(res, 200, { status: 'ok', service: SERVICE });
-  }
-
-  // /environments ...
-  if (segments[0] === 'environments') {
-    const envId = segments[1];
-
-    if (method === 'POST' && segments.length === 1) {
-      const body = CreateEnvironmentRequestSchema.parse(await readJson(req));
-      return sendJson(res, 201, await core.createEnvironment(body));
-    }
-
-    if (envId) {
-      if (method === 'GET' && segments.length === 2) {
-        const env = await core.getEnvironment(envId);
-        if (!env) throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
-        return sendJson(res, 200, env);
-      }
-      if (method === 'DELETE' && segments.length === 2) {
-        await core.destroyEnvironment(envId);
-        res.writeHead(204).end();
-        return;
-      }
-      if (method === 'POST' && segments[2] === 'exec') {
-        const execReq = ExecRequestSchema.parse(await readJson(req));
-        const { code, stdout, stderr } = await captureExec(await core.exec(envId, execReq));
-        return sendJson(res, 200, { code, stdout: toBase64(stdout), stderr: toBase64(stderr) });
-      }
-      if (method === 'POST' && segments[2] === 'fs' && segments[3] === 'read') {
-        const { path } = FsReadRequestSchema.parse(await readJson(req));
-        return sendJson(res, 200, { data: toBase64(await core.fsRead(envId, path)) });
-      }
-      if (method === 'POST' && segments[2] === 'fs' && segments[3] === 'write') {
-        const { path, data, mode } = FsWriteRequestSchema.parse(await readJson(req));
-        await core.fsWrite(envId, path, fromBase64(data), mode);
-        res.writeHead(204).end();
-        return;
-      }
-      if (method === 'POST' && segments[2] === 'fs' && segments[3] === 'list') {
-        const { path } = FsListRequestSchema.parse(await readJson(req));
-        return sendJson(res, 200, { entries: await core.fsList(envId, path) });
-      }
-      if (method === 'POST' && segments[2] === 'ports') {
-        const { containerPort } = z
-          .object({ containerPort: z.number().int().min(1).max(65535) })
-          .parse(await readJson(req));
-        return sendJson(res, 201, await core.forwardPort(envId, containerPort));
-      }
-    }
-  }
-
-  throw new SandboxError('NOT_FOUND', `no route for ${method} ${url.pathname}`);
-}
-
-async function readJson(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  const raw = Buffer.concat(chunks).toString('utf8').trim();
-  return raw ? JSON.parse(raw) : {};
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(body));
-}
-
-function sendError(res: ServerResponse, err: unknown): void {
-  let code: ErrorCode = 'INTERNAL';
-  let message = 'internal error';
-  if (err instanceof SandboxError) {
-    code = err.code;
-    message = err.message;
-  } else if (err instanceof z.ZodError) {
-    code = 'BAD_REQUEST';
-    message = err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
-  } else if (err instanceof SyntaxError) {
-    code = 'BAD_REQUEST';
-    message = 'invalid JSON body';
-  } else if (err instanceof Error) {
-    message = err.message;
-  }
-  if (res.headersSent) {
-    res.end();
-    return;
-  }
-  sendJson(res, ERROR_STATUS[code], { code, message });
-}
+const server = createServer(createSandboxRequestHandler(core, { token: TOKEN, service: SERVICE }));
+server.on(
+  'upgrade',
+  createSandboxUpgradeHandler(core, {
+    token: TOKEN,
+    onLog: (line) => console.log(`[${SERVICE}] exec: ${line}`),
+  }),
+);
 
 server.listen(PORT, () => {
   console.log(`[${SERVICE}] listening on :${PORT}`);
+  if (!TOKEN) {
+    console.log(
+      `[${SERVICE}] DEVSPACE_INTERNAL_TOKEN unset — JSON surface open (local ops), exec stream disabled`,
+    );
+  }
 });

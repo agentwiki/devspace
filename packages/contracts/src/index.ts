@@ -261,6 +261,17 @@ export const ChatEventSchema = z.discriminatedUnion('type', [
 ]);
 export type ChatEvent = z.infer<typeof ChatEventSchema>;
 
+/**
+ * Result of routing a ChatEvent: `conversation.created` yields the created id
+ * so the adapter can bind its platform thread (M4 Decision 1); other events
+ * carry nothing. Formalized as a schema in M6 so the split's `POST
+ * /chat-events` response is a contract, not an ad-hoc shape.
+ */
+export const ChatEventResultSchema = z.object({
+  conversationId: ConversationIdSchema.optional(),
+});
+export type ChatEventResult = z.infer<typeof ChatEventResultSchema>;
+
 export const ActionButtonSchema = z.object({
   actionId: z.string(),
   label: z.string(),
@@ -369,6 +380,22 @@ export const WorkUnitSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 export type WorkUnit = z.infer<typeof WorkUnitSchema>;
+
+/**
+ * One session as shown in list surfaces (Slack App Home, `GET /sessions`):
+ * a conversation joined with its work unit's current state (M6, the M4
+ * App-Home deferral).
+ */
+export const SessionSummarySchema = z.object({
+  conversationId: ConversationIdSchema,
+  platform: ChatPlatformSchema,
+  externalChannelId: z.string(),
+  state: WorkStateSchema,
+  repoUrl: z.string().url().optional(),
+  prUrl: z.string().url().optional(),
+  updatedAt: z.string().datetime(),
+});
+export type SessionSummary = z.infer<typeof SessionSummarySchema>;
 
 /* -------------------------------------------------------------------------- */
 /* Internal event bus envelope (orchestrator <- providers)                     */

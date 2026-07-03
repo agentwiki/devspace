@@ -1,17 +1,22 @@
 /**
  * Deployable entrypoint for the orchestrator control plane (M3 wiring, M4
- * boot extraction). The assembly itself lives in @devspace/orchestrator's
- * `bootOrchestrator` (shared with the chat-gateway demo service); this
- * entrypoint owns the Pool, the HTTP surface (`/health` + the `ChatEvent`
- * ingest endpoint), and the reconciler schedule. Standalone, render commands
- * surface to logs — the Slack transport lives in chat-gateway-svc.
+ * boot extraction, M6 split). The assembly itself lives in
+ * @devspace/orchestrator's `bootOrchestrator`; this entrypoint owns the Pool,
+ * the HTTP surface, and the reconciler schedule.
+ *
+ * M6 (m6-plan A): the internal API for the two-service split — authed
+ * `POST /chat-events` (synchronous, replaces the M3 fire-and-forget `/events`),
+ * the binding cold-miss resolver reads, and `GET /sessions`. Render commands go
+ * to the gateway's `POST /render` when GATEWAY_RENDER_URL is set (retry, then
+ * log-and-drop — never fail a turn on a dead gateway); to logs otherwise.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { Pool } from 'pg';
-import { ChatEventSchema } from '@devspace/contracts';
 import type { EventBus, Repositories } from '@devspace/db';
 import {
   bootOrchestrator,
+  handleInternalApi,
+  httpRenderTransport,
   processWebhookDelivery,
   type Orchestrator,
 } from '@devspace/orchestrator';
@@ -27,6 +32,10 @@ interface Config {
   reconcileIntervalMs: number;
   /** Webhook ingress is disabled (with a boot log) when unset. */
   webhookSecret?: string;
+  /** Shared bearer token; the internal split API is disabled when unset. */
+  internalToken?: string;
+  /** Gateway render endpoint (split mode); render logs when unset. */
+  gatewayRenderUrl?: string;
 }
 
 function loadConfig(): Config {
@@ -35,6 +44,13 @@ function loadConfig(): Config {
   const envelopeKey = process.env.SECRET_ENVELOPE_KEY;
   if (!envelopeKey) throw new Error('SECRET_ENVELOPE_KEY is required');
   const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET || undefined;
+  const internalToken = process.env.DEVSPACE_INTERNAL_TOKEN || undefined;
+  const gatewayRenderUrl = process.env.GATEWAY_RENDER_URL || undefined;
+  // An unauthenticated control plane is worse than no split (m6-plan
+  // Decision 3): render-to-gateway without the shared token is refused.
+  if (gatewayRenderUrl && !internalToken) {
+    throw new Error('GATEWAY_RENDER_URL requires DEVSPACE_INTERNAL_TOKEN');
+  }
   return {
     port: Number(process.env.ORCHESTRATOR_PORT ?? process.env.PORT ?? 4000),
     databaseUrl,
@@ -50,6 +66,8 @@ function loadConfig(): Config {
       process.env.RECONCILE_INTERVAL_MS ?? (webhookSecret ? 300_000 : 30_000),
     ),
     webhookSecret,
+    internalToken,
+    gatewayRenderUrl,
   };
 }
 
@@ -68,42 +86,30 @@ export async function start(config: Config = loadConfig()): Promise<BootedServic
     envelopeKey: config.envelopeKey,
     retiredKeys: config.retiredKeys,
     githubApiBase: config.githubApiBase,
-    // A real render transport (Slack) lives in chat-gateway-svc; surface to logs.
-    render: async (command) => {
-      console.log(`[render] ${JSON.stringify(command)}`);
-    },
+    // Split mode posts each command to the gateway (m6-plan Decision 2);
+    // standalone surfaces to logs, unchanged.
+    render:
+      config.gatewayRenderUrl && config.internalToken
+        ? httpRenderTransport(config.gatewayRenderUrl, config.internalToken)
+        : async (command) => {
+            console.log(`[render] ${JSON.stringify(command)}`);
+          },
   });
 
-  // Poll reconciler — the webhook stand-in that advances PR_OPEN units.
+  // Poll reconciler — since M5 the drift backstop behind webhook ingress.
   const stopReconciler = booted.startReconciler(config.reconcileIntervalMs);
 
   const server = createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/health') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', service: SERVICE }));
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/events') {
-      ingest(req, res, booted.orch);
-      return;
-    }
-    if (req.method === 'POST' && req.url === '/webhooks/github') {
-      if (!config.webhookSecret) {
-        res.writeHead(404, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ code: 'NOT_FOUND', message: 'webhooks not configured' }));
-        return;
-      }
-      githubWebhook(req, res, config.webhookSecret, booted.orch, booted.repos, booted.bus);
-      return;
-    }
-    res.writeHead(404, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ code: 'NOT_FOUND', message: 'not found' }));
+    void route(req, res, config, booted.orch, booted.repos, booted.bus);
   });
 
   await new Promise<void>((resolve) => server.listen(config.port, resolve));
   console.log(`[${SERVICE}] listening on :${config.port}`);
   if (!config.webhookSecret) {
     console.log(`[${SERVICE}] GITHUB_WEBHOOK_SECRET unset — webhook ingress disabled, poll only`);
+  }
+  if (!config.internalToken) {
+    console.log(`[${SERVICE}] DEVSPACE_INTERNAL_TOKEN unset — internal split API disabled`);
   }
 
   return {
@@ -119,30 +125,46 @@ export async function start(config: Config = loadConfig()): Promise<BootedServic
   };
 }
 
-function ingest(req: IncomingMessage, res: ServerResponse, orch: Orchestrator): void {
-  const chunks: Buffer[] = [];
-  req.on('data', (c: Buffer) => chunks.push(c));
-  req.on('end', () => {
-    let json: unknown;
-    try {
-      json = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    } catch {
-      return badRequest(res, 'invalid JSON');
-    }
-    const parsed = ChatEventSchema.safeParse(json);
-    if (!parsed.success) return badRequest(res, parsed.error.message);
-    // Ack immediately; process asynchronously (handlers are idempotent).
-    res.writeHead(202, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ status: 'accepted' }));
-    void orch.handleChatEvent(parsed.data).catch((err) => {
-      console.error(`[ingest] handler error: ${String(err)}`);
-    });
-  });
-}
+async function route(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: Config,
+  orch: Orchestrator,
+  repos: Repositories,
+  bus: EventBus,
+): Promise<void> {
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', service: SERVICE }));
+    return;
+  }
 
-function badRequest(res: ServerResponse, message: string): void {
-  res.writeHead(400, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ code: 'BAD_REQUEST', message }));
+  if (req.method === 'POST' && req.url === '/webhooks/github') {
+    if (!config.webhookSecret) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ code: 'NOT_FOUND', message: 'webhooks not configured' }));
+      return;
+    }
+    githubWebhook(req, res, config.webhookSecret, orch, repos, bus);
+    return;
+  }
+
+  // The split's internal API (M6-A) — live only when the token is configured.
+  if (config.internalToken) {
+    const handled = await handleInternalApi(req, res, {
+      token: config.internalToken,
+      handleChatEvent: (event) => orch.handleChatEvent(event),
+      resolveConversationId: (platform, externalChannelId) =>
+        orch.resolveConversationId(platform, externalChannelId),
+      conversationRef: async (conversationId) =>
+        (await repos.conversations.get(conversationId))?.externalChannelId ?? null,
+      listSessions: (platform, userId) => orch.listSessions(platform, userId),
+    });
+    if (handled) return;
+  }
+
+  res.writeHead(404, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ code: 'NOT_FOUND', message: 'not found' }));
 }
 
 /**

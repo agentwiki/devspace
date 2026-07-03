@@ -78,7 +78,7 @@ Out (deferred to M7, with rationale):
    must not fail a turn.
 3. **One shared bearer token guards every internal call, both directions.**
    `DEVSPACE_INTERNAL_TOKEN`, compared timing-safely on both servers. This is
-   an *internal* API between two trusted services on one deployment — mTLS,
+   an _internal_ API between two trusted services on one deployment — mTLS,
    per-service identity and rotation are deployment concerns layered on top
    (documented), not M6 code. Endpoints 401 without it; both svcs refuse to
    boot in split mode without it (an unauthenticated control plane is worse
@@ -118,7 +118,7 @@ Out (deferred to M7, with rationale):
    authed path as every other event (in split mode: once over the internal
    authed HTTP, then envelope-encrypted at rest — the same trust boundary the
    Slack→gateway hop already crosses). The orchestrator stores it, registers
-   the plaintext in the conversation's redaction registry *immediately*
+   the plaintext in the conversation's redaction registry _immediately_
    (an echoed secret is redacted from turn one), audits `secret.stored` with
    the name only, and confirms in-thread without the value. Slack renders the
    entry point as a `set-secrets` button (posted with the conversation's
@@ -129,7 +129,7 @@ Out (deferred to M7, with rationale):
    ref), and submission roots the thread + emits `conversation.created` with
    the parsed choice. Dismissal creates nothing (no orphan conversations).
 10. **The App Home list is one new read.** `ConversationRepo.listByUser
-    (platform, userId)` (in-memory + Pg) + an orchestrator `listSessions`
+(platform, userId)` (in-memory + Pg) + an orchestrator `listSessions`
     join against each conversation's work unit → `SessionSummary[]`; exposed
     in split mode as `GET /sessions`. The M4 `listSessions` adapter option is
     finally wired to real data.
@@ -174,7 +174,7 @@ all); F closes docs. Lettered commits, one per workstream, like M4/M5.
   loopback; shared by both svc entrypoints.
 - orchestrator-svc: `POST /chat-events` (authed, zod-parsed, synchronous,
   returns `{ conversationId? }`; replaces `/events`), `GET
-  /conversations/resolve?platform&externalChannelId`, `GET /conversations/:id`
+/conversations/resolve?platform&externalChannelId`, `GET /conversations/:id`
   (→ `{ externalChannelId }`), `GET /sessions?platform&userId` (D's read).
   Render transport: when `GATEWAY_RENDER_URL` is set, render POSTs each
   command there (Decision 2); logs otherwise (unchanged default).
@@ -220,8 +220,8 @@ all); F closes docs. Lettered commits, one per workstream, like M4/M5.
 ### C. Discord adapter
 
 - `DiscordTransport` seam: `start(handlers)`, `stop()`, `postMessage(channelId,
-  body)`, `createThread(channelId, messageId, name)`, `postInThread(threadId,
-  body)`, `editMessage(channelId, messageId, body)` — handlers for
+body)`, `createThread(channelId, messageId, name)`, `postInThread(threadId,
+body)`, `editMessage(channelId, messageId, body)` — handlers for
   slash-command, thread message, button press, mention.
 - `DiscordAdapter` (mirrors SlackAdapter): `/devspace repo [ref]` → root
   message + thread + `conversation.created` (externalChannelId =

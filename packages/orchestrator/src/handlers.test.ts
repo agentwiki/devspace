@@ -538,3 +538,40 @@ describe('GitHub webhooks (M5)', () => {
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_MERGED');
   });
 });
+
+describe('listSessions (M6)', () => {
+  it("joins a user's conversations with their work-unit state", async () => {
+    const h = harness();
+    await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C1:1',
+      userId: 'u1',
+      repoChoice: { repoUrl: 'https://github.com/a/b', empty: false },
+    });
+    await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C1:2',
+      userId: 'u1',
+    });
+    await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C1:3',
+      userId: 'u2',
+    });
+
+    const sessions = await h.orch.listSessions('slack', 'u1');
+    expect(sessions).toHaveLength(2);
+    const byChannel = new Map(sessions.map((s) => [s.externalChannelId, s]));
+    expect(byChannel.get('C1:1')).toMatchObject({
+      state: 'READY',
+      repoUrl: 'https://github.com/a/b',
+      platform: 'slack',
+      conversationId: expect.stringContaining('conv'),
+    });
+    expect(byChannel.get('C1:2')).toMatchObject({ state: 'CREATED' });
+    await expect(h.orch.listSessions('slack', 'u3')).resolves.toEqual([]);
+  });
+});

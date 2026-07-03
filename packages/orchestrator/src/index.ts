@@ -17,7 +17,9 @@
 import type {
   AgentEvent,
   ChatEvent,
+  ChatPlatform,
   RenderCommand,
+  SessionSummary,
   WorkEvent,
   WorkState,
   WorkUnit,
@@ -43,6 +45,7 @@ export * from './secrets.js';
 export * from './git.js';
 export * from './render.js';
 export * from './webhooks.js';
+export * from './internal-http.js';
 // boot.js imports Orchestrator from this module; the cycle is benign (the
 // class is only referenced inside bootOrchestrator's body, after module init).
 export * from './boot.js';
@@ -199,6 +202,29 @@ export class Orchestrator {
       externalChannelId,
     );
     return conv?.id ?? null;
+  }
+
+  /**
+   * A user's sessions on one platform, each joined with its work unit's state —
+   * the App Home / `GET /sessions` read (M6, the M4 App-Home deferral).
+   */
+  async listSessions(platform: ChatPlatform, userId: string): Promise<SessionSummary[]> {
+    const convs = await this.deps.repos.conversations.listByUser(platform, userId);
+    const sessions: SessionSummary[] = [];
+    for (const conv of convs) {
+      const wu = await this.deps.repos.workUnits.getByConversation(conv.id);
+      if (!wu) continue;
+      sessions.push({
+        conversationId: conv.id,
+        platform,
+        externalChannelId: conv.externalChannelId,
+        state: wu.state,
+        repoUrl: wu.repoUrl,
+        prUrl: wu.prUrl,
+        updatedAt: wu.updatedAt,
+      });
+    }
+    return sessions;
   }
 
   /* ---------------------------------------------------------------------- */

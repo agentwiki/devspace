@@ -3,8 +3,8 @@
  * over REAL loopback sockets — a genuine upstream HTTP server behind the
  * proxy — with zero external egress (CI-safe).
  */
-import { createServer, type IncomingMessage, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from 'node:http';
+import type { AddressInfo, Socket } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PreviewProxy, parsePreviewPath, previewProxyFromEnv } from './preview-proxy.js';
 
@@ -141,5 +141,158 @@ describe('PreviewProxy over loopback', () => {
     const preconfigured = new PreviewProxy({ publicBaseUrl: 'https://p.example.com/' });
     const route = preconfigured.register('env_x', { host: 'h', port: 1 });
     expect(route.proxyUrl).toBe(`https://p.example.com/t/${route.token}/`);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* WebSocket upgrade (M7-A)                                                    */
+/* -------------------------------------------------------------------------- */
+
+type UpgradeOutcome =
+  | { kind: 'upgraded'; res: IncomingMessage; socket: Socket; head: Buffer }
+  | { kind: 'response'; res: IncomingMessage; body: string };
+
+/** Send an Upgrade request through the proxy with a raw node http client. */
+function upgradeThrough(baseUrl: string, path: string): Promise<UpgradeOutcome> {
+  const url = new URL(baseUrl);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      host: url.hostname,
+      port: url.port,
+      path,
+      headers: { connection: 'Upgrade', upgrade: 'websocket', 'x-ws-key': 'k1' },
+    });
+    req.on('upgrade', (res, socket, head) => resolve({ kind: 'upgraded', res, socket, head }));
+    req.on('response', (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () =>
+        resolve({ kind: 'response', res, body: Buffer.concat(chunks).toString('utf8') }),
+      );
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+const nextData = (socket: Socket): Promise<string> =>
+  new Promise((resolve) => socket.once('data', (d: Buffer) => resolve(d.toString('utf8'))));
+
+const closed = (socket: Socket): Promise<void> =>
+  new Promise((resolve) => socket.once('close', () => resolve()));
+
+describe('PreviewProxy WebSocket upgrade', () => {
+  let upstream: Server;
+  let upstreamPort: number;
+  let upgradeDials = 0;
+  let lastUpgradeReq: { url?: string; host?: string };
+  let proxy: PreviewProxy;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    upstream = createServer((_req, res) => {
+      res.writeHead(200);
+      res.end('plain');
+    });
+    upstream.on('upgrade', (req, socket) => {
+      upgradeDials += 1;
+      lastUpgradeReq = { url: req.url, host: req.headers.host };
+      if (req.url === '/reject') {
+        // A server that refuses the handshake with an ordinary response.
+        socket.end(
+          'HTTP/1.1 403 Forbidden\r\nx-reason: nope\r\ncontent-length: 4\r\nconnection: close\r\n\r\nnope',
+        );
+        return;
+      }
+      // Complete the handshake, then echo every byte back.
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nx-accept: ok\r\n\r\n',
+      );
+      socket.on('data', (d: Buffer) => socket.write(d));
+      // http-server sockets allow half-open: fully close when the peer does,
+      // or upstream.close() in afterAll would wait on it forever.
+      socket.on('end', () => socket.destroy());
+      socket.on('error', () => undefined);
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    upstreamPort = (upstream.address() as AddressInfo).port;
+
+    proxy = new PreviewProxy();
+    ({ baseUrl } = await proxy.start());
+  });
+
+  afterAll(async () => {
+    await proxy.stop();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  });
+
+  it('completes the handshake and splices bytes both ways', async () => {
+    const route = proxy.register('env_ws', { host: '127.0.0.1', port: upstreamPort });
+    const outcome = await upgradeThrough(baseUrl, `/t/${route.token}/live?x=1`);
+    expect(outcome.kind).toBe('upgraded');
+    if (outcome.kind !== 'upgraded') return;
+
+    // The 101 head comes through with the upstream's own headers; the
+    // handshake request reached the upstream prefix-stripped and Host-rewritten.
+    expect(outcome.res.statusCode).toBe(101);
+    expect(outcome.res.headers['x-accept']).toBe('ok');
+    expect(lastUpgradeReq).toEqual({
+      url: '/live?x=1',
+      host: `127.0.0.1:${upstreamPort}`,
+    });
+
+    outcome.socket.write('ping-1');
+    expect(await nextData(outcome.socket)).toBe('ping-1');
+    outcome.socket.write('ping-2');
+    expect(await nextData(outcome.socket)).toBe('ping-2');
+    outcome.socket.destroy();
+  });
+
+  it('404s an unknown token before any upstream dial', async () => {
+    const before = upgradeDials;
+    const outcome = await upgradeThrough(baseUrl, '/t/never-registered/live');
+    expect(outcome.kind).toBe('response');
+    if (outcome.kind !== 'response') return;
+    expect(outcome.res.statusCode).toBe(404);
+    expect(upgradeDials).toBe(before);
+  });
+
+  it('forwards an upstream handshake rejection verbatim', async () => {
+    const route = proxy.register('env_rej', { host: '127.0.0.1', port: upstreamPort });
+    const outcome = await upgradeThrough(baseUrl, `/t/${route.token}/reject`);
+    expect(outcome.kind).toBe('response');
+    if (outcome.kind !== 'response') return;
+    expect(outcome.res.statusCode).toBe(403);
+    expect(outcome.res.headers['x-reason']).toBe('nope');
+    expect(outcome.body).toBe('nope');
+  });
+
+  it('502s (still a parseable response) when the target is unreachable', async () => {
+    const route = proxy.register('env_dead_ws', { host: '127.0.0.1', port: 1 });
+    const outcome = await upgradeThrough(baseUrl, `/t/${route.token}/live`);
+    expect(outcome.kind).toBe('response');
+    if (outcome.kind !== 'response') return;
+    expect(outcome.res.statusCode).toBe(502);
+  });
+
+  it('revokeEnv severs an ESTABLISHED upgraded connection', async () => {
+    const route = proxy.register('env_live', { host: '127.0.0.1', port: upstreamPort });
+    const outcome = await upgradeThrough(baseUrl, `/t/${route.token}/live`);
+    expect(outcome.kind).toBe('upgraded');
+    if (outcome.kind !== 'upgraded') return;
+
+    // Prove the splice is live, then revoke: the client socket must close.
+    outcome.socket.write('alive?');
+    expect(await nextData(outcome.socket)).toBe('alive?');
+    const gone = closed(outcome.socket);
+    proxy.revokeEnv('env_live');
+    await gone;
+  });
+
+  it('plain HTTP requests on the same route still stream through', async () => {
+    const route = proxy.register('env_mixed', { host: '127.0.0.1', port: upstreamPort });
+    const res = await fetch(`${baseUrl}/t/${route.token}/anything`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('plain');
   });
 });

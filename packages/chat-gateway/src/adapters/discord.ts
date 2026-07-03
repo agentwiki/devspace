@@ -27,15 +27,28 @@ import type {
   StreamHandle,
 } from '../index.js';
 import { parsePortCommand } from '../index.js';
-import { ConversationBinding, encodeRef, type ThreadRef } from '../binding.js';
+import { ConversationBinding, decodeRef, encodeRef, type ThreadRef } from '../binding.js';
 import { StatusRegistry, StreamCoalescer, type Clock } from '../status.js';
 import {
   actionsBodies,
   messageBodies,
+  sessionListBody,
   statusBody,
   streamBody,
   type DiscordMessageBody,
 } from '../discord/messages.js';
+import type { HomeSession } from '../slack/blocks.js';
+import {
+  REPO_PICKER_MODAL_PREFIX,
+  SECRETS_MODAL_PREFIX,
+  decodeModalId,
+  parseRepoPickerSubmission,
+  parseSecretsSubmission,
+  repoPickerModal,
+  secretsModal,
+  type DiscordModal,
+  type ModalFields,
+} from '../discord/modals.js';
 import { parseRepoChoice } from './slack.js';
 
 /* -------------------------------------------------------------------------- */
@@ -43,10 +56,14 @@ import { parseRepoChoice } from './slack.js';
 /* -------------------------------------------------------------------------- */
 
 export interface DiscordSlashEvent {
+  /** Which slash command fired: `/devspace` or `/sessions` (M7-C). */
+  command: 'devspace' | 'sessions';
   channelId: string;
   userId: string;
   /** The command's raw argument text ("<repoUrl> [ref]", possibly empty). */
   text: string;
+  /** Opaque handle for `openModal`/`replyEphemeral` (the trigger_id equivalent). */
+  interactionId: string;
 }
 
 export interface DiscordMessageEvent {
@@ -65,12 +82,23 @@ export interface DiscordButtonEvent {
   parentChannelId?: string;
   userId: string;
   customId: string;
+  /** Opaque handle for `openModal` (Discord's trigger_id equivalent, M7-B). */
+  interactionId: string;
+}
+
+/** A modal submission (M7-B): the modal's custom_id carries the context —
+ * `devspace-secrets:<ref>` / `devspace-repo-picker:<channel>` (Decision 5). */
+export interface DiscordModalSubmitEvent {
+  customId: string;
+  userId: string;
+  fields: ModalFields;
 }
 
 export interface DiscordInboundHandlers {
   slashCommand(event: DiscordSlashEvent): Promise<void>;
   message(event: DiscordMessageEvent): Promise<void>;
   button(event: DiscordButtonEvent): Promise<void>;
+  modalSubmit(event: DiscordModalSubmitEvent): Promise<void>;
 }
 
 /**
@@ -88,6 +116,10 @@ export interface DiscordTransport {
     name: string,
   ): Promise<{ threadId: string }>;
   editMessage(channelId: string, messageId: string, body: DiscordMessageBody): Promise<void>;
+  /** Show a modal AS the response to a still-unacked interaction (M7-B). */
+  openModal(interactionId: string, modal: DiscordModal): Promise<void>;
+  /** Reply ephemerally to a still-unacked interaction (`/sessions`, M7-C). */
+  replyEphemeral(interactionId: string, body: DiscordMessageBody): Promise<void>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -97,6 +129,8 @@ export interface DiscordTransport {
 export interface DiscordAdapterOptions {
   /** Wired with orchestrator-backed cold-miss resolvers by the service. */
   binding?: ConversationBinding;
+  /** `/sessions` list source (the App Home read); default = empty-state hint. */
+  listSessions?: (discordUserId: string) => Promise<HomeSession[]>;
   /** Stream flush interval (default 1000ms — Discord edits are rate-limited too). */
   minStreamIntervalMs?: number;
   clock?: Clock;
@@ -109,6 +143,15 @@ export interface DiscordAdapterOptions {
 /** Strip <@…> user/role mentions (Discord's wire form matches Slack's shape). */
 function stripMentions(text: string): string {
   return text.replace(/<@[!&]?[^>]+>/g, ' ').trim();
+}
+
+/** decodeRef that maps a malformed modal context to null instead of throwing. */
+function decodeRefSafe(externalChannelId: string): ThreadRef | null {
+  try {
+    return decodeRef(externalChannelId);
+  } catch {
+    return null;
+  }
 }
 
 interface StreamState {
@@ -125,6 +168,7 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
   private readonly streams = new Map<string, StreamState>();
   private readonly warn: (message: string) => void;
   private readonly threadName: string;
+  private readonly listSessions?: (discordUserId: string) => Promise<HomeSession[]>;
   private streamCounter = 0;
   private emit?: EmitChatEvent;
 
@@ -135,6 +179,7 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
     this.binding = opts.binding ?? new ConversationBinding();
     this.warn = opts.warn ?? ((message) => console.warn(`[discord] ${message}`));
     this.threadName = opts.threadName ?? 'devspace session';
+    this.listSessions = opts.listSessions;
     this.coalescer = new StreamCoalescer((streamId, text) => this.flushStream(streamId, text), {
       minIntervalMs: opts.minStreamIntervalMs,
       clock: opts.clock,
@@ -149,7 +194,19 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
   async start(emit: EmitChatEvent): Promise<void> {
     this.emit = emit;
     await this.transport.start({
-      slashCommand: async ({ channelId, userId, text }) => {
+      slashCommand: async ({ command, channelId, userId, text, interactionId }) => {
+        // `/sessions` (M7-C): the ephemeral session list, same read as App Home.
+        if (command === 'sessions') {
+          const sessions = (await this.listSessions?.(userId)) ?? [];
+          await this.transport.replyEphemeral(interactionId, sessionListBody(sessions));
+          return;
+        }
+        // Bare `/devspace` opens the repo picker instead of an empty session
+        // (m6-plan Decision 9, Discord edition) — dismissal creates nothing.
+        if (!text.trim()) {
+          await this.transport.openModal(interactionId, repoPickerModal(channelId));
+          return;
+        }
         await this.rootConversation(channelId, userId, parseRepoChoice(text));
       },
 
@@ -203,17 +260,14 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
       button: async (event) => {
         if (event.parentChannelId === undefined) return; // session buttons live in threads
         const ref: ThreadRef = { channel: event.parentChannelId, threadTs: event.channelId };
-        const conversationId = await this.binding.conversationFor(ref);
-        if (!conversationId) return;
-        // Modal-based secret entry is Slack-only in M6 (m6-plan: Discord
-        // modal parity deferred) — answer with a hint instead of a dead click.
+        // set-secrets is pure platform UI (m6-plan Decision 8): the modal IS
+        // the interaction response — no orchestrator round-trip here (M7-B).
         if (event.customId === 'set-secrets') {
-          await this.transport.postMessage(event.channelId, {
-            content:
-              'In-chat secret entry is Slack-only for now — seed secrets out-of-band or use the Slack surface.',
-          });
+          await this.transport.openModal(event.interactionId, secretsModal(encodeRef(ref)));
           return;
         }
+        const conversationId = await this.binding.conversationFor(ref);
+        if (!conversationId) return;
         await this.emitSafe({
           type: 'action.invoked',
           conversationId,
@@ -222,7 +276,39 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
           payload: {},
         });
       },
+
+      modalSubmit: async (event) => {
+        const decoded = decodeModalId(event.customId);
+        if (!decoded) return;
+        if (decoded.prefix === SECRETS_MODAL_PREFIX) {
+          await this.onSecretsSubmitted(decoded.context, event.userId, event.fields);
+          return;
+        }
+        if (decoded.prefix === REPO_PICKER_MODAL_PREFIX) {
+          await this.rootConversation(
+            decoded.context,
+            event.userId,
+            parseRepoChoice(parseRepoPickerSubmission(event.fields)),
+          );
+        }
+      },
     });
+  }
+
+  /** One `secret.submitted` per filled field — same semantics as the Slack
+   * modal (the event path, whitelist and redaction hooks are shared). */
+  private async onSecretsSubmitted(
+    encodedRef: string,
+    userId: string,
+    fields: ModalFields,
+  ): Promise<void> {
+    const ref = decodeRefSafe(encodedRef);
+    if (!ref) return;
+    const conversationId = await this.binding.conversationFor(ref);
+    if (!conversationId) return;
+    for (const { name, value } of parseSecretsSubmission(fields)) {
+      await this.emitSafe({ type: 'secret.submitted', conversationId, userId, name, value });
+    }
   }
 
   async stop(): Promise<void> {

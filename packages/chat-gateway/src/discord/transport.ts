@@ -14,16 +14,21 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   REST,
   Routes,
   type Interaction,
   type Message,
   type MessageCreateOptions,
   type MessageEditOptions,
+  type ButtonInteraction,
+  type ChatInputCommandInteraction,
+  type ModalComponentData,
   type TextChannel,
   type ThreadChannel,
 } from 'discord.js';
 import type { DiscordMessageBody } from './messages.js';
+import { MODAL_BUTTON_IDS, type DiscordModal } from './modals.js';
 import type { DiscordInboundHandlers, DiscordTransport } from '../adapters/discord.js';
 
 export interface DiscordConfig {
@@ -47,6 +52,13 @@ const DEVSPACE_COMMAND = {
   ],
 };
 
+/** `/sessions` — the Discord session-list surface (M7-C, no Home tab). */
+const SESSIONS_COMMAND = {
+  name: 'sessions',
+  description: 'List your devspace sessions',
+  options: [],
+};
+
 /** A channel we can post/edit in (guild text or thread). */
 type Postable = TextChannel | ThreadChannel;
 
@@ -58,6 +70,15 @@ export function discordJsTransport(config: DiscordConfig): DiscordTransport {
       GatewayIntentBits.MessageContent,
     ],
   });
+
+  // Interactions kept addressable for `openModal` (Discord's trigger_id
+  // equivalent, m7-plan Decision 3). Entries die with the interaction token.
+  type ModalCapable = ChatInputCommandInteraction | ButtonInteraction;
+  const pending = new Map<string, ModalCapable>();
+  const track = (interaction: ModalCapable): void => {
+    pending.set(interaction.id, interaction);
+    setTimeout(() => pending.delete(interaction.id), 3 * 60_000).unref();
+  };
 
   async function postable(channelId: string): Promise<Postable> {
     const channel = await client.channels.fetch(channelId);
@@ -79,18 +100,45 @@ export function discordJsTransport(config: DiscordConfig): DiscordTransport {
           if (interaction.isChatInputCommand() && interaction.commandName === 'devspace') {
             const repo = interaction.options.getString('repo') ?? '';
             const ref = interaction.options.getString('ref') ?? '';
-            // Acknowledge fast (3s budget); the session root is its own message.
-            await interaction.reply({ content: 'Starting a devspace session…', ephemeral: true });
+            const bare = !repo && !ref;
+            // Acknowledge fast (3s budget); the session root is its own
+            // message. Bare command: the adapter's repo-picker modal IS the
+            // response, so nothing may ack first (m7-plan Decision 4).
+            if (bare) track(interaction);
+            else {
+              await interaction.reply({
+                content: 'Starting a devspace session…',
+                flags: MessageFlags.Ephemeral,
+              });
+            }
             if (!interaction.channelId) return;
             await handlers.slashCommand({
+              command: 'devspace',
               channelId: interaction.channelId,
               userId: interaction.user.id,
               text: [repo, ref].filter(Boolean).join(' '),
+              interactionId: interaction.id,
+            });
+            return;
+          }
+          if (interaction.isChatInputCommand() && interaction.commandName === 'sessions') {
+            // The adapter's ephemeral list IS the response — stay un-acked.
+            track(interaction);
+            if (!interaction.channelId) return;
+            await handlers.slashCommand({
+              command: 'sessions',
+              channelId: interaction.channelId,
+              userId: interaction.user.id,
+              text: '',
+              interactionId: interaction.id,
             });
             return;
           }
           if (interaction.isButton()) {
-            await interaction.deferUpdate();
+            // Modal openers must stay un-acked — showModal IS the ack; every
+            // other button defers immediately (create-pr can exceed 3s).
+            if (MODAL_BUTTON_IDS.has(interaction.customId)) track(interaction);
+            else await interaction.deferUpdate();
             const channel = interaction.channel;
             const parentChannelId =
               channel && channel.isThread() ? (channel.parentId ?? undefined) : undefined;
@@ -99,6 +147,23 @@ export function discordJsTransport(config: DiscordConfig): DiscordTransport {
               parentChannelId,
               userId: interaction.user.id,
               customId: interaction.customId,
+              interactionId: interaction.id,
+            });
+            return;
+          }
+          if (interaction.isModalSubmit()) {
+            // Modal submissions need their own ack within the same 3s budget.
+            await interaction.reply({ content: 'Received.', flags: MessageFlags.Ephemeral });
+            const fields: Record<string, string> = {};
+            for (const [id, component] of interaction.fields.fields) {
+              if ('value' in component && typeof component.value === 'string') {
+                fields[id] = component.value;
+              }
+            }
+            await handlers.modalSubmit({
+              customId: interaction.customId,
+              userId: interaction.user.id,
+              fields,
             });
           }
         })().catch((err) => console.warn(`[discord] interaction failed: ${String(err)}`));
@@ -119,10 +184,10 @@ export function discordJsTransport(config: DiscordConfig): DiscordTransport {
         })().catch((err) => console.warn(`[discord] message handling failed: ${String(err)}`));
       });
 
-      // Register /devspace (idempotent full PUT), then connect the gateway.
+      // Register the commands (idempotent full PUT), then connect the gateway.
       const rest = new REST().setToken(config.token);
       await rest.put(Routes.applicationCommands(config.applicationId), {
-        body: [DEVSPACE_COMMAND],
+        body: [DEVSPACE_COMMAND, SESSIONS_COMMAND],
       });
       await client.login(config.token);
     },
@@ -151,6 +216,21 @@ export function discordJsTransport(config: DiscordConfig): DiscordTransport {
       const channel = await postable(channelId);
       const message = await channel.messages.fetch(messageId);
       await message.edit(toOptions(body) as MessageEditOptions);
+    },
+
+    async openModal(interactionId, modal: DiscordModal) {
+      const interaction = pending.get(interactionId);
+      if (!interaction) throw new Error(`interaction ${interactionId} expired or unknown`);
+      pending.delete(interactionId);
+      // The builders emit the raw API (snake_case) modal shape directly.
+      await interaction.showModal(modal as unknown as ModalComponentData);
+    },
+
+    async replyEphemeral(interactionId, body) {
+      const interaction = pending.get(interactionId);
+      if (!interaction) throw new Error(`interaction ${interactionId} expired or unknown`);
+      pending.delete(interactionId);
+      await interaction.reply({ ...(toOptions(body) as object), flags: MessageFlags.Ephemeral });
     },
   };
 }

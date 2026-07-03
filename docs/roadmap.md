@@ -3,6 +3,7 @@
 Critical path to the end-to-end demo: **M0 → M1 → M2 → M3 → M4.**
 Release-blocking hardening for real multi-tenant use: **M5.**
 Expansion I (split, preview proxy, chat completion, 2nd agent): **M6.**
+Expansion II (preview WS upgrade, Discord UI parity): **M7.**
 
 ## M0 — Scaffolding (done)
 
@@ -232,14 +233,51 @@ Landed:
   proven by running the claude kind over the same loopback ACP agent). The
   agent-runtime volume ships both adapters.
 
-## M7+ — Expansion II
+## M7 — Expansion II (done)
+
+The two M6 deferrals that were ready to land: the preview-proxy WebSocket
+upgrade and Discord UI parity. Design of record: docs/m7-plan.md — including
+why the rest of the old M7+ list (multi-host, NATS, mTLS) moved to M8+, per
+this roadmap's own caveats.
+
+Landed:
+
+- **Preview-proxy WebSocket upgrade** (M6 deferral) — `Upgrade:` requests
+  through `/t/<token>/…` replay the handshake against the container and
+  splice the sockets byte-for-byte on the upstream's 101 (no frame parsing,
+  no subprotocol negotiation — the proxy stays the dumb boundary it was;
+  live dev servers with HMR now work through preview URLs). Unknown tokens
+  still 404 before any upstream dial; rejected handshakes are forwarded
+  verbatim. Upgraded sockets are tracked per env: `revokeEnv` severs LIVE
+  connections too — a preview URL cannot outlive its env even mid-session.
+  Loopback suite (real upstream, raw-socket client) covers round trip,
+  rejection, revoke-severs-live-socket, and plain-HTTP-unchanged.
+- **Discord modal parity** (the M4→M6 deferral closes) — `set-secrets` opens
+  a real Discord modal (same three optional fields; one `secret.submitted`
+  per filled field; contract whitelist and register-before-store redaction
+  shared, so semantics are byte-for-byte Slack's) and bare `/devspace` opens
+  the repo-picker modal (dismissal creates nothing). Discord has no
+  trigger_id/private_metadata: events carry an opaque `interactionId`, the
+  transport gains `openModal`, and the modal `custom_id` carries the thread
+  ref (100-char bound asserted in the builder). The glue acks by exclusion
+  (`MODAL_BUTTON_IDS` stay un-acked for `showModal`; everything else defers
+  first, as in M6). Pure builders/parsers + fake-transport flows tested.
+- **Discord session list** — `/sessions` answers with one ephemeral message
+  built from the SAME `listSessions` read that feeds Slack's App Home (no
+  Home tab on Discord; on-demand ephemeral is the platform-native
+  equivalent). 2000-char cap enforced with an explicit "…and N more"
+  remainder — never silent truncation. Gateway UI only: no new contract.
+
+## M8+ — Expansion III
 
 Multi-host scheduling (placement/capacity/drain — meaningless before a
-second sandbox host); NATS bus (pays for itself only alongside multi-host;
-`EventBus` is the seam); preview-proxy WebSocket upgrade; Discord modal /
-session-list parity; per-service identity on the internal API (mTLS —
-deployment-layer, replacing the shared token). UI surface remains chat only
-— no self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
+second sandbox host; must anchor the milestone that exposes the in-process
+exec stream over the network, top-risk #1); NATS bus (pays for itself only
+alongside multi-host; `EventBus` is the seam); per-service identity on the
+internal API (mTLS — deployment-layer, replacing the shared token); Discord
+Forum-channel session dashboard (presentation upgrade over `/sessions`).
+UI surface remains chat only — no self-hosted web UI (see
+docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 

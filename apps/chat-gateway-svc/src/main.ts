@@ -109,7 +109,8 @@ function buildAdapter(
         token: config.discordToken!,
         applicationId: config.discordApplicationId!,
       }),
-      { binding },
+      // Same session-list source as Slack's App Home — `/sessions` (M7-C).
+      { binding, listSessions },
     );
   }
   return new SlackAdapter(

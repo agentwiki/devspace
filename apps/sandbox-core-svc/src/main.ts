@@ -21,12 +21,14 @@ import {
   DEFAULT_EGRESS_ALLOWLIST,
   DevcontainerSandboxCore,
   EgressProxy,
+  PreviewProxy,
   SandboxError,
   assertRuntimeAvailable,
   captureExec,
   fromBase64,
   hardeningFromEnv,
   nodeCommandRunner,
+  previewProxyFromEnv,
   toBase64,
 } from '@devspace/sandbox-core';
 import { z } from 'zod';
@@ -61,7 +63,17 @@ if (hardening?.egressProxyPort) {
   console.log(`[${SERVICE}] egress proxy on :${hardening.egressProxyPort}`);
 }
 
-const core = new DevcontainerSandboxCore({ hardening });
+// The ports preview proxy (M6) — authenticated ingress to env ports; the
+// ingress counterpart of the egress proxy above. Off without PREVIEW_PROXY_PORT.
+const previewOptions = previewProxyFromEnv(process.env);
+let preview: PreviewProxy | undefined;
+if (previewOptions) {
+  preview = new PreviewProxy(previewOptions);
+  const started = await preview.start();
+  console.log(`[${SERVICE}] preview proxy on :${started.port} (${started.baseUrl})`);
+}
+
+const core = new DevcontainerSandboxCore({ hardening, preview });
 
 const ERROR_STATUS: Record<ErrorCode, number> = {
   BAD_REQUEST: 400,
@@ -127,6 +139,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       if (method === 'POST' && segments[2] === 'fs' && segments[3] === 'list') {
         const { path } = FsListRequestSchema.parse(await readJson(req));
         return sendJson(res, 200, { entries: await core.fsList(envId, path) });
+      }
+      if (method === 'POST' && segments[2] === 'ports') {
+        const { containerPort } = z
+          .object({ containerPort: z.number().int().min(1).max(65535) })
+          .parse(await readJson(req));
+        return sendJson(res, 201, await core.forwardPort(envId, containerPort));
       }
     }
   }

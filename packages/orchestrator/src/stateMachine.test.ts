@@ -14,6 +14,17 @@ describe('classifyAction', () => {
     expect(classifyAction('deny:req-42').kind).toBe('approval');
     expect(classifyAction('mystery')).toEqual({ kind: 'unknown', actionId: 'mystery' });
   });
+
+  it('classifies expose-port with a validated port number (M6)', () => {
+    expect(classifyAction('expose-port:3000')).toEqual({ kind: 'expose-port', port: 3000 });
+    expect(classifyAction('expose-port:1')).toEqual({ kind: 'expose-port', port: 1 });
+    expect(classifyAction('expose-port:65535')).toEqual({ kind: 'expose-port', port: 65535 });
+    // Out-of-range, non-numeric, and empty ports are unknown actions, not throws.
+    expect(classifyAction('expose-port:0').kind).toBe('unknown');
+    expect(classifyAction('expose-port:65536').kind).toBe('unknown');
+    expect(classifyAction('expose-port:http').kind).toBe('unknown');
+    expect(classifyAction('expose-port:').kind).toBe('unknown');
+  });
 });
 
 describe('WorkUnitMachine', () => {

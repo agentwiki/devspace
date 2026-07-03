@@ -15,6 +15,7 @@ import {
   DevcontainerProvisioner,
   DevcontainerSandboxCore,
   DockerRuntime,
+  PreviewProxy,
   captureExec,
   nodeCommandRunner,
 } from './index.js';
@@ -44,6 +45,7 @@ describe.skipIf(!availability.ok)('sandbox-core live integration', () => {
   const createdEnvIds: string[] = [];
   let core: DevcontainerSandboxCore;
   let env: Environment;
+  let preview: PreviewProxy;
 
   async function newCore(): Promise<DevcontainerSandboxCore> {
     const runner = nodeCommandRunner;
@@ -53,10 +55,13 @@ describe.skipIf(!availability.ok)('sandbox-core live integration', () => {
         devcontainerPath: availability.devcontainerBin,
         upTimeoutMs: 240_000,
       }),
+      preview,
     });
   }
 
   beforeAll(async () => {
+    preview = new PreviewProxy();
+    await preview.start();
     core = await newCore();
     env = await core.createEnvironment({
       baseImage: TEST_IMAGE,
@@ -74,6 +79,7 @@ describe.skipIf(!availability.ok)('sandbox-core live integration', () => {
       await core?.destroyEnvironment(id).catch(() => {});
       forceRemoveByEnvLabel(id);
     }
+    await preview?.stop();
   }, 120_000);
 
   it('provisions a container and reports it ready', () => {
@@ -171,6 +177,50 @@ describe.skipIf(!availability.ok)('sandbox-core live integration', () => {
     const exitCode = await runaway.done;
     expect(exitCode).not.toBe(0); // SIGTERM'd, never ran the full 312512s
   }, 60_000);
+
+  it('serves a real in-container HTTP server through the preview proxy (M6)', async () => {
+    // The round-trip needs a listener inside the env; probe for python3 (the
+    // devcontainers base image ships it, but stay defensive about image drift).
+    const probe = await captureExec(
+      await core.exec(env.envId, { cmd: ['sh', '-c', 'command -v python3 || true'], tty: false }),
+    );
+    if (!probe.stdout.toString().trim()) {
+      console.warn('[sandbox itest] python3 missing from image — skipping preview round-trip');
+      return;
+    }
+    const server = await core.exec(env.envId, {
+      cmd: ['python3', '-m', 'http.server', '8901', '--bind', '0.0.0.0'],
+      tty: false,
+    });
+    try {
+      const { proxyUrl, token } = await core.forwardPort(env.envId, 8901);
+      expect(proxyUrl).toContain(`/t/${token}/`);
+      // Wait for the listener, then fetch THROUGH the host-side proxy.
+      let res: { status: number; text(): Promise<string> } | undefined;
+      for (let i = 0; i < 40; i += 1) {
+        try {
+          res = await fetch(proxyUrl);
+          if (res.status === 200) break;
+        } catch {
+          /* not up yet */
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      expect(res?.status).toBe(200);
+      expect(await res!.text()).toContain('Directory listing');
+      // An unregistered token 404s without touching the env.
+      const bogus = await fetch(proxyUrl.replace(token, 'not-a-real-token'));
+      expect(bogus.status).toBe(404);
+    } finally {
+      await captureExec(
+        await core.exec(env.envId, {
+          cmd: ['sh', '-c', "pkill -TERM -f '[h]ttp.server 8901' || true"],
+          tty: false,
+        }),
+      );
+      server.kill();
+    }
+  }, 120_000);
 });
 
 // A separate hardened provision: no gVisor in CI (pure builders + the boot

@@ -110,11 +110,25 @@ function scriptStream(
 function makeCore(container = new FakeContainer(), provisionResult: Partial<ProvisionResult> = {}) {
   const destroy = vi.fn(async () => {});
   const removeNetwork = vi.fn(async () => {});
+  const containerIp = vi.fn(async () => '172.29.0.2');
+  let tokens = 0;
+  const preview = {
+    register: vi.fn((envId: string, target: { host: string; port: number }) => {
+      void envId;
+      tokens += 1;
+      return {
+        token: `tok${tokens}`,
+        proxyUrl: `http://preview/t/tok${tokens}/?to=${target.host}:${target.port}`,
+      };
+    }),
+    revokeEnv: vi.fn(),
+  };
   const runtime: ContainerRuntime = {
     execStream: (_id, req) => container.exec(req),
     destroy,
     exists: async () => true,
     removeNetwork,
+    containerIp,
   };
   const provisioner: Provisioner = {
     provision: vi.fn(async (): Promise<ProvisionResult> => ({
@@ -124,11 +138,13 @@ function makeCore(container = new FakeContainer(), provisionResult: Partial<Prov
     })),
   };
   return {
-    core: new DevcontainerSandboxCore({ runtime, provisioner }),
+    core: new DevcontainerSandboxCore({ runtime, provisioner, preview }),
     container,
     destroy,
     removeNetwork,
     provisioner,
+    preview,
+    containerIp,
   };
 }
 
@@ -243,5 +259,73 @@ describe('parseFindOutput', () => {
       { name: 'link', type: 'symlink', size: 0 },
       { name: 'weird', type: 'other', size: 0 },
     ]);
+  });
+});
+
+describe('forwardPort (M6 preview)', () => {
+  it('resolves the container IP on the per-env network and registers a route', async () => {
+    const { core, preview, containerIp } = makeCore(new FakeContainer(), {
+      networkName: 'devspace_env_x',
+    });
+    const env = await core.createEnvironment({});
+    const route = await core.forwardPort(env.envId, 3000);
+    expect(containerIp).toHaveBeenCalledWith('cont-1', 'devspace_env_x');
+    expect(preview.register).toHaveBeenCalledWith(env.envId, { host: '172.29.0.2', port: 3000 });
+    expect(route.proxyUrl).toContain('/t/tok1/');
+    // The mapping is recorded on the environment.
+    expect((await core.getEnvironment(env.envId))?.ports).toEqual([
+      { containerPort: 3000, proxyUrl: route.proxyUrl, token: route.token },
+    ]);
+  });
+
+  it('is idempotent per port — re-forwarding returns the live route', async () => {
+    const { core, preview } = makeCore();
+    const env = await core.createEnvironment({});
+    const first = await core.forwardPort(env.envId, 8080);
+    const again = await core.forwardPort(env.envId, 8080);
+    expect(again).toEqual(first);
+    expect(preview.register).toHaveBeenCalledTimes(1);
+    const other = await core.forwardPort(env.envId, 8081);
+    expect(other.token).not.toBe(first.token);
+  });
+
+  it('rejects clearly without a configured proxy', async () => {
+    const container = new FakeContainer();
+    const runtime: ContainerRuntime = {
+      execStream: (_id, req) => container.exec(req),
+      destroy: async () => {},
+      exists: async () => true,
+    };
+    const provisioner: Provisioner = {
+      provision: async () => ({ containerId: 'cont-1', workspaceFolder: '/ws' }),
+    };
+    const core = new DevcontainerSandboxCore({ runtime, provisioner });
+    const env = await core.createEnvironment({});
+    await expect(core.forwardPort(env.envId, 3000)).rejects.toMatchObject({
+      code: 'EXEC_FAILED',
+      message: expect.stringContaining('preview proxy not configured'),
+    });
+  });
+
+  it('rejects when the container has no host-reachable address', async () => {
+    const { core, containerIp } = makeCore();
+    containerIp.mockResolvedValueOnce(null);
+    const env = await core.createEnvironment({});
+    await expect(core.forwardPort(env.envId, 3000)).rejects.toMatchObject({
+      code: 'EXEC_FAILED',
+      message: expect.stringContaining('no host-reachable address'),
+    });
+  });
+
+  it('rejects on a not-ready env and revokes routes on teardown', async () => {
+    const { core, preview } = makeCore();
+    await expect(core.forwardPort('env_missing', 80)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+    const env = await core.createEnvironment({});
+    await core.forwardPort(env.envId, 3000);
+    await core.destroyEnvironment(env.envId);
+    expect(preview.revokeEnv).toHaveBeenCalledWith(env.envId);
+    await expect(core.forwardPort(env.envId, 3000)).rejects.toMatchObject({ code: 'CONFLICT' });
   });
 });

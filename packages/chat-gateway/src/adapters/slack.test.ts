@@ -180,6 +180,24 @@ describe('SlackAdapter inbound (recorded payloads through real Bolt)', () => {
     ]);
   });
 
+  it('a `!port <n>` reply becomes the expose-port action, not an agent prompt (M6)', async () => {
+    const binding = new ConversationBinding();
+    binding.bind('conv-t', { channel: 'C0123ABC', threadTs: '1712345678.000200' });
+    const h = await startAdapter({ binding });
+    const body = fixture('event-thread-message.json');
+    (body.event as Record<string, unknown>).text = '!port 3000';
+    await h.receiver.dispatch(body);
+    expect(h.events).toEqual([
+      {
+        type: 'action.invoked',
+        conversationId: 'conv-t',
+        userId: 'U111',
+        actionId: 'expose-port:3000',
+        payload: {},
+      },
+    ]);
+  });
+
   it('ignores replies in unbound threads and the bot’s own messages', async () => {
     const binding = new ConversationBinding();
     binding.bind('conv-t', { channel: 'C0123ABC', threadTs: '1712345678.000200' });

@@ -426,6 +426,8 @@ export class Orchestrator {
       }
       case 'hybrid': // create-pr — agent finalizes commits, host-side wrapper pushes + opens PR
         return this.onCreatePr(event.conversationId, event.userId, wu, registry);
+      case 'expose-port':
+        return this.onExposePort(event.conversationId, event.userId, wu, action.port, registry);
       case 'deterministic': // view-pr
         await this.emit(
           messageCommand(
@@ -440,6 +442,53 @@ export class Orchestrator {
           messageCommand(event.conversationId, `Unknown action: ${action.actionId}`, registry),
         );
         return;
+    }
+  }
+
+  /**
+   * Expose a container port through the preview proxy (M6). State-gated to a
+   * live environment (READY…PR_OPEN); the returned URL is a capability URL
+   * shown only in the owner's thread, and it dies with the env.
+   */
+  private async onExposePort(
+    conversationId: string,
+    userId: string,
+    wu: WorkUnit,
+    port: number,
+    registry: SecretRegistry,
+  ): Promise<void> {
+    if (!wu.envId || STATE_RANK[wu.state] < STATE_RANK['READY']) {
+      await this.emit(
+        messageCommand(conversationId, 'No running environment to expose a port from.', registry),
+      );
+      return;
+    }
+    if (STATE_RANK[wu.state] > STATE_RANK['PR_OPEN']) {
+      await this.emit(
+        messageCommand(
+          conversationId,
+          'This work unit is finished — its environment is gone.',
+          registry,
+        ),
+      );
+      return;
+    }
+    try {
+      const { proxyUrl } = await this.deps.sandbox.forwardPort(wu.envId, port);
+      await this.audit('port.exposed', {
+        userId,
+        conversationId,
+        workUnitId: wu.id,
+        detail: { envId: wu.envId, port },
+      });
+      await this.emit(
+        messageCommand(conversationId, `Port ${port} exposed: ${proxyUrl}`, registry),
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.emit(
+        messageCommand(conversationId, `Could not expose port ${port}: ${message}`, registry),
+      );
     }
   }
 

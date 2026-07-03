@@ -21,9 +21,12 @@ import {
 } from '@devspace/db';
 import {
   DevcontainerSandboxCore,
+  PreviewProxy,
   assertRuntimeAvailable,
   hardeningFromEnv,
   nodeCommandRunner,
+  previewProxyFromEnv,
+  type PreviewProxyOptions,
   type SandboxHardening,
 } from '@devspace/sandbox-core';
 import { DefaultAgentRunner } from '@devspace/agent-runner';
@@ -74,6 +77,12 @@ export interface OrchestratorBootConfig {
    * SANDBOX_* / EGRESS_* vars; demo mode when nothing is configured.
    */
   sandboxHardening?: SandboxHardening;
+  /**
+   * Ports preview proxy (M6). Defaults to `previewProxyFromEnv(process.env)`
+   * (PREVIEW_PROXY_PORT et al.); off when nothing is configured —
+   * `forwardPort` then rejects with a clear message.
+   */
+  preview?: PreviewProxyOptions;
 }
 
 export interface BootedOrchestrator {
@@ -103,7 +112,14 @@ export async function bootOrchestrator(
   if (hardening?.runtime) {
     await assertRuntimeAvailable(nodeCommandRunner, hardening.runtime);
   }
-  const sandbox = new DevcontainerSandboxCore({ hardening });
+  // The ports preview proxy (M6) — started before anything can forwardPort.
+  const previewOptions = config.preview ?? previewProxyFromEnv(process.env);
+  let preview: PreviewProxy | undefined;
+  if (previewOptions) {
+    preview = new PreviewProxy(previewOptions);
+    await preview.start();
+  }
+  const sandbox = new DevcontainerSandboxCore({ hardening, preview });
   const agents = new DefaultAgentRunner({
     exec: sandbox,
     // llmKeyRef is a secret record id resolved through the envelope store.
@@ -146,6 +162,7 @@ export async function bootOrchestrator(
     },
     async close() {
       await bus.stop();
+      await preview?.stop();
     },
   };
 }

@@ -575,3 +575,99 @@ describe('listSessions (M6)', () => {
     await expect(h.orch.listSessions('slack', 'u3')).resolves.toEqual([]);
   });
 });
+
+describe('expose-port (M6)', () => {
+  async function readyConversation(h: Harness): Promise<string> {
+    const created = (await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C1:1',
+      userId: 'u1',
+      repoChoice: { repoUrl: 'https://github.com/a/b', empty: false },
+    })) as { conversationId: string };
+    return created.conversationId;
+  }
+
+  it('forwards the port, audits, and renders the capability URL', async () => {
+    const h = harness();
+    (h.sandbox.forwardPort as ReturnType<typeof vi.fn>).mockResolvedValue({
+      proxyUrl: 'http://preview:4010/t/tok123/',
+      token: 'tok123',
+    });
+    const conversationId = await readyConversation(h);
+
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId,
+      userId: 'u1',
+      actionId: 'expose-port:3000',
+      payload: {},
+    });
+
+    expect(h.sandbox.forwardPort).toHaveBeenCalledWith('env_1', 3000);
+    const last = h.rendered.at(-1);
+    expect(last).toMatchObject({ type: 'post_message' });
+    expect((last as { text: string }).text).toContain('http://preview:4010/t/tok123/');
+
+    const audits = await h.repos.audit.listByConversation(conversationId);
+    const exposed = audits.find((a) => a.action === 'port.exposed');
+    expect(exposed?.detail).toEqual({ envId: 'env_1', port: 3000 });
+    // The capability token never lands in the audit trail.
+    expect(JSON.stringify(exposed)).not.toContain('tok123');
+  });
+
+  it('refuses before an environment exists', async () => {
+    const h = harness();
+    const created = (await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C1:2',
+      userId: 'u1',
+    })) as { conversationId: string };
+
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: created.conversationId,
+      userId: 'u1',
+      actionId: 'expose-port:3000',
+      payload: {},
+    });
+    expect(h.sandbox.forwardPort).not.toHaveBeenCalled();
+    expect((h.rendered.at(-1) as { text: string }).text).toContain('No running environment');
+  });
+
+  it('refuses after the work unit is finished', async () => {
+    const h = harness();
+    const conversationId = await readyConversation(h);
+    await h.orch.teardown(conversationId);
+
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId,
+      userId: 'u1',
+      actionId: 'expose-port:3000',
+      payload: {},
+    });
+    expect(h.sandbox.forwardPort).not.toHaveBeenCalled();
+    expect((h.rendered.at(-1) as { text: string }).text).toContain('finished');
+  });
+
+  it('surfaces a forwardPort failure as a message, never a throw', async () => {
+    const h = harness();
+    (h.sandbox.forwardPort as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('preview proxy not configured'),
+    );
+    const conversationId = await readyConversation(h);
+
+    await expect(
+      h.orch.handleChatEvent({
+        type: 'action.invoked',
+        conversationId,
+        userId: 'u1',
+        actionId: 'expose-port:3000',
+        payload: {},
+      }),
+    ).resolves.toBeUndefined();
+    expect((h.rendered.at(-1) as { text: string }).text).toContain('Could not expose port 3000');
+  });
+});

@@ -26,6 +26,7 @@ import { DevcontainerProvisioner } from './provision.js';
 import type { Provisioner } from './provision.js';
 import { DockerRuntime } from './runtime.js';
 import type { ContainerRuntime } from './runtime.js';
+import type { PreviewRegistrar } from './preview-proxy.js';
 
 /** Typed error carrying one of the contract ErrorCodes. */
 export class SandboxError extends Error {
@@ -50,6 +51,8 @@ interface EnvRecord {
 export interface SandboxCoreDeps {
   runtime: ContainerRuntime;
   provisioner: Provisioner;
+  /** Preview ingress (M6). `forwardPort` rejects clearly when absent. */
+  preview: PreviewRegistrar;
 }
 
 export interface SandboxCore {
@@ -66,6 +69,7 @@ export interface SandboxCore {
 export class DevcontainerSandboxCore implements SandboxCore {
   private readonly runtime: ContainerRuntime;
   private readonly provisioner: Provisioner;
+  private readonly preview?: PreviewRegistrar;
   private readonly envs = new Map<string, EnvRecord>();
 
   constructor(
@@ -75,6 +79,7 @@ export class DevcontainerSandboxCore implements SandboxCore {
     this.runtime = deps?.runtime ?? new DockerRuntime(runner);
     this.provisioner =
       deps?.provisioner ?? new DevcontainerProvisioner(runner, { hardening: deps?.hardening });
+    this.preview = deps?.preview;
   }
 
   async createEnvironment(input: CreateEnvironmentRequest): Promise<Environment> {
@@ -114,6 +119,8 @@ export class DevcontainerSandboxCore implements SandboxCore {
     const record = this.envs.get(envId);
     if (!record) throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
     record.env = { ...record.env, status: 'stopping' };
+    // No preview URL survives its env (m6-plan Decision 5).
+    this.preview?.revokeEnv(envId);
     if (record.containerId) {
       await this.runtime.destroy(record.containerId);
     }
@@ -180,15 +187,36 @@ export class DevcontainerSandboxCore implements SandboxCore {
     return parseFindOutput(stdout.toString());
   }
 
-  forwardPort(
-    _envId: string,
-    _containerPort: number,
+  /**
+   * Expose a container port through the preview proxy (M6): resolve the
+   * container's host-reachable IP (the per-env network when hardening created
+   * one), register a capability-token route, and record the mapping on the
+   * environment. Idempotent per port — re-forwarding returns the live route.
+   */
+  async forwardPort(
+    envId: string,
+    containerPort: number,
   ): Promise<{ proxyUrl: string; token: string }> {
-    // The ports preview proxy is explicitly out of M1 scope (roadmap: "Out:
-    // ports proxy polish"; lands with the M5 preview proxy).
-    return Promise.reject(
-      new SandboxError('EXEC_FAILED', 'forwardPort is not implemented until M5'),
-    );
+    const record = this.requireReady(envId);
+    if (!this.preview) {
+      throw new SandboxError(
+        'EXEC_FAILED',
+        'preview proxy not configured (set PREVIEW_PROXY_PORT)',
+      );
+    }
+    const existing = record.env.ports.find((p) => p.containerPort === containerPort);
+    if (existing) return { proxyUrl: existing.proxyUrl, token: existing.token };
+
+    const ip = await this.runtime.containerIp?.(record.containerId!, record.networkName);
+    if (!ip) {
+      throw new SandboxError('EXEC_FAILED', `no host-reachable address for ${envId}`);
+    }
+    const route = this.preview.register(envId, { host: ip, port: containerPort });
+    record.env = {
+      ...record.env,
+      ports: [...record.env.ports, { containerPort, proxyUrl: route.proxyUrl, token: route.token }],
+    };
+    return { proxyUrl: route.proxyUrl, token: route.token };
   }
 
   private requireReady(envId: string): EnvRecord {

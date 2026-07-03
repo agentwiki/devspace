@@ -23,6 +23,7 @@ import type {
   MessageRef,
   StreamHandle,
 } from '../index.js';
+import { parsePortCommand } from '../index.js';
 import { ConversationBinding, encodeRef, type ThreadRef } from '../binding.js';
 import { StatusRegistry, StreamCoalescer, type Clock } from '../status.js';
 import {
@@ -195,6 +196,19 @@ export class SlackAdapter implements ChatAdapter, ChatRenderer {
       if (context.botUserId && (text ?? '').includes(`<@${context.botUserId}>`)) return;
       const conversationId = await this.binding.conversationFor({ channel, threadTs });
       if (!conversationId) return; // not a devspace thread
+      // `!port <n>` is chat ergonomics for the expose-port action (M6) — it
+      // must not reach the agent as a prompt.
+      const port = parsePortCommand(text ?? '');
+      if (port !== null) {
+        await this.emitSafe({
+          type: 'action.invoked',
+          conversationId,
+          userId: user,
+          actionId: `expose-port:${port}`,
+          payload: {},
+        });
+        return;
+      }
       await this.emitSafe({
         type: 'message.posted',
         conversationId,

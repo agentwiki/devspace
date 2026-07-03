@@ -18,6 +18,9 @@ export type ActionClass =
   // AgentRunner dispatch (it isn't one).
   | { kind: 'hybrid'; op: 'create-pr' }
   | { kind: 'approval'; requestId: string; decision: 'allow' | 'deny' }
+  // M6: expose a container port through the preview proxy. Adapters normalize
+  // their own ergonomics (`!port 3000`) onto this id (m6-plan Decision 6).
+  | { kind: 'expose-port'; port: number }
   | { kind: 'unknown'; actionId: string };
 
 /** Classify a chat button click. "create-pr" is a hybrid task; "view-pr" is not. */
@@ -27,6 +30,11 @@ export function classifyAction(actionId: string): ActionClass {
   const m = /^(approve|deny):(.+)$/.exec(actionId);
   if (m)
     return { kind: 'approval', requestId: m[2]!, decision: m[1] === 'approve' ? 'allow' : 'deny' };
+  const p = /^expose-port:(\d{1,5})$/.exec(actionId);
+  if (p) {
+    const port = Number(p[1]);
+    if (port > 0 && port <= 65535) return { kind: 'expose-port', port };
+  }
   return { kind: 'unknown', actionId };
 }
 

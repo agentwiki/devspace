@@ -22,9 +22,7 @@
   },
   "dependencies": {
     "@devspace/contracts": "workspace:*",
-    "@slack/bolt": "^4.0.0"
-  },
-  "devDependencies": {
+    "@slack/bolt": "^4.0.0",
     "discord.js": "^14.16.3"
   }
 }

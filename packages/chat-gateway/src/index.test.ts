@@ -22,13 +22,14 @@ describe('SlackAdapter (primary)', () => {
 
 describe('DiscordAdapter (additional)', () => {
   it('declares the discord platform on both adapter and renderer surfaces', () => {
-    const adapter = new DiscordAdapter({ token: 't', applicationId: 'a' });
+    const adapter = new DiscordAdapter({
+      start: async () => {},
+      stop: async () => {},
+      postMessage: async () => ({ messageId: 'm1' }),
+      createThread: async () => ({ threadId: 't1' }),
+      editMessage: async () => {},
+    });
     expect(adapter.platform).toBe('discord');
-  });
-
-  it('does not implement live behavior yet (M6)', async () => {
-    const adapter = new DiscordAdapter({ token: 't', applicationId: 'a' });
-    await expect(adapter.start(async () => {})).rejects.toThrow(/not implemented/);
   });
 });
 

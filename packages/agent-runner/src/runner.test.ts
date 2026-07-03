@@ -144,6 +144,58 @@ describe('DefaultAgentRunner', () => {
     ).rejects.toThrow(/unknown agent session/);
   });
 
+  it('selects the claude backend by agentKind over the SAME loopback agent (M6-E)', async () => {
+    const provider = fakeExecProvider();
+    const runner = new DefaultAgentRunner({
+      exec: provider,
+      resolveSecret: async () => 'sk-ant-test',
+    });
+
+    const { agentSessionId } = await runner.createSession({
+      envId: 'env-1',
+      agentKind: 'claude',
+      workspacePath: '/workspace',
+      model: 'claude-sonnet-5',
+      llmKeyRef: 'ref-1',
+    });
+
+    // The registry picked the claude launch argv + env (the ONLY difference —
+    // the ACP handshake, turn, and mapping ran identically to codex).
+    const launch = provider.launches[0];
+    expect(launch?.req.cmd).toEqual([
+      '/opt/agent-runtime/bin/node',
+      '/opt/agent-runtime/claude-code-acp',
+    ]);
+    expect(launch?.req.env).toMatchObject({
+      ANTHROPIC_MODEL: 'claude-sonnet-5',
+      ANTHROPIC_API_KEY: 'sk-ant-test',
+    });
+
+    const events = await drain(runner.runTurn(agentSessionId, { prompt: 'hi', attachments: [] }));
+    expect(events).toEqual([
+      { type: 'message', text: 'echo:hi' },
+      { type: 'turn_end', reason: 'completed' },
+    ]);
+
+    // Abort execs the claude kill pattern into the right env.
+    await runner.abortTurn(agentSessionId);
+    const kill = provider.launches.find((l) => l.req.cmd[0] === 'sh');
+    expect(kill?.req.cmd[2]).toContain('[/]opt/agent-runtime/claude-code-acp');
+  });
+
+  it('rejects an unknown agent kind with a clear error', async () => {
+    const provider = fakeExecProvider();
+    const runner = new DefaultAgentRunner({ exec: provider });
+    await expect(
+      runner.createSession({
+        envId: 'env-1',
+        agentKind: 'gemini' as never,
+        workspacePath: '/w',
+        llmKeyRef: 'r',
+      }),
+    ).rejects.toThrow(/no backend for agent kind "gemini"/);
+  });
+
   it('abortTurn cancels the protocol AND kills the agent inside the container', async () => {
     const provider = fakeExecProvider();
     const runner = new DefaultAgentRunner({ exec: provider });

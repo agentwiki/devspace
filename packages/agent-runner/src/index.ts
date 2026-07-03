@@ -10,6 +10,7 @@
 export * from './guardrails.js';
 export * from './budget.js';
 export * from './backends/codex.js';
+export * from './backends/claude.js';
 export * from './acp/connection.js';
 export * from './acp/events.js';
 export * from './acp/client.js';

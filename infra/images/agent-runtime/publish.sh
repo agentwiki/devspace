@@ -5,14 +5,15 @@
 # `agentRuntimeMount()` in @devspace/agent-runner.
 #
 # To sandbox-core this volume is opaque; only agent-runner knows it holds a
-# pinned Node + codex-acp. Re-run this whenever the pinned codex-acp version
-# changes; the volume is the unit of agent-runtime versioning.
+# pinned Node + both ACP adapters (codex-acp, claude-code-acp — M6-E). Re-run
+# whenever a pinned adapter version changes; the volume is the unit of
+# agent-runtime versioning.
 #
 # Usage: publish.sh [VOLUME_NAME] [IMAGE_TAG]
 set -euo pipefail
 
 VOLUME="${1:-devspace-agent-runtime}"
-IMAGE="${2:-devspace/agent-runtime:codex}"
+IMAGE="${2:-devspace/agent-runtime}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "[agent-runtime] building ${IMAGE}"

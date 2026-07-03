@@ -154,7 +154,7 @@ export type FsEntry = z.infer<typeof FsEntrySchema>;
 /* Agent Runner: ACP-backed sessions + normalized event stream                 */
 /* -------------------------------------------------------------------------- */
 
-export const AgentKindSchema = z.enum(['codex']);
+export const AgentKindSchema = z.enum(['codex', 'claude']);
 export type AgentKind = z.infer<typeof AgentKindSchema>;
 
 export const CreateAgentSessionRequestSchema = z.object({

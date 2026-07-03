@@ -97,6 +97,7 @@ export function networkIsInternal(name: string): boolean {
   try {
     const out = execFileSync('docker', ['network', 'inspect', '--format', '{{.Internal}}', name], {
       encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'], // a removed network is an expected probe miss
     }).trim();
     return out === 'true';
   } catch {

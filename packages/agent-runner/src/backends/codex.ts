@@ -59,9 +59,14 @@ export const codexBackend: AgentBackend = {
   },
   killCommand() {
     // Matches the launch argv (`<runtime>/codex-acp`); SIGTERM the whole match
-    // set, and `|| true` so an already-dead agent exits 0.
+    // set, and `|| true` so an already-dead agent exits 0. The leading `[/]`
+    // is the classic pgrep self-exclusion trick: the regex still matches the
+    // agent's `/opt/...` argv, but NOT the command line of the very shell
+    // running this pkill (which contains the bracketed literal) — without it
+    // pkill SIGTERMs its own parent shell and the exec exits 143.
+    const pattern = `[/]${AGENT_RUNTIME_PATH.slice(1)}/codex-acp`;
     return {
-      cmd: ['sh', '-c', `pkill -TERM -f '${AGENT_RUNTIME_PATH}/codex-acp' || true`],
+      cmd: ['sh', '-c', `pkill -TERM -f '${pattern}' || true`],
       tty: false,
     };
   },

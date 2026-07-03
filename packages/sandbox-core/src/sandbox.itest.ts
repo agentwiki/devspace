@@ -152,23 +152,24 @@ describe.skipIf(!availability.ok)('sandbox-core live integration', () => {
   it('kills a runaway process tree via in-container pkill (the abort mechanism)', async () => {
     // The M5 auto-abort caveat: ExecStream.kill() only signals the local
     // `docker exec` client. Prove the REAL mechanism — a second exec running
-    // pkill inside the container — terminates the first process.
-    const marker = 'devspace-runaway-marker';
-    const runaway = await core.exec(env.envId, {
-      cmd: ['sh', '-c', `exec sleep 300 # ${marker}`],
-      tty: false,
-    });
+    // pkill inside the container — terminates the first process. The target
+    // must carry the marker in its REAL argv (no shell wrapper — a comment
+    // would vanish at exec), and the pkill pattern uses the `[s]leep`
+    // self-exclusion trick so it cannot match its own parent shell (which
+    // would SIGTERM the killer itself and exit 143 — the codex killCommand
+    // does the same with `[/]opt/...`).
+    const runaway = await core.exec(env.envId, { cmd: ['sleep', '312512'], tty: false });
     // Give the process a moment to appear.
     await new Promise((r) => setTimeout(r, 500));
     const kill = await captureExec(
       await core.exec(env.envId, {
-        cmd: ['sh', '-c', `pkill -TERM -f '${marker}' || true`],
+        cmd: ['sh', '-c', "pkill -TERM -f '[s]leep 312512' || true"],
         tty: false,
       }),
     );
     expect(kill.code).toBe(0);
     const exitCode = await runaway.done;
-    expect(exitCode).not.toBe(0); // SIGTERM'd, never ran the full 300s
+    expect(exitCode).not.toBe(0); // SIGTERM'd, never ran the full 312512s
   }, 60_000);
 });
 

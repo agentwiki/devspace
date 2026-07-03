@@ -161,7 +161,8 @@ describe('DefaultAgentRunner', () => {
     const kill = provider.launches.find((l) => l.req.cmd[0] === 'sh');
     expect(kill?.envId).toBe('env-abort');
     expect(kill?.req.cmd[2]).toContain('pkill');
-    expect(kill?.req.cmd[2]).toContain('/opt/agent-runtime/codex-acp');
+    // The `[/]` prefix keeps pkill from matching its own parent shell.
+    expect(kill?.req.cmd[2]).toContain('[/]opt/agent-runtime/codex-acp');
   });
 
   it('aborts a turn that blows the tool-call budget and kills the agent', async () => {

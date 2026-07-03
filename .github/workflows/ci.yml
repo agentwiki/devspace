@@ -118,6 +118,8 @@ jobs:
         run: |
           export SECRET_ENVELOPE_KEY="k1:$(head -c 32 /dev/urandom | base64 -w0)"
           export ORCHESTRATOR_PORT=4099
+          # M6: the ChatEvent ingest is the authed internal split API.
+          export DEVSPACE_INTERNAL_TOKEN="$(head -c 32 /dev/urandom | base64 -w0)"
           node apps/orchestrator-svc/dist/main.js &
           SVC_PID=$!
           for i in $(seq 1 40); do
@@ -125,6 +127,9 @@ jobs:
             sleep 0.5
           done
           curl -sf localhost:4099/health | grep -q '"status":"ok"'
-          # Malformed ChatEvent must be rejected with 400.
-          test "$(curl -s -o /dev/null -w '%{http_code}' -XPOST localhost:4099/events -d '{"type":"nope"}')" = "400"
+          # No/bad token must be rejected with 401 before any parsing.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -XPOST localhost:4099/chat-events -d '{"type":"nope"}')" = "401"
+          # Malformed ChatEvent (valid token) must be rejected with 400.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -XPOST localhost:4099/chat-events \
+            -H "Authorization: Bearer ${DEVSPACE_INTERNAL_TOKEN}" -d '{"type":"nope"}')" = "400"
           kill $SVC_PID

@@ -17,7 +17,9 @@
 import type {
   AgentEvent,
   ChatEvent,
+  ChatPlatform,
   RenderCommand,
+  SessionSummary,
   WorkEvent,
   WorkState,
   WorkUnit,
@@ -43,6 +45,7 @@ export * from './secrets.js';
 export * from './git.js';
 export * from './render.js';
 export * from './webhooks.js';
+export * from './internal-http.js';
 // boot.js imports Orchestrator from this module; the cycle is benign (the
 // class is only referenced inside bootOrchestrator's body, after module init).
 export * from './boot.js';
@@ -150,6 +153,17 @@ export class Orchestrator {
     return this.deps.render(command);
   }
 
+  /** The in-chat entry point for secret setup (M6-D) — a single stable action
+   * id the platform adapter turns into its own UI (Slack: a modal). */
+  private emitSecretsPrompt(conversationId: string): Promise<void> {
+    return this.emit({
+      type: 'post_actions',
+      conversationId,
+      text: 'Configure credentials for this session — stored encrypted, never echoed.',
+      actions: [{ actionId: 'set-secrets', label: 'Set secrets', style: 'primary' }],
+    });
+  }
+
   /**
    * Apply a forward transition idempotently: if the unit is already in or past
    * the target state, no-op (redelivery), never call `transition` (which would
@@ -187,6 +201,8 @@ export class Orchestrator {
         return this.onConversationCreated(event);
       case 'message.posted':
         return this.onMessagePosted(event);
+      case 'secret.submitted':
+        return this.onSecretSubmitted(event);
       case 'action.invoked':
         return this.onActionInvoked(event);
     }
@@ -199,6 +215,29 @@ export class Orchestrator {
       externalChannelId,
     );
     return conv?.id ?? null;
+  }
+
+  /**
+   * A user's sessions on one platform, each joined with its work unit's state —
+   * the App Home / `GET /sessions` read (M6, the M4 App-Home deferral).
+   */
+  async listSessions(platform: ChatPlatform, userId: string): Promise<SessionSummary[]> {
+    const convs = await this.deps.repos.conversations.listByUser(platform, userId);
+    const sessions: SessionSummary[] = [];
+    for (const conv of convs) {
+      const wu = await this.deps.repos.workUnits.getByConversation(conv.id);
+      if (!wu) continue;
+      sessions.push({
+        conversationId: conv.id,
+        platform,
+        externalChannelId: conv.externalChannelId,
+        state: wu.state,
+        repoUrl: wu.repoUrl,
+        prUrl: wu.prUrl,
+        updatedAt: wu.updatedAt,
+      });
+    }
+    return sessions;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -220,6 +259,7 @@ export class Orchestrator {
     const choice = event.repoChoice;
     if (!choice || choice.empty || !choice.repoUrl) {
       await this.emit(statusCommand(conv.id, 'CREATED', 'Conversation ready.', registry));
+      await this.emitSecretsPrompt(conv.id);
       return created;
     }
 
@@ -232,6 +272,7 @@ export class Orchestrator {
       await this.emit(
         statusCommand(conv.id, 'PROVISIONING', 'Provisioning environment…', registry),
       );
+      await this.emitSecretsPrompt(conv.id);
 
       // Only the read-only clone token (if any) enters the container.
       const cloneToken = await this.deps.secrets.resolve(
@@ -265,6 +306,34 @@ export class Orchestrator {
       await this.failWorkUnit(wu.id, conv.id, err, registry);
     }
     return created;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* secret.submitted (M6, m6-plan Decision 8)                               */
+  /* ---------------------------------------------------------------------- */
+
+  private async onSecretSubmitted(
+    event: Extract<ChatEvent, { type: 'secret.submitted' }>,
+  ): Promise<void> {
+    await this.assertOwnership(event.conversationId, event.userId);
+    const registry = this.registryFor(event.conversationId);
+    // Register the plaintext BEFORE anything else can render: an agent (or
+    // user) echoing the value is redacted from the moment it exists here.
+    registry.register(event.value);
+    await this.deps.secrets.put(event.userId, event.conversationId, event.name, event.value);
+    // Name only — never the value (the M5 audit-hygiene invariant).
+    await this.audit('secret.stored', {
+      userId: event.userId,
+      conversationId: event.conversationId,
+      detail: { name: event.name },
+    });
+    await this.emit(
+      messageCommand(
+        event.conversationId,
+        `Stored ${event.name} for this conversation (encrypted at rest, never echoed).`,
+        registry,
+      ),
+    );
   }
 
   /* ---------------------------------------------------------------------- */
@@ -400,6 +469,8 @@ export class Orchestrator {
       }
       case 'hybrid': // create-pr — agent finalizes commits, host-side wrapper pushes + opens PR
         return this.onCreatePr(event.conversationId, event.userId, wu, registry);
+      case 'expose-port':
+        return this.onExposePort(event.conversationId, event.userId, wu, action.port, registry);
       case 'deterministic': // view-pr
         await this.emit(
           messageCommand(
@@ -414,6 +485,53 @@ export class Orchestrator {
           messageCommand(event.conversationId, `Unknown action: ${action.actionId}`, registry),
         );
         return;
+    }
+  }
+
+  /**
+   * Expose a container port through the preview proxy (M6). State-gated to a
+   * live environment (READY…PR_OPEN); the returned URL is a capability URL
+   * shown only in the owner's thread, and it dies with the env.
+   */
+  private async onExposePort(
+    conversationId: string,
+    userId: string,
+    wu: WorkUnit,
+    port: number,
+    registry: SecretRegistry,
+  ): Promise<void> {
+    if (!wu.envId || STATE_RANK[wu.state] < STATE_RANK['READY']) {
+      await this.emit(
+        messageCommand(conversationId, 'No running environment to expose a port from.', registry),
+      );
+      return;
+    }
+    if (STATE_RANK[wu.state] > STATE_RANK['PR_OPEN']) {
+      await this.emit(
+        messageCommand(
+          conversationId,
+          'This work unit is finished — its environment is gone.',
+          registry,
+        ),
+      );
+      return;
+    }
+    try {
+      const { proxyUrl } = await this.deps.sandbox.forwardPort(wu.envId, port);
+      await this.audit('port.exposed', {
+        userId,
+        conversationId,
+        workUnitId: wu.id,
+        detail: { envId: wu.envId, port },
+      });
+      await this.emit(
+        messageCommand(conversationId, `Port ${port} exposed: ${proxyUrl}`, registry),
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.emit(
+        messageCommand(conversationId, `Could not expose port ${port}: ${message}`, registry),
+      );
     }
   }
 

@@ -56,6 +56,19 @@ policy on the provisioner, never on the tenant request):
   values never registered. Defense-in-depth only — the egress proxy is the
   exfiltration control.
 
+## Internal service auth + preview ingress (M6)
+
+- The gateway ⇄ orchestrator internal API carries a shared bearer token
+  (`DEVSPACE_INTERNAL_TOKEN`), compared timing-safely on both servers; the
+  API is disabled entirely while the token is unset, and both services
+  refuse to boot in split mode without it. Per-service identity/mTLS is a
+  deployment layer on top (M7+).
+- **Preview URLs are capability URLs** (M6-B): a 32-byte random token per
+  exposed port, shown only in the owner's session thread, route revoked with
+  the env. The proxy is a dumb boundary — unknown token ⇒ 404 before any
+  upstream dial, no rewriting, no redirect following; the capability token
+  never enters the audit log.
+
 > Plain Docker single-host remains acceptable for the demo only. The M5 items
 > above are implemented but OFF by default (demo mode); production must set
 > `SANDBOX_HARDENED=1` (+ `EGRESS_PROXY_PORT`, `GITHUB_WEBHOOK_SECRET`) — see

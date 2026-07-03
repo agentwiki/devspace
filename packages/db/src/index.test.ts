@@ -39,6 +39,35 @@ describe('in-memory repositories', () => {
     ).resolves.toBeNull();
   });
 
+  it("lists a user's conversations per platform, newest first — App Home read (M6)", async () => {
+    let tick = 0;
+    const repos = createInMemoryRepositories(() => new Date(++tick * 1000).toISOString());
+    const first = await repos.conversations.create({
+      platform: 'slack',
+      externalChannelId: 'C1:1',
+      userId: 'u1',
+    });
+    const second = await repos.conversations.create({
+      platform: 'slack',
+      externalChannelId: 'C1:2',
+      userId: 'u1',
+    });
+    await repos.conversations.create({
+      platform: 'discord',
+      externalChannelId: 'D1',
+      userId: 'u1',
+    });
+    await repos.conversations.create({
+      platform: 'slack',
+      externalChannelId: 'C1:3',
+      userId: 'u2',
+    });
+
+    const listed = await repos.conversations.listByUser('slack', 'u1');
+    expect(listed.map((c) => c.id)).toEqual([second.id, first.id]);
+    await expect(repos.conversations.listByUser('slack', 'nobody')).resolves.toEqual([]);
+  });
+
   it('rejects an illegal transition', async () => {
     const repos = createInMemoryRepositories();
     const conv = await repos.conversations.create({

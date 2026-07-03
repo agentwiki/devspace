@@ -70,6 +70,10 @@ suite('postgres repositories', () => {
       id: conv.id,
     });
     expect(await repos.conversations.getByExternalChannelId('discord', 'C123')).toBeNull();
+    expect((await repos.conversations.listByUser('slack', 'u1')).map((c) => c.id)).toEqual([
+      conv.id,
+    ]);
+    expect(await repos.conversations.listByUser('slack', 'nobody')).toEqual([]);
 
     const wu = await repos.workUnits.create({ conversationId: conv.id });
     expect(wu.state).toBe('CREATED');

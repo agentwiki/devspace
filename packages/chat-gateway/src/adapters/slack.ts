@@ -23,16 +23,24 @@ import type {
   MessageRef,
   StreamHandle,
 } from '../index.js';
-import { ConversationBinding, encodeRef, type ThreadRef } from '../binding.js';
+import { parsePortCommand } from '../index.js';
+import { ConversationBinding, decodeRef, encodeRef, type ThreadRef } from '../binding.js';
 import { StatusRegistry, StreamCoalescer, type Clock } from '../status.js';
 import {
+  REPO_PICKER_CALLBACK_ID,
+  SECRETS_CALLBACK_ID,
   actionsBlocks,
   homeView,
   messageBlocks,
+  parseRepoPickerSubmission,
+  parseSecretsSubmission,
+  repoPickerModal,
+  secretsModal,
   statusBlocks,
   streamBlocks,
   type HomeSession,
   type SlackMessage,
+  type ViewStateValues,
 } from '../slack/blocks.js';
 
 export interface SlackConfig {
@@ -54,6 +62,8 @@ export interface SlackWebClient {
   }): Promise<{ ts: string }>;
   update(args: { channel: string; ts: string; text: string; blocks?: unknown[] }): Promise<void>;
   publishHome(args: { userId: string; view: unknown }): Promise<void>;
+  /** views.open — the secret-entry and repo-picker modals (M6-D). */
+  openView(args: { trigger_id: string; view: unknown }): Promise<void>;
 }
 
 export interface SlackAdapterOptions {
@@ -96,6 +106,15 @@ function stripMentions(text: string): string {
 }
 
 const ACTION_ID_PATTERN = /^((approve|deny):.+|create-pr|view-pr)$/;
+
+/** decodeRef that maps malformed metadata to null instead of throwing. */
+function decodeRefSafe(externalChannelId: string): ThreadRef | null {
+  try {
+    return decodeRef(externalChannelId);
+  } catch {
+    return null;
+  }
+}
 
 interface StreamState {
   conversationId: string;
@@ -158,17 +177,30 @@ export class SlackAdapter implements ChatAdapter, ChatRenderer {
           view: view as Parameters<typeof app.client.views.publish>[0]['view'],
         });
       },
+      openView: async ({ trigger_id, view }) => {
+        await app.client.views.open({
+          trigger_id,
+          view: view as Parameters<typeof app.client.views.open>[0]['view'],
+        });
+      },
     };
 
     app.command('/devspace', async ({ command, ack }) => {
       await ack();
-      // The session IS a thread: root it with a message the bot owns.
-      const root = await this.mustClient().postMessage({
-        channel: command.channel_id,
-        ...messageBlocks('Starting a devspace session in this thread…'),
-      });
-      const ref: ThreadRef = { channel: command.channel_id, threadTs: root.ts };
-      await this.createConversation(ref, command.user_id, parseRepoChoice(command.text ?? ''));
+      // Bare `/devspace` opens the repo picker instead of an empty session
+      // (m6-plan Decision 9) — dismissal creates nothing.
+      if (!(command.text ?? '').trim()) {
+        await this.mustClient().openView({
+          trigger_id: command.trigger_id,
+          view: repoPickerModal(command.channel_id),
+        });
+        return;
+      }
+      await this.rootThreadConversation(
+        command.channel_id,
+        command.user_id,
+        parseRepoChoice(command.text ?? ''),
+      );
     });
 
     app.event('app_mention', async ({ event }) => {
@@ -195,6 +227,19 @@ export class SlackAdapter implements ChatAdapter, ChatRenderer {
       if (context.botUserId && (text ?? '').includes(`<@${context.botUserId}>`)) return;
       const conversationId = await this.binding.conversationFor({ channel, threadTs });
       if (!conversationId) return; // not a devspace thread
+      // `!port <n>` is chat ergonomics for the expose-port action (M6) — it
+      // must not reach the agent as a prompt.
+      const port = parsePortCommand(text ?? '');
+      if (port !== null) {
+        await this.emitSafe({
+          type: 'action.invoked',
+          conversationId,
+          userId: user,
+          actionId: `expose-port:${port}`,
+          payload: {},
+        });
+        return;
+      }
       await this.emitSafe({
         type: 'message.posted',
         conversationId,
@@ -221,6 +266,50 @@ export class SlackAdapter implements ChatAdapter, ChatRenderer {
       });
     });
 
+    // set-secrets is pure platform UI: it opens the modal and never reaches
+    // the orchestrator (m6-plan Decision 8). The thread ref rides
+    // private_metadata so the submission needs no channel context.
+    app.action('set-secrets', async ({ ack, body }) => {
+      await ack();
+      if (body.type !== 'block_actions') return;
+      const channel = body.channel?.id;
+      const message = body.message as { ts?: string; thread_ts?: string } | undefined;
+      const threadTs = message?.thread_ts ?? message?.ts;
+      if (!channel || !threadTs || !body.trigger_id) return;
+      await this.mustClient().openView({
+        trigger_id: body.trigger_id,
+        view: secretsModal(encodeRef({ channel, threadTs })),
+      });
+    });
+
+    app.view(SECRETS_CALLBACK_ID, async ({ ack, body, view }) => {
+      await ack();
+      const ref = decodeRefSafe(view.private_metadata);
+      if (!ref) return;
+      const conversationId = await this.binding.conversationFor(ref);
+      if (!conversationId) return;
+      for (const { name, value } of parseSecretsSubmission(view.state.values as ViewStateValues)) {
+        await this.emitSafe({
+          type: 'secret.submitted',
+          conversationId,
+          userId: body.user.id,
+          name,
+          value,
+        });
+      }
+    });
+
+    app.view(REPO_PICKER_CALLBACK_ID, async ({ ack, body, view }) => {
+      await ack();
+      const channel = view.private_metadata;
+      if (!channel) return;
+      await this.rootThreadConversation(
+        channel,
+        body.user.id,
+        parseRepoChoice(parseRepoPickerSubmission(view.state.values as ViewStateValues)),
+      );
+    });
+
     app.event('app_home_opened', async ({ event }) => {
       if (event.tab !== undefined && event.tab !== 'home') return;
       const sessions = (await this.opts.listSessions?.(event.user)) ?? [];
@@ -233,6 +322,19 @@ export class SlackAdapter implements ChatAdapter, ChatRenderer {
   async stop(): Promise<void> {
     await this.coalescer.endAll();
     await this.app?.stop();
+  }
+
+  /** Root a session thread with a message the bot owns, then bind it. */
+  private async rootThreadConversation(
+    channel: string,
+    userId: string,
+    repoChoice: RepoChoice,
+  ): Promise<void> {
+    const root = await this.mustClient().postMessage({
+      channel,
+      ...messageBlocks('Starting a devspace session in this thread…'),
+    });
+    await this.createConversation({ channel, threadTs: root.ts }, userId, repoChoice);
   }
 
   private async createConversation(

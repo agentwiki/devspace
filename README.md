@@ -4,16 +4,16 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M2 (agent-runner vertical).** On top of the M1 sandbox-core engine
-> (real full-duplex exec with two-way backpressure, docker/devcontainer lifecycle,
-> fs ops — unit- and live-Docker integration-tested in CI), `@devspace/agent-runner`
-> now speaks ACP end to end: it launches codex-acp via exec, wraps the exec stream
-> in `ndJsonStream`/`ClientSideConnection`, runs a prompt turn, normalizes
-> `session/update`s into the `AgentEvent` stream, and gates sensitive tool calls
-> behind a human approval. The whole vertical — handshake, turn, event mapping,
-> permission gate — is exercised against a REAL SDK agent over an in-memory loopback
-> (no Docker). The orchestrator and chat-gateway are still M0 stubs. See
-> [`docs/roadmap.md`](docs/roadmap.md).
+> **Status: M6 (expansion I).** The full vertical is live end to end — sandbox
+> engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
+> secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
+> (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
+> M5) — and M6 adds the real two-service deployment (gateway ⇄ orchestrator
+> over an authed internal HTTP API; the in-process demo stays the zero-config
+> default), the ports preview proxy (`forwardPort` behind capability URLs),
+> a real Discord adapter, in-chat secret entry + repo-picker modals + a live
+> App Home session list, and a second agent backend (claude-code-acp) behind
+> the same `AgentBackend` seam. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing
 
@@ -98,6 +98,7 @@ pnpm --filter @devspace/db db:generate     # schema -> drizzle/*.sql (offline)
 - [ACP (Agent Client Protocol)](https://agentclientprotocol.com) via
   [`@agentclientprotocol/sdk`](https://www.npmjs.com/package/@agentclientprotocol/sdk) —
   agent-runner is the ACP client.
-- [`codex-acp`](https://github.com/agentclientprotocol/codex-acp) — first agent backend.
+- [`codex-acp`](https://github.com/agentclientprotocol/codex-acp) — first agent backend;
+  `claude-code-acp` is the second (M6), both behind the `AgentBackend` seam.
 - [Slack Bolt](https://tools.slack.dev/bolt-js/) + Block Kit — first chat adapter
   (App Home for the session list); [discord.js](https://discord.js.org) as an additional adapter.

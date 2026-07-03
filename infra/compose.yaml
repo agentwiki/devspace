@@ -36,6 +36,12 @@ services:
     environment:
       DATABASE_URL: postgres://devspace:devspace@postgres:5432/devspace
       PORT: '4000'
+      SECRET_ENVELOPE_KEY: ${SECRET_ENVELOPE_KEY:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      # Split mode (M6): set DEVSPACE_INTERNAL_TOKEN in .env and the render
+      # transport + internal API light up; unset, render surfaces to logs.
+      DEVSPACE_INTERNAL_TOKEN: ${DEVSPACE_INTERNAL_TOKEN:-}
+      GATEWAY_RENDER_URL: ${DEVSPACE_INTERNAL_TOKEN:+http://chat-gateway:4002/render}
     ports:
       - '4000:4000'
 
@@ -44,6 +50,10 @@ services:
     command: ['node', 'apps/sandbox-core-svc/dist/main.js']
     environment:
       PORT: '4001'
+      # Ports preview proxy (M6): set PREVIEW_PROXY_PORT (e.g. 4010) and map
+      # it below; PREVIEW_BASE_URL is what users reach (TLS in front).
+      PREVIEW_PROXY_PORT: ${PREVIEW_PROXY_PORT:-}
+      PREVIEW_BASE_URL: ${PREVIEW_BASE_URL:-}
     ports:
       - '4001:4001'
 
@@ -52,6 +62,16 @@ services:
     command: ['node', 'apps/chat-gateway-svc/dist/main.js']
     environment:
       PORT: '4002'
+      CHAT_PLATFORM: ${CHAT_PLATFORM:-slack}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
+      DISCORD_TOKEN: ${DISCORD_TOKEN:-}
+      DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:-}
+      SECRET_ENVELOPE_KEY: ${SECRET_ENVELOPE_KEY:-}
+      # Split mode (M6): with the shared token set, the gateway talks HTTP to
+      # the orchestrator and needs no database at all.
+      DEVSPACE_INTERNAL_TOKEN: ${DEVSPACE_INTERNAL_TOKEN:-}
+      ORCHESTRATOR_URL: ${DEVSPACE_INTERNAL_TOKEN:+http://orchestrator:4000}
     ports:
       - '4002:4002'
 

@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CommandRunner } from './cli.js';
 import { createScriptedExecStream } from './exec.js';
-import { DockerRuntime, dockerExecArgs, dockerInspectArgs, dockerRmArgs } from './runtime.js';
+import {
+  DockerRuntime,
+  dockerExecArgs,
+  dockerInspectArgs,
+  dockerInspectNetworksArgs,
+  dockerRmArgs,
+  parseContainerIp,
+} from './runtime.js';
 
 describe('docker argv builders', () => {
   it('builds an interactive exec with cwd/user/env', () => {
@@ -81,5 +88,58 @@ describe('DockerRuntime', () => {
     const rt = new DockerRuntime(runner);
     expect(await rt.exists('live')).toBe(true);
     expect(await rt.exists('gone')).toBe(false);
+  });
+});
+
+describe('parseContainerIp (M6 preview)', () => {
+  const NETWORKS = JSON.stringify({
+    bridge: { IPAddress: '172.17.0.3' },
+    devspace_env_1: { IPAddress: '172.29.0.2' },
+  });
+
+  it('builds the inspect argv', () => {
+    expect(dockerInspectNetworksArgs('c1')).toEqual([
+      'inspect',
+      '--format',
+      '{{json .NetworkSettings.Networks}}',
+      'c1',
+    ]);
+  });
+
+  it('prefers the named per-env network', () => {
+    expect(parseContainerIp(NETWORKS, 'devspace_env_1')).toBe('172.29.0.2');
+  });
+
+  it('returns null when the named network is absent or unaddressed', () => {
+    expect(parseContainerIp(NETWORKS, 'nope')).toBeNull();
+    expect(parseContainerIp(JSON.stringify({ n: { IPAddress: '' } }), 'n')).toBeNull();
+  });
+
+  it('falls back to the first addressed network when unnamed', () => {
+    expect(parseContainerIp(NETWORKS)).toBe('172.17.0.3');
+    expect(
+      parseContainerIp(JSON.stringify({ a: { IPAddress: '' }, b: { IPAddress: '10.0.0.9' } })),
+    ).toBe('10.0.0.9');
+  });
+
+  it('is total: junk, null, and shapeless JSON all map to null', () => {
+    expect(parseContainerIp('not json')).toBeNull();
+    expect(parseContainerIp('null')).toBeNull();
+    expect(parseContainerIp('{}')).toBeNull();
+    expect(parseContainerIp('{"n": "weird"}')).toBeNull();
+  });
+
+  it('DockerRuntime.containerIp parses the runner output (and null on failure)', async () => {
+    const runner: CommandRunner = {
+      run: vi.fn(async (_c, args) => ({
+        code: (args as string[]).includes('gone') ? 1 : 0,
+        stdout: NETWORKS,
+        stderr: '',
+      })),
+      stream: vi.fn(),
+    };
+    const rt = new DockerRuntime(runner);
+    expect(await rt.containerIp('c1', 'devspace_env_1')).toBe('172.29.0.2');
+    expect(await rt.containerIp('gone')).toBeNull();
   });
 });

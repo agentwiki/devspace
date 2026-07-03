@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import type { RenderCommand } from '@devspace/contracts';
 import {
+  REPO_PICKER_CALLBACK_ID,
+  SECRETS_CALLBACK_ID,
   actionsBlocks,
   chunkText,
   homeView,
   messageBlocks,
+  parseRepoPickerSubmission,
+  parseSecretsSubmission,
   renderCommandBlocks,
+  repoPickerModal,
+  secretsModal,
   statusBlocks,
   streamBlocks,
 } from './blocks.js';
@@ -156,5 +162,52 @@ describe('homeView', () => {
     expect(rendered).toContain('<https://github.com/o/r>');
     expect(rendered).toContain('<https://github.com/o/r/pull/7|PR>');
     expect(rendered).toContain('(no repository)');
+  });
+});
+
+describe('modals (M6-D)', () => {
+  it('secretsModal carries the thread ref and one optional input per storable name', () => {
+    const view = secretsModal('C1:1712.0002');
+    expect(view.callback_id).toBe(SECRETS_CALLBACK_ID);
+    expect(view.private_metadata).toBe('C1:1712.0002');
+    const inputs = view.blocks.filter((b) => b.type === 'input');
+    expect(inputs.map((b) => (b as { block_id: string }).block_id)).toEqual([
+      'llm_key',
+      'github_token',
+      'github_clone_token',
+    ]);
+    expect(inputs.every((b) => (b as { optional: boolean }).optional)).toBe(true);
+  });
+
+  it('repoPickerModal requires the repo and keeps ref optional', () => {
+    const view = repoPickerModal('C1');
+    expect(view.callback_id).toBe(REPO_PICKER_CALLBACK_ID);
+    const byId = new Map(view.blocks.map((b) => [(b as { block_id?: string }).block_id, b]));
+    expect((byId.get('repo') as { optional: boolean }).optional).toBe(false);
+    expect((byId.get('ref') as { optional: boolean }).optional).toBe(true);
+  });
+
+  it('parseSecretsSubmission keeps only filled fields, trimmed', () => {
+    expect(
+      parseSecretsSubmission({
+        llm_key: { value: { value: '  sk-1  ' } },
+        github_token: { value: { value: '' } },
+        github_clone_token: { value: { value: null } },
+      }),
+    ).toEqual([{ name: 'LLM_KEY', value: 'sk-1' }]);
+    expect(parseSecretsSubmission({})).toEqual([]);
+  });
+
+  it('parseRepoPickerSubmission joins repo and optional ref', () => {
+    expect(
+      parseRepoPickerSubmission({
+        repo: { value: { value: 'acme/widgets' } },
+        ref: { value: { value: 'main' } },
+      }),
+    ).toBe('acme/widgets main');
+    expect(parseRepoPickerSubmission({ repo: { value: { value: 'acme/widgets' } } })).toBe(
+      'acme/widgets',
+    );
+    expect(parseRepoPickerSubmission({})).toBe('');
   });
 });

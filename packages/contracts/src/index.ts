@@ -154,7 +154,7 @@ export type FsEntry = z.infer<typeof FsEntrySchema>;
 /* Agent Runner: ACP-backed sessions + normalized event stream                 */
 /* -------------------------------------------------------------------------- */
 
-export const AgentKindSchema = z.enum(['codex']);
+export const AgentKindSchema = z.enum(['codex', 'claude']);
 export type AgentKind = z.infer<typeof AgentKindSchema>;
 
 export const CreateAgentSessionRequestSchema = z.object({
@@ -258,8 +258,29 @@ export const ChatEventSchema = z.discriminatedUnion('type', [
     actionId: z.string().describe('stable id, e.g. "create-pr" | "view-pr" | "approve:<reqId>"'),
     payload: z.record(z.unknown()).default({}),
   }),
+  // M6: in-chat secret entry (m6-plan Decision 8). The value flows the same
+  // authed path as every other event, straight into the envelope store; the
+  // name whitelist is enforced at the contract so nothing else is storable.
+  z.object({
+    type: z.literal('secret.submitted'),
+    conversationId: ConversationIdSchema,
+    userId: UserIdSchema,
+    name: z.enum(['LLM_KEY', 'GITHUB_TOKEN', 'GITHUB_CLONE_TOKEN']),
+    value: z.string().min(1).describe('secret plaintext — stored encrypted, never logged/echoed'),
+  }),
 ]);
 export type ChatEvent = z.infer<typeof ChatEventSchema>;
+
+/**
+ * Result of routing a ChatEvent: `conversation.created` yields the created id
+ * so the adapter can bind its platform thread (M4 Decision 1); other events
+ * carry nothing. Formalized as a schema in M6 so the split's `POST
+ * /chat-events` response is a contract, not an ad-hoc shape.
+ */
+export const ChatEventResultSchema = z.object({
+  conversationId: ConversationIdSchema.optional(),
+});
+export type ChatEventResult = z.infer<typeof ChatEventResultSchema>;
 
 export const ActionButtonSchema = z.object({
   actionId: z.string(),
@@ -369,6 +390,22 @@ export const WorkUnitSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 export type WorkUnit = z.infer<typeof WorkUnitSchema>;
+
+/**
+ * One session as shown in list surfaces (Slack App Home, `GET /sessions`):
+ * a conversation joined with its work unit's current state (M6, the M4
+ * App-Home deferral).
+ */
+export const SessionSummarySchema = z.object({
+  conversationId: ConversationIdSchema,
+  platform: ChatPlatformSchema,
+  externalChannelId: z.string(),
+  state: WorkStateSchema,
+  repoUrl: z.string().url().optional(),
+  prUrl: z.string().url().optional(),
+  updatedAt: z.string().datetime(),
+});
+export type SessionSummary = z.infer<typeof SessionSummarySchema>;
 
 /* -------------------------------------------------------------------------- */
 /* Internal event bus envelope (orchestrator <- providers)                     */

@@ -41,8 +41,22 @@ export interface ChatRenderer {
   openStream(conversationId: string): Promise<StreamHandle>;
 }
 
+/**
+ * Parse the `!port <n>` thread convention shared by every adapter (m6-plan
+ * Decision 6): a matching message becomes `action.invoked` with
+ * `expose-port:<n>` instead of a plain agent prompt. Null = not a port command.
+ */
+export function parsePortCommand(text: string): number | null {
+  const m = /^!port\s+(\d{1,5})\s*$/.exec(text.trim());
+  if (!m) return null;
+  const port = Number(m[1]);
+  return port > 0 && port <= 65535 ? port : null;
+}
+
 export * from './binding.js';
 export * from './status.js';
 export * from './slack/blocks.js';
 export * from './adapters/slack.js';
 export * from './adapters/discord.js';
+export * from './discord/messages.js';
+export * from './discord/transport.js';

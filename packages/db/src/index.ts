@@ -53,6 +53,9 @@ export interface ConversationRepo {
     platform: string,
     externalChannelId: string,
   ): Promise<ConversationRecord | null>;
+  /** A user's conversations on one platform — the App Home session-list read
+   * (M6, the M4 deferral). Newest first. */
+  listByUser(platform: string, userId: string): Promise<ConversationRecord[]>;
 }
 
 export interface WorkUnitRepo {
@@ -155,6 +158,11 @@ export function createInMemoryRepositories(
           if (rec.platform === platform && rec.externalChannelId === externalChannelId) return rec;
         }
         return null;
+      },
+      async listByUser(platform, userId) {
+        return [...conversations.values()]
+          .filter((rec) => rec.platform === platform && rec.userId === userId)
+          .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
       },
     },
     workUnits: {

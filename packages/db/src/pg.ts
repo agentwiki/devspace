@@ -10,7 +10,7 @@
  * state — it can never be misreported as an illegal transition.
  */
 import { randomUUID } from 'node:crypto';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import type { Pool } from 'pg';
 import type { WorkUnit } from '@devspace/contracts';
@@ -134,6 +134,14 @@ export function createPostgresRepositories(pool: Pool): Repositories {
             ),
           );
         return row ? mapConversation(row) : null;
+      },
+      async listByUser(platform, userId) {
+        const rows = await db
+          .select()
+          .from(conversations)
+          .where(and(eq(conversations.platform, platform), eq(conversations.userId, userId)))
+          .orderBy(desc(conversations.createdAt));
+        return rows.map(mapConversation);
       },
     },
 

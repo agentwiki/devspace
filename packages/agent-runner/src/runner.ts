@@ -27,6 +27,7 @@ import type { AcpSession } from './acp/connection.js';
 import { connectAgent } from './acp/connection.js';
 import type { AgentBackend } from './backends/codex.js';
 import { AGENT_RUNTIME_PATH, codexBackend } from './backends/codex.js';
+import { claudeBackend } from './backends/claude.js';
 import type { GuardTurnOptions } from './budget.js';
 import { guardTurn } from './budget.js';
 import type { GuardrailPolicy } from './guardrails.js';
@@ -43,7 +44,7 @@ export type SecretResolver = (ref: string) => Promise<string | undefined>;
 
 export interface AgentRunnerDeps {
   exec: ExecProvider;
-  /** Backends by AgentKind. Defaults to `{ codex }`. */
+  /** Backends by AgentKind. Defaults to `{ codex, claude }` (M6-E). */
   backends?: Record<string, AgentBackend>;
   /** Resolve `llmKeyRef` -> key. When omitted, the key is assumed pre-injected. */
   resolveSecret?: SecretResolver;
@@ -80,7 +81,10 @@ export class DefaultAgentRunner implements AgentRunner {
 
   constructor(deps: AgentRunnerDeps) {
     this.exec = deps.exec;
-    this.backends = deps.backends ?? { [codexBackend.kind]: codexBackend };
+    this.backends = deps.backends ?? {
+      [codexBackend.kind]: codexBackend,
+      [claudeBackend.kind]: claudeBackend,
+    };
     this.resolveSecret = deps.resolveSecret;
     this.onLog = deps.onLog ?? (() => {});
     this.policy = deps.policy ?? DEFAULT_POLICY;

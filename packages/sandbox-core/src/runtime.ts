@@ -23,6 +23,12 @@ export interface ContainerRuntime {
   exists(containerId: string): Promise<boolean>;
   /** Remove a per-env network created at provision time (M5 hardening). */
   removeNetwork?(name: string): Promise<void>;
+  /**
+   * The container's IP as seen from the host — on `networkName` when given
+   * (the M5 per-env network), else the first attached network with an
+   * address. Null when the container has no usable address (M6 preview).
+   */
+  containerIp?(containerId: string, networkName?: string): Promise<string | null>;
 }
 
 /**
@@ -56,6 +62,44 @@ export const dockerInspectArgs = (containerId: string): string[] => [
   containerId,
 ];
 
+export const dockerInspectNetworksArgs = (containerId: string): string[] => [
+  'inspect',
+  '--format',
+  '{{json .NetworkSettings.Networks}}',
+  containerId,
+];
+
+/**
+ * Parse `docker inspect --format '{{json .NetworkSettings.Networks}}'` output
+ * into the container's IP. Prefers `networkName` when given (the M5 per-env
+ * network — the address the host can actually reach); otherwise the first
+ * network with a non-empty address. Pure and total: malformed JSON or no
+ * address → null, never throw.
+ */
+export function parseContainerIp(stdout: string, networkName?: string): string | null {
+  let networks: unknown;
+  try {
+    networks = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (typeof networks !== 'object' || networks === null) return null;
+  const entries = Object.entries(networks as Record<string, unknown>);
+  const ipOf = (value: unknown): string | null => {
+    const ip = (value as { IPAddress?: unknown } | null)?.IPAddress;
+    return typeof ip === 'string' && ip.length > 0 ? ip : null;
+  };
+  if (networkName !== undefined) {
+    const named = entries.find(([name]) => name === networkName);
+    return named ? ipOf(named[1]) : null;
+  }
+  for (const [, value] of entries) {
+    const ip = ipOf(value);
+    if (ip) return ip;
+  }
+  return null;
+}
+
 export interface DockerRuntimeOptions {
   /** Path/name of the docker binary. */
   dockerPath?: string;
@@ -87,5 +131,11 @@ export class DockerRuntime implements ContainerRuntime {
 
   async removeNetwork(name: string): Promise<void> {
     await runOrThrow(this.runner, this.docker, dockerNetworkRmArgs(name));
+  }
+
+  async containerIp(containerId: string, networkName?: string): Promise<string | null> {
+    const result = await this.runner.run(this.docker, dockerInspectNetworksArgs(containerId));
+    if (result.code !== 0) return null;
+    return parseContainerIp(result.stdout, networkName);
   }
 }

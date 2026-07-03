@@ -25,6 +25,12 @@ Self-hostable "Claude Code on the web."
   Event bus: Postgres LISTEN/NOTIFY + durable `events` table (MVP) -> NATS later
 ```
 
+Since M6 the gateway⇄orchestrator edge has a real transport: an internal HTTP
+API (`POST /chat-events` up, `POST /render` down, shared-bearer-token auth)
+cut at exactly those two seam functions — the in-process demo wiring and the
+two-service split are the same graph, differing only in transport
+(docs/m6-plan.md, workstream A).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

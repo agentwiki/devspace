@@ -449,9 +449,7 @@ describe('DiscordAdapter /sessions', () => {
       interactionId: 'i7',
     });
     expect(seen).toEqual(['U7']);
-    expect(h.transport.ephemeral).toEqual([
-      { interactionId: 'i7', ...sessionListBody(sessions) },
-    ]);
+    expect(h.transport.ephemeral).toEqual([{ interactionId: 'i7', ...sessionListBody(sessions) }]);
     expect(h.transport.posted).toEqual([]);
     expect(h.events).toEqual([]); // gateway UI only — no orchestrator event
   });

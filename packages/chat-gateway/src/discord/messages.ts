@@ -90,7 +90,11 @@ export function sessionListBody(sessions: HomeSession[]): DiscordMessageBody {
   }
   const header = `**Sessions** (${sessions.length})`;
   const lines = sessions.map((s) =>
-    [`**${s.state}**`, s.repoUrl ? `<${s.repoUrl}>` : '(no repository)', s.prUrl && `[PR](${s.prUrl})`]
+    [
+      `**${s.state}**`,
+      s.repoUrl ? `<${s.repoUrl}>` : '(no repository)',
+      s.prUrl && `[PR](${s.prUrl})`,
+    ]
       .filter(Boolean)
       .join(' · '),
   );

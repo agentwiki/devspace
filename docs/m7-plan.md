@@ -120,7 +120,7 @@ caveats):
   over the flat `fields` record.
 - Transport seam: `DiscordSlashEvent`/`DiscordButtonEvent` gain
   `interactionId`; new `DiscordModalSubmitEvent { customId, userId, fields }`
-  + `modalSubmit` handler; transport gains `openModal(interactionId, modal)`.
+  - `modalSubmit` handler; transport gains `openModal(interactionId, modal)`.
 - Adapter: `set-secrets` button → `openModal(secretsModal)` (replacing the
   M6 "Slack-only" hint); bare `/devspace` → `openModal(repoPickerModal)`;
   `modalSubmit` routes by custom_id prefix — secrets → binding lookup + one

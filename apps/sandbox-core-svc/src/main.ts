@@ -27,6 +27,7 @@ import {
   createSandboxUpgradeHandler,
   envStateStoreFromEnv,
   hardeningFromEnv,
+  hostBudgetsFromEnv,
   internalTlsFromEnv,
   maxEnvsFromEnv,
   nodeCommandRunner,
@@ -87,12 +88,25 @@ if (previewOptions) {
 const maxEnvs = maxEnvsFromEnv(process.env);
 if (maxEnvs !== undefined) console.log(`[${SERVICE}] capacity cap: ${maxEnvs} live env(s)`);
 
+// Host-side resource backstop (M14): SANDBOX_CPU_BUDGET / SANDBOX_MEM_BUDGET
+// refuse admission past the summed live grants — with N controllers placing
+// onto this host, their per-controller arithmetic is no longer authoritative
+// (m14-plan Decision 6).
+const budgets = hostBudgetsFromEnv(process.env);
+if (budgets) {
+  console.log(
+    `[${SERVICE}] resource budget: cpu=${budgets.cpu ?? 'unbudgeted'} mem=${
+      budgets.memMB !== undefined ? `${budgets.memMB}MB` : 'unbudgeted'
+    }`,
+  );
+}
+
 // Durable env table (M11): with SANDBOX_STATE_DIR set, this host's env table
 // — pool marks included — survives a restart. Recovery runs BEFORE the
 // listener, so the first fleet census / orphan sweep already sees what was
 // re-adopted; without the var, the documented in-memory posture is unchanged.
 const stateStore = envStateStoreFromEnv(process.env);
-const core = new DevcontainerSandboxCore({ hardening, preview, maxEnvs, stateStore });
+const core = new DevcontainerSandboxCore({ hardening, preview, maxEnvs, budgets, stateStore });
 if (stateStore) {
   const { recovered, discarded, skipped } = await core.recover();
   console.log(

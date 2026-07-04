@@ -113,6 +113,9 @@ describe('host restart composition (M11 over M9/M10)', () => {
     expect(claimed.status).toBe('ready');
     expect(claimed.poolKey).toBeUndefined();
     expect(after.provisioner.count()).toBe(0);
+    // Join the refill the claim kicked, so no background provision races the
+    // state-dir cleanup.
+    await poolAfter.fill();
   });
 
   it('a container that died with the host is discarded, and fill() replaces it', async () => {

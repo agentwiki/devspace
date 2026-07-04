@@ -9,9 +9,11 @@ import type { Provisioner, ProvisionResult } from './provision.js';
 import {
   DevcontainerSandboxCore,
   SandboxError,
+  hostBudgetsFromEnv,
   maxEnvsFromEnv,
   parseFindOutput,
 } from './sandbox.js';
+import type { HostBudgets } from './sandbox.js';
 
 /**
  * An in-memory fake container: `exec` runs a tiny hand-written interpreter over
@@ -135,6 +137,7 @@ function makeCore(
   provisionResult: Partial<ProvisionResult> = {},
   opts: {
     maxEnvs?: number;
+    budgets?: HostBudgets;
     stateStore?: EnvStateStore;
     exists?: () => Promise<boolean>;
   } = {},
@@ -187,6 +190,7 @@ function makeCore(
       preview,
       runner,
       maxEnvs: opts.maxEnvs,
+      budgets: opts.budgets,
       stateStore: opts.stateStore,
     }),
     container,
@@ -476,6 +480,67 @@ describe('capacity truth (M9)', () => {
     expect(maxEnvsFromEnv({ SANDBOX_MAX_ENVS: '8' })).toBe(8);
     for (const raw of ['0', '-1', 'many', '2.5']) {
       expect(() => maxEnvsFromEnv({ SANDBOX_MAX_ENVS: raw })).toThrow('positive integer');
+    }
+  });
+
+  it('refuses createEnvironment past the cpu budget, naming the numbers (M14)', async () => {
+    const { core } = makeCore(new FakeContainer(), {}, { budgets: { cpu: 3 } });
+    await core.createEnvironment({ resources: { cpu: 2, memMB: 1024, diskMB: 1024 } });
+    // 2 of 3 cores granted; another 2-core grant does not fit.
+    await expect(
+      core.createEnvironment({ resources: { cpu: 2, memMB: 1024, diskMB: 1024 } }),
+    ).rejects.toMatchObject({
+      code: 'PROVISION_FAILED',
+      message: expect.stringContaining('cpu budget exhausted (2 of 3 cores granted; requested 2)'),
+    });
+    // A 1-core grant still fits exactly.
+    await expect(
+      core.createEnvironment({ resources: { cpu: 1, memMB: 1024, diskMB: 1024 } }),
+    ).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('refuses past the memory budget and frees it on destroy (M14)', async () => {
+    const { core } = makeCore(new FakeContainer(), {}, { budgets: { memMB: 4096 } });
+    const env = await core.createEnvironment({ resources: { cpu: 1, memMB: 3072, diskMB: 1024 } });
+    await expect(
+      core.createEnvironment({ resources: { cpu: 1, memMB: 2048, diskMB: 1024 } }),
+    ).rejects.toMatchObject({
+      code: 'PROVISION_FAILED',
+      message: expect.stringContaining('memory budget exhausted (3072 of 4096 MB'),
+    });
+    // Destroy frees the grant along with the slot.
+    await core.destroyEnvironment(env.envId);
+    await expect(
+      core.createEnvironment({ resources: { cpu: 1, memMB: 2048, diskMB: 1024 } }),
+    ).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('an omitted resources block weighs the schema defaults against budgets', async () => {
+    // Contract defaults: cpu 2 / 4096 MB — what the provisioner actually
+    // applies when a request says nothing (M12).
+    const { core } = makeCore(new FakeContainer(), {}, { budgets: { cpu: 3, memMB: 8192 } });
+    await core.createEnvironment({});
+    await expect(core.createEnvironment({})).rejects.toMatchObject({
+      code: 'PROVISION_FAILED',
+      message: expect.stringContaining('cpu budget exhausted'),
+    });
+  });
+
+  it('hostBudgetsFromEnv parses each knob, rejects garbage, undefined when unset', () => {
+    expect(hostBudgetsFromEnv({})).toBeUndefined();
+    expect(hostBudgetsFromEnv({ SANDBOX_CPU_BUDGET: ' ', SANDBOX_MEM_BUDGET: '' })).toBeUndefined();
+    expect(hostBudgetsFromEnv({ SANDBOX_CPU_BUDGET: '16' })).toEqual({ cpu: 16 });
+    expect(hostBudgetsFromEnv({ SANDBOX_CPU_BUDGET: '1.5' })).toEqual({ cpu: 1.5 });
+    expect(hostBudgetsFromEnv({ SANDBOX_MEM_BUDGET: '65536' })).toEqual({ memMB: 65536 });
+    expect(hostBudgetsFromEnv({ SANDBOX_CPU_BUDGET: '8', SANDBOX_MEM_BUDGET: '32768' })).toEqual({
+      cpu: 8,
+      memMB: 32768,
+    });
+    for (const raw of ['0', '-2', 'lots']) {
+      expect(() => hostBudgetsFromEnv({ SANDBOX_CPU_BUDGET: raw })).toThrow('positive cores');
+    }
+    for (const raw of ['0', '-1', 'big', '2.5']) {
+      expect(() => hostBudgetsFromEnv({ SANDBOX_MEM_BUDGET: raw })).toThrow('positive MB integer');
     }
   });
 });

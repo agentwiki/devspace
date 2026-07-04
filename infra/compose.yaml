@@ -64,6 +64,9 @@ services:
       # orchestrator pre-provisions matching envs and a session on that repo
       # claims one in milliseconds. Unset: every create is a cold provision.
       SANDBOX_WARM_POOLS: ${SANDBOX_WARM_POOLS:-}
+      # Multi-controller (M14): names this instance in bus claim diagnostics
+      # when several orchestrators share one database. Unset: a per-boot id.
+      DEVSPACE_INSTANCE_ID: ${DEVSPACE_INSTANCE_ID:-}
     ports:
       - '4000:4000'
 
@@ -89,6 +92,10 @@ services:
       # Host-side capacity backstop (M9): cap live envs at this host no
       # matter what the placement layer believes. Unset: uncapped (pre-M9).
       SANDBOX_MAX_ENVS: ${SANDBOX_MAX_ENVS:-}
+      # Host-side resource backstop (M14): refuse admission past the summed
+      # live env grants — cores / MB. Unset: unenforced (pre-M14).
+      SANDBOX_CPU_BUDGET: ${SANDBOX_CPU_BUDGET:-}
+      SANDBOX_MEM_BUDGET: ${SANDBOX_MEM_BUDGET:-}
       # Durable env table (M11): point at a persistent path (mount a volume)
       # and this host's env table — pool marks included — survives a restart.
       # Unset: the documented in-memory posture (pre-M11).

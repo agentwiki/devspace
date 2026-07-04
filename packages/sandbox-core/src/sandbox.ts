@@ -98,6 +98,14 @@ export class DevcontainerSandboxCore implements SandboxCore {
   /** Host-side cap on live envs (M9, m9-plan Decision 3); undefined = uncapped. */
   private readonly maxEnvs?: number;
 
+  /**
+   * Host-side resource budgets (M14, m14-plan Decision 6): the M12 grant
+   * budgets, enforced where they are physical — no number of mis-counting
+   * controllers can jointly oversubscribe this host. Each undefined
+   * dimension is unenforced.
+   */
+  private readonly budgets?: HostBudgets;
+
   /** Durable env table (M11); absent = the documented in-memory posture. */
   private readonly stateStore?: EnvStateStore;
 
@@ -106,6 +114,7 @@ export class DevcontainerSandboxCore implements SandboxCore {
       runner?: CommandRunner;
       hardening?: SandboxHardening;
       maxEnvs?: number;
+      budgets?: HostBudgets;
       gitPath?: string;
       stateStore?: EnvStateStore;
     },
@@ -118,6 +127,7 @@ export class DevcontainerSandboxCore implements SandboxCore {
       deps?.provisioner ?? new DevcontainerProvisioner(runner, { hardening: deps?.hardening });
     this.preview = deps?.preview;
     this.maxEnvs = deps?.maxEnvs;
+    this.budgets = deps?.budgets;
     this.stateStore = deps?.stateStore;
   }
 
@@ -127,15 +137,34 @@ export class DevcontainerSandboxCore implements SandboxCore {
     const req = CreateEnvironmentRequestSchema.parse(input);
     // The host-side backstop for a mis-counting (freshly restarted) placement
     // layer: live envs, not records — stopped/failed history never blocks.
-    if (this.maxEnvs !== undefined) {
+    if (this.maxEnvs !== undefined || this.budgets !== undefined) {
       const live = [...this.envs.values()].filter(
         (r) => r.env.status === 'provisioning' || r.env.status === 'ready',
-      ).length;
-      if (live >= this.maxEnvs) {
+      );
+      if (this.maxEnvs !== undefined && live.length >= this.maxEnvs) {
         throw new SandboxError(
           'PROVISION_FAILED',
-          `host at capacity (${live}/${this.maxEnvs} live environments)`,
+          `host at capacity (${live.length}/${this.maxEnvs} live environments)`,
         );
+      }
+      // Resource budgets (M14): sum the grants this host echoed on its own
+      // live envs (M12 resource truth — durable across restarts since M11)
+      // plus the request's grant; refuse when any declared budget overflows.
+      if (this.budgets !== undefined) {
+        const cpuUsed = live.reduce((sum, r) => sum + (r.env.resources?.cpu ?? 0), 0);
+        const memUsed = live.reduce((sum, r) => sum + (r.env.resources?.memMB ?? 0), 0);
+        if (this.budgets.cpu !== undefined && cpuUsed + req.resources.cpu > this.budgets.cpu) {
+          throw new SandboxError(
+            'PROVISION_FAILED',
+            `host cpu budget exhausted (${cpuUsed} of ${this.budgets.cpu} cores granted; requested ${req.resources.cpu})`,
+          );
+        }
+        if (this.budgets.memMB !== undefined && memUsed + req.resources.memMB > this.budgets.memMB) {
+          throw new SandboxError(
+            'PROVISION_FAILED',
+            `host memory budget exhausted (${memUsed} of ${this.budgets.memMB} MB granted; requested ${req.resources.memMB})`,
+          );
+        }
       }
     }
     const envId = `env_${randomUUID()}`;
@@ -479,6 +508,45 @@ export function maxEnvsFromEnv(env: Record<string, string | undefined>): number 
     throw new Error(`SANDBOX_MAX_ENVS must be a positive integer, got "${raw}"`);
   }
   return Number(raw);
+}
+
+/** Host-side resource budgets (M14); each undefined dimension is unenforced. */
+export interface HostBudgets {
+  /** Cpu budget in cores — the sum of live env grants may not exceed it. */
+  cpu?: number;
+  /** Memory budget in MB. */
+  memMB?: number;
+}
+
+/**
+ * Host budgets from the environment (`SANDBOX_CPU_BUDGET` cores,
+ * `SANDBOX_MEM_BUDGET` MB); undefined when neither is set. Config errors
+ * throw — a typo'd budget must fail at boot, not silently run unenforced
+ * (the SANDBOX_MAX_ENVS precedent, and the same units/validation as the
+ * fleet's `cpu=`/`mem=` host flags).
+ */
+export function hostBudgetsFromEnv(
+  env: Record<string, string | undefined>,
+): HostBudgets | undefined {
+  const cpuRaw = env.SANDBOX_CPU_BUDGET?.trim();
+  const memRaw = env.SANDBOX_MEM_BUDGET?.trim();
+  let cpu: number | undefined;
+  let memMB: number | undefined;
+  if (cpuRaw) {
+    const value = Number(cpuRaw);
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error(`SANDBOX_CPU_BUDGET must be positive cores, got "${cpuRaw}"`);
+    }
+    cpu = value;
+  }
+  if (memRaw) {
+    if (!/^\d+$/.test(memRaw) || Number(memRaw) < 1) {
+      throw new Error(`SANDBOX_MEM_BUDGET must be a positive MB integer, got "${memRaw}"`);
+    }
+    memMB = Number(memRaw);
+  }
+  if (cpu === undefined && memMB === undefined) return undefined;
+  return { ...(cpu !== undefined ? { cpu } : {}), ...(memMB !== undefined ? { memMB } : {}) };
 }
 
 /**

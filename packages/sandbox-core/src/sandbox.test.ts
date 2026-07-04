@@ -4,7 +4,7 @@ import { toBase64 } from './exec.js';
 import type { ExecStream } from './exec.js';
 import type { ContainerRuntime } from './runtime.js';
 import type { Provisioner, ProvisionResult } from './provision.js';
-import { DevcontainerSandboxCore, SandboxError, parseFindOutput } from './sandbox.js';
+import { DevcontainerSandboxCore, SandboxError, maxEnvsFromEnv, parseFindOutput } from './sandbox.js';
 
 /**
  * An in-memory fake container: `exec` runs a tiny hand-written interpreter over
@@ -107,7 +107,11 @@ function scriptStream(
   };
 }
 
-function makeCore(container = new FakeContainer(), provisionResult: Partial<ProvisionResult> = {}) {
+function makeCore(
+  container = new FakeContainer(),
+  provisionResult: Partial<ProvisionResult> = {},
+  opts: { maxEnvs?: number } = {},
+) {
   const destroy = vi.fn(async () => {});
   const removeNetwork = vi.fn(async () => {});
   const containerIp = vi.fn(async () => '172.29.0.2');
@@ -138,7 +142,7 @@ function makeCore(container = new FakeContainer(), provisionResult: Partial<Prov
     })),
   };
   return {
-    core: new DevcontainerSandboxCore({ runtime, provisioner, preview }),
+    core: new DevcontainerSandboxCore({ runtime, provisioner, preview, maxEnvs: opts.maxEnvs }),
     container,
     destroy,
     removeNetwork,
@@ -247,6 +251,50 @@ describe('DevcontainerSandboxCore lifecycle', () => {
     const { core } = makeCore();
     const env = await core.createEnvironment({});
     await expect(core.fsRead(env.envId, '/missing')).rejects.toMatchObject({ code: 'EXEC_FAILED' });
+  });
+});
+
+describe('capacity truth (M9)', () => {
+  it('lists every environment the core knows, live or not', async () => {
+    const { core, provisioner } = makeCore();
+    const a = await core.createEnvironment({});
+    const b = await core.createEnvironment({});
+    await core.destroyEnvironment(b.envId);
+    (provisioner.provision as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'));
+    await core.createEnvironment({}).catch(() => {});
+
+    const listed = await core.listEnvironments();
+    expect(listed).toHaveLength(3);
+    expect(listed.map((e) => e.status).sort()).toEqual(['failed', 'ready', 'stopped']);
+    expect(listed.map((e) => e.envId)).toContain(a.envId);
+  });
+
+  it('refuses createEnvironment at the live-env cap, naming the numbers', async () => {
+    const { core } = makeCore(new FakeContainer(), {}, { maxEnvs: 2 });
+    await core.createEnvironment({});
+    await core.createEnvironment({});
+    await expect(core.createEnvironment({})).rejects.toMatchObject({
+      code: 'PROVISION_FAILED',
+      message: expect.stringContaining('at capacity (2/2'),
+    });
+  });
+
+  it('frees a slot on destroy and ignores dead records', async () => {
+    const { core, provisioner } = makeCore(new FakeContainer(), {}, { maxEnvs: 1 });
+    const env = await core.createEnvironment({});
+    await core.destroyEnvironment(env.envId); // stopped: no longer live
+    (provisioner.provision as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'));
+    await core.createEnvironment({}).catch(() => {}); // failed: never live
+    await expect(core.createEnvironment({})).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('maxEnvsFromEnv parses, rejects garbage, and is undefined when unset', () => {
+    expect(maxEnvsFromEnv({})).toBeUndefined();
+    expect(maxEnvsFromEnv({ SANDBOX_MAX_ENVS: ' ' })).toBeUndefined();
+    expect(maxEnvsFromEnv({ SANDBOX_MAX_ENVS: '8' })).toBe(8);
+    for (const raw of ['0', '-1', 'many', '2.5']) {
+      expect(() => maxEnvsFromEnv({ SANDBOX_MAX_ENVS: raw })).toThrow('positive integer');
+    }
   });
 });
 

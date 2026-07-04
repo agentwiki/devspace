@@ -33,6 +33,9 @@ function fakeCore(overrides: Partial<SandboxCore> = {}): SandboxCore {
     async getEnvironment(envId) {
       return readyEnv(envId);
     },
+    async listEnvironments() {
+      return [readyEnv('env_listed')];
+    },
     async destroyEnvironment() {},
     async exec() {
       return createScriptedExecStream([{ kind: 'exit', code: 0 }]);
@@ -123,6 +126,21 @@ describe('remote JSON control surface', () => {
   it('returns null for a missing environment', async () => {
     const { client } = await startLoopback(fakeCore({ getEnvironment: async () => null }));
     expect(await client.getEnvironment('nope')).toBeNull();
+  });
+
+  it('round-trips the env-table list (the M9 census read)', async () => {
+    const { client } = await startLoopback(
+      fakeCore({
+        async listEnvironments() {
+          return [readyEnv('env_1'), { ...readyEnv('env_2'), status: 'stopped' as const }];
+        },
+      }),
+    );
+    const listed = await client.listEnvironments();
+    expect(listed.map((e) => [e.envId, e.status])).toEqual([
+      ['env_1', 'ready'],
+      ['env_2', 'stopped'],
+    ]);
   });
 
   it('round-trips fs ops (binary-safe) and ports', async () => {

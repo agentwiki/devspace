@@ -108,6 +108,11 @@ async function handle(
       return sendJson(res, 201, await core.createEnvironment(body));
     }
 
+    // The census/ops read (M9): the host's env table, as it stands.
+    if (method === 'GET' && segments.length === 1) {
+      return sendJson(res, 200, await core.listEnvironments());
+    }
+
     if (envId) {
       if (method === 'GET' && segments.length === 2) {
         const env = await core.getEnvironment(envId);

@@ -78,6 +78,12 @@ export class RemoteSandboxCore implements SandboxCore {
     return EnvironmentSchema.parse(JSON.parse(res.text));
   }
 
+  async listEnvironments(): Promise<Environment[]> {
+    const res = await this.request('GET', '/environments');
+    if (res.status !== 200) throw this.toError(res, 'EXEC_FAILED');
+    return (JSON.parse(res.text) as unknown[]).map((e) => EnvironmentSchema.parse(e));
+  }
+
   async destroyEnvironment(envId: string): Promise<void> {
     const res = await this.request('DELETE', `/environments/${encodeURIComponent(envId)}`);
     if (res.status !== 204) throw this.toError(res, 'EXEC_FAILED');

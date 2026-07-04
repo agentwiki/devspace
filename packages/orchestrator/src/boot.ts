@@ -138,7 +138,7 @@ export async function bootOrchestrator(
         'sandboxHosts is incompatible with sandboxHardening/preview — configure them on each sandbox host',
       );
     }
-    sandbox = new MultiHostSandboxCore(
+    const fleet = new MultiHostSandboxCore(
       sandboxHosts.map((h) => ({
         name: h.name,
         capacity: h.capacity,
@@ -146,6 +146,17 @@ export async function bootOrchestrator(
         core: new RemoteSandboxCore(h.url, token),
       })),
     );
+    // Fleet census (M9): re-learn live envs BEFORE the first placement so a
+    // restart never zeroes counted load. A down host warns — lazy cold-miss
+    // rediscovery still covers it — but never blocks the whole control plane.
+    const census = await fleet.adoptFleet();
+    if (census.adopted > 0) {
+      console.log(`[orchestrator] fleet census adopted ${census.adopted} live env(s)`);
+    }
+    for (const failure of census.failures) {
+      console.error(`[orchestrator] fleet census: host ${failure.host} unreachable: ${failure.error}`);
+    }
+    sandbox = fleet;
   } else {
     // Hardening is boot-time host policy; a configured runtime class (gVisor/
     // Kata) must exist on the daemon or we refuse to serve at all.

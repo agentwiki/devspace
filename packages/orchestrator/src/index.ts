@@ -30,7 +30,7 @@ import {
 } from '@devspace/contracts';
 import type { EventRecord, Repositories, WorkUnitRepo } from '@devspace/db';
 import { IllegalTransitionError } from '@devspace/db';
-import type { SandboxCore } from '@devspace/sandbox-core';
+import { SandboxError, type SandboxCore } from '@devspace/sandbox-core';
 import type { AgentRunner } from '@devspace/agent-runner';
 import { agentRuntimeMount } from '@devspace/agent-runner';
 import { classifyAction, WorkUnitMachine } from './stateMachine.js';
@@ -810,13 +810,24 @@ export class Orchestrator {
    * the spot (m18-plan Decision 1). A warning is stale iff it predates the
    * idle clock's last-alive instant, so tenant activity invalidates it
    * without anything ever clearing the column (Decision 2).
+   *
+   * With `prOpenEnvTtlMs` set (M18), PR_OPEN units idle past the TTL lose
+   * their ENVIRONMENT only — the partial-destroy path the M17 exemption
+   * priced (m18-plan Decisions 4–6): destroy tolerating only NOT_FOUND
+   * (`envId` is the control plane's sole pointer to the container — a
+   * swallowed transient failure would leak it with no retry), then clear
+   * `envId` + `agentSessionId`, audit `env.released`, and post one notice
+   * AFTER the fact. The unit keeps its state, secrets, and PR fields, so
+   * the reconciler, webhook, merge/close announcement, and terminal grace
+   * all proceed unchanged.
    */
   async reapExpired(
-    policy: Pick<ReapPolicy, 'idleTtlMs' | 'idleWarnMs' | 'terminalGraceMs'>,
+    policy: Pick<ReapPolicy, 'idleTtlMs' | 'idleWarnMs' | 'terminalGraceMs' | 'prOpenEnvTtlMs'>,
     nowMs: number = Date.now(),
-  ): Promise<{ reaped: number; warned: number; failed: number }> {
+  ): Promise<{ reaped: number; warned: number; released: number; failed: number }> {
     let reaped = 0;
     let warned = 0;
+    let released = 0;
     let failed = 0;
 
     // The idle clock (M17): a fresh transition counts as life; pre-M17 rows
@@ -878,6 +889,47 @@ export class Orchestrator {
       }
     }
 
+    if (policy.prOpenEnvTtlMs !== undefined) {
+      const ttl = policy.prOpenEnvTtlMs;
+      for (const wu of await this.workUnits.listByState('PR_OPEN')) {
+        if (!wu.envId) continue; // already released (or never provisioned)
+        if (nowMs - lastAliveMs(wu) < ttl) continue;
+        try {
+          // Destroy strictly, tolerating only "already gone" (m18-plan
+          // Decision 4): unlike teardown's best-effort swallow, a released
+          // unit lives on and its envId is the only pointer the control
+          // plane holds — clearing it past a swallowed transient failure
+          // would leak the container with no retry.
+          try {
+            await this.deps.sandbox.destroyEnvironment(wu.envId);
+          } catch (err) {
+            if (!(err instanceof SandboxError && err.code === 'NOT_FOUND')) throw err;
+          }
+          await this.workUnits.releaseEnv(wu.id);
+          const conv = await this.deps.repos.conversations.get(wu.conversationId);
+          await this.audit('env.released', {
+            userId: conv?.userId,
+            conversationId: wu.conversationId,
+            workUnitId: wu.id,
+            detail: { envId: wu.envId, reason: 'idle' },
+          });
+          // The notice states an accomplished fact, AFTER the release — a
+          // destroy retried next sweep must not re-announce.
+          await this.emit(
+            messageCommand(
+              wu.conversationId,
+              'Environment released while the PR is under review — merge/close updates ' +
+                'continue; start a new conversation for further changes.',
+              this.registryFor(wu.conversationId),
+            ),
+          );
+          released += 1;
+        } catch {
+          failed += 1; // envId intact — the next sweep retries the destroy
+        }
+      }
+    }
+
     if (policy.terminalGraceMs !== undefined) {
       const grace = policy.terminalGraceMs;
       for (const state of TERMINAL_REAP_STATES) {
@@ -892,7 +944,7 @@ export class Orchestrator {
         }
       }
     }
-    return { reaped, warned, failed };
+    return { reaped, warned, released, failed };
   }
 
   /* ---------------------------------------------------------------------- */

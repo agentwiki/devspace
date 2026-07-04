@@ -185,8 +185,10 @@ export async function start(config: Config = loadConfig()): Promise<BootedServic
       ? `[${SERVICE}] lifecycle reaper on (idleTtlMs=${config.reapPolicy.idleTtlMs ?? 'off'}, ` +
           `idleWarnMs=${config.reapPolicy.idleWarnMs ?? 'off'}, ` +
           `terminalGraceMs=${config.reapPolicy.terminalGraceMs ?? 'off'}, ` +
+          `prOpenEnvTtlMs=${config.reapPolicy.prOpenEnvTtlMs ?? 'off'}, ` +
           `intervalMs=${config.reapPolicy.intervalMs})`
-      : `[${SERVICE}] DEVSPACE_IDLE_TTL_MS / DEVSPACE_TERMINAL_GRACE_MS unset — lifecycle reaper off`,
+      : `[${SERVICE}] DEVSPACE_IDLE_TTL_MS / DEVSPACE_TERMINAL_GRACE_MS / ` +
+          `DEVSPACE_PR_OPEN_ENV_TTL_MS unset — lifecycle reaper off`,
   );
 
   return {

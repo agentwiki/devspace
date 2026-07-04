@@ -17,7 +17,8 @@ import type { WorkState } from '@devspace/contracts';
  * lifecycle belongs to GitHub — tearing it down would delete the token the
  * poll reconciler needs and skip the unit past the merge/close it is waiting
  * for. The webhook/poll advances it to a terminal state; the grace collects
- * it there.
+ * it there. Since M18 the exemption's env COST is covered separately:
+ * `prOpenEnvTtlMs` releases just the environment while the unit lives on.
  */
 export const IDLE_REAP_STATES: readonly WorkState[] = [
   'CREATED',
@@ -42,6 +43,13 @@ export interface ReapPolicy {
   idleWarnMs?: number;
   /** Tear down a terminal unit unchanged for this long. */
   terminalGraceMs?: number;
+  /**
+   * Release the ENVIRONMENT of a PR_OPEN unit idle this long (M18): the
+   * container, per-env network, and preview routes go; the unit, its
+   * secrets, and the merge/close announcement stay. The partial-destroy
+   * path the M17 PR_OPEN exemption priced (m18-plan Decisions 4–6).
+   */
+  prOpenEnvTtlMs?: number;
   /** Sweep cadence (also the election lease's renewal tick). */
   intervalMs: number;
 }
@@ -58,6 +66,7 @@ export function reapPolicyFromEnv(env: Record<string, string | undefined>): Reap
   const idleTtlMs = positiveIntFromEnv(env, 'DEVSPACE_IDLE_TTL_MS');
   const idleWarnMs = positiveIntFromEnv(env, 'DEVSPACE_IDLE_WARN_MS');
   const terminalGraceMs = positiveIntFromEnv(env, 'DEVSPACE_TERMINAL_GRACE_MS');
+  const prOpenEnvTtlMs = positiveIntFromEnv(env, 'DEVSPACE_PR_OPEN_ENV_TTL_MS');
   const intervalMs = positiveIntFromEnv(env, 'DEVSPACE_REAP_INTERVAL_MS');
   if (idleWarnMs !== undefined && idleTtlMs === undefined) {
     throw new Error(
@@ -70,11 +79,12 @@ export function reapPolicyFromEnv(env: Record<string, string | undefined>): Reap
         `(${idleTtlMs}) — the warning window opens before the TTL, not around it`,
     );
   }
-  if (idleTtlMs === undefined && terminalGraceMs === undefined) {
+  if (idleTtlMs === undefined && terminalGraceMs === undefined && prOpenEnvTtlMs === undefined) {
     if (intervalMs !== undefined) {
       throw new Error(
-        'DEVSPACE_REAP_INTERVAL_MS is set but neither DEVSPACE_IDLE_TTL_MS nor ' +
-          'DEVSPACE_TERMINAL_GRACE_MS is — the interval alone reaps nothing',
+        'DEVSPACE_REAP_INTERVAL_MS is set but none of DEVSPACE_IDLE_TTL_MS, ' +
+          'DEVSPACE_TERMINAL_GRACE_MS, or DEVSPACE_PR_OPEN_ENV_TTL_MS is — the ' +
+          'interval alone reaps nothing',
       );
     }
     return undefined;
@@ -83,6 +93,7 @@ export function reapPolicyFromEnv(env: Record<string, string | undefined>): Reap
     idleTtlMs,
     idleWarnMs,
     terminalGraceMs,
+    prOpenEnvTtlMs,
     intervalMs: intervalMs ?? DEFAULT_REAP_INTERVAL_MS,
   };
 }

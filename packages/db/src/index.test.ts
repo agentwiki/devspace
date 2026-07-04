@@ -124,6 +124,30 @@ describe('in-memory repositories', () => {
     await expect(repos.workUnits.markIdleWarned('missing')).resolves.toBeUndefined();
   });
 
+  it('releaseEnv clears envId + agentSessionId and nothing else (M18)', async () => {
+    const repos = createInMemoryRepositories();
+    const conv = await repos.conversations.create({
+      platform: 'slack',
+      externalChannelId: 'chan-r',
+      userId: 'u1',
+    });
+    const wu = await repos.workUnits.create({
+      conversationId: conv.id,
+      envId: 'env_9',
+      agentSessionId: 'as_9',
+    });
+
+    await repos.workUnits.releaseEnv(wu.id);
+    const after = await repos.workUnits.get(wu.id);
+    expect(after?.envId).toBeUndefined();
+    expect(after?.agentSessionId).toBeUndefined();
+    expect(after?.state).toBe(wu.state); // not a transition
+    expect(after?.updatedAt).toBe(wu.updatedAt); // the idle clock does not move
+
+    // Releasing a missing unit is a no-op.
+    await expect(repos.workUnits.releaseEnv('missing')).resolves.toBeUndefined();
+  });
+
   it('rejects an illegal transition', async () => {
     const repos = createInMemoryRepositories();
     const conv = await repos.conversations.create({

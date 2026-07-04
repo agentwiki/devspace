@@ -226,6 +226,12 @@ export function createPostgresRepositories(pool: Pool): Repositories {
           .set({ idleWarnedAt: sql`now()` })
           .where(eq(workUnits.id, id));
       },
+      async releaseEnv(id) {
+        await db
+          .update(workUnits)
+          .set({ envId: null, agentSessionId: null })
+          .where(eq(workUnits.id, id));
+      },
     },
 
     secrets: {

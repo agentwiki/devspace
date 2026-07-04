@@ -84,6 +84,9 @@ services:
       # requires the idle TTL and must be smaller.
       DEVSPACE_IDLE_WARN_MS: ${DEVSPACE_IDLE_WARN_MS:-}
       DEVSPACE_TERMINAL_GRACE_MS: ${DEVSPACE_TERMINAL_GRACE_MS:-}
+      # Release the env of a PR_OPEN unit idle this long (M18); the unit,
+      # secrets, and merge/close flow survive the release.
+      DEVSPACE_PR_OPEN_ENV_TTL_MS: ${DEVSPACE_PR_OPEN_ENV_TTL_MS:-}
       DEVSPACE_REAP_INTERVAL_MS: ${DEVSPACE_REAP_INTERVAL_MS:-}
     ports:
       - '4000:4000'

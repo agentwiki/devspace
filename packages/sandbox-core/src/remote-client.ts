@@ -30,6 +30,7 @@ import {
 import { ExecFrameSchema } from '@devspace/contracts';
 import { encodeStdin, fromBase64, toBase64 } from './exec.js';
 import type { ExecStream } from './exec.js';
+import { clientTlsOptions, type InternalTlsIdentity } from './internal-tls.js';
 import { FrameChannel } from './process-stream.js';
 import {
   EXEC_UPGRADE_PROTOCOL,
@@ -43,6 +44,12 @@ import { SandboxError } from './sandbox.js';
 import type { SandboxCore } from './sandbox.js';
 
 export interface RemoteSandboxCoreOptions {
+  /**
+   * Mutual-TLS mode (M13): dial with this identity and verify the host
+   * presents the expected service name (default `sandbox-core`). Requires an
+   * https:// base url; mutually exclusive with the bearer token.
+   */
+  tls?: InternalTlsIdentity & { expectService?: string };
   /** Watermarks for the client-side inbound frame channel (tests). */
   highWaterMark?: number;
   lowWaterMark?: number;
@@ -57,13 +64,31 @@ interface JsonResponse {
 
 export class RemoteSandboxCore implements SandboxCore {
   private readonly base: string;
+  /** TLS connection options in mTLS mode; undefined in token mode. */
+  private readonly tls?: ReturnType<typeof clientTlsOptions>;
 
   constructor(
     baseUrl: string,
-    private readonly token: string,
+    private readonly token: string | undefined,
     private readonly opts: RemoteSandboxCoreOptions = {},
   ) {
     this.base = baseUrl.replace(/\/+$/, '');
+    // One auth regime, always authed (m13-plan Decision 1 / m8-plan Decision 5).
+    if (token && opts.tls) {
+      throw new Error('RemoteSandboxCore: bearer token and internal TLS are mutually exclusive');
+    }
+    if (!token && !opts.tls) {
+      throw new Error('RemoteSandboxCore requires a bearer token or an internal TLS identity');
+    }
+    if (opts.tls) {
+      if (!this.base.startsWith('https://')) {
+        throw new Error(`internal TLS requires an https:// sandbox host url, got ${baseUrl}`);
+      }
+      this.tls = clientTlsOptions({
+        ...opts.tls,
+        expectService: opts.tls.expectService ?? 'sandbox-core',
+      });
+    }
   }
 
   async createEnvironment(req: CreateEnvironmentRequest): Promise<Environment> {
@@ -139,6 +164,11 @@ export class RemoteSandboxCore implements SandboxCore {
 
   /* ------------------------------------------------------------------------ */
 
+  /** The auth header rides only in token mode; TLS mode authenticates itself. */
+  private headers(extra: Record<string, string> = {}): Record<string, string> {
+    return this.token ? { authorization: `Bearer ${this.token}`, ...extra } : extra;
+  }
+
   /** One JSON request over node:http(s); no timeout by design (see header). */
   private request(method: string, path: string, body?: unknown): Promise<JsonResponse> {
     return new Promise((resolve, reject) => {
@@ -146,10 +176,8 @@ export class RemoteSandboxCore implements SandboxCore {
       const dial = url.protocol === 'https:' ? httpsRequest : httpRequest;
       const req = dial(url, {
         method,
-        headers: {
-          authorization: `Bearer ${this.token}`,
-          'content-type': 'application/json',
-        },
+        headers: this.headers({ 'content-type': 'application/json' }),
+        ...this.tls,
       });
       req.on('response', (res) => {
         const chunks: Buffer[] = [];
@@ -191,11 +219,11 @@ export class RemoteSandboxCore implements SandboxCore {
       const dial = url.protocol === 'https:' ? httpsRequest : httpRequest;
       const req = dial(url, {
         method: 'GET',
-        headers: {
+        headers: this.headers({
           connection: 'Upgrade',
           upgrade: EXEC_UPGRADE_PROTOCOL,
-          authorization: `Bearer ${this.token}`,
-        },
+        }),
+        ...this.tls,
       });
       req.on('upgrade', (_res, socket, head) => {
         // The server speaks only after our first line, but keep any early

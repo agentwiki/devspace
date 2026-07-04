@@ -80,7 +80,7 @@ Out (seeded to M14+, with rationale):
    sandbox host A can impersonate host B to the orchestrator — is accepted
    and documented (all hosts share the `sandbox-core` identity; see Risks).
 4. **A second listener, not TLS on the existing port.** `requestCert +
-   rejectUnauthorized` is the right posture for the internal surface and the
+rejectUnauthorized` is the right posture for the internal surface and the
    wrong one for `/health` (a k8s/compose probe has no client cert) and for
    GitHub webhooks (GitHub terminates plain TLS and signs with HMAC — M5's
    verified ingress). Splitting listeners keeps the mTLS surface fail-closed

@@ -21,6 +21,8 @@ export * from './hardening.js';
 export * from './runtime.js';
 export * from './provision.js';
 export * from './sandbox.js';
+export * from './internal-tls.js';
+export * from './test-tls.js';
 export * from './remote-protocol.js';
 export * from './remote-server.js';
 export * from './remote-client.js';

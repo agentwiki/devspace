@@ -9,6 +9,13 @@
  * open — the pre-M8 local ops/debug posture — but the exec stream refuses to
  * serve: a full-duplex exec that injects per-env secrets never runs
  * unauthenticated.
+ *
+ * M13 (m13-plan Decisions 1/5): alternatively, `tls.allow` puts the surface in
+ * mutual-TLS mode — mount the handlers on an `https.Server` built from
+ * `serverTlsOptions` and every route except `/health` requires an
+ * authenticated peer whose service name is allowlisted; the exec/secrets gates
+ * accept the transport auth. Token and TLS together are refused at
+ * construction: one auth regime per deployment, never both.
  */
 import { STATUS_CODES } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -27,6 +34,7 @@ import type { ErrorCode, ExecFrame } from '@devspace/contracts';
 import { z } from 'zod';
 import { captureExec, fromBase64, toBase64 } from './exec.js';
 import type { ExecStream } from './exec.js';
+import { peerAllowed, peerServiceName } from './internal-tls.js';
 import { FrameChannel } from './process-stream.js';
 import {
   EXEC_UPGRADE_PROTOCOL,
@@ -55,6 +63,12 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
 export interface SandboxServerOptions {
   /** Shared internal bearer (DEVSPACE_INTERNAL_TOKEN). See Decision 5. */
   token?: string;
+  /**
+   * Mutual-TLS mode (M13): the peer service names this surface serves.
+   * Requires the handlers to be mounted on an `https.Server` built from
+   * `serverTlsOptions`; mutually exclusive with `token`.
+   */
+  tls?: { allow: string[] };
   /** Service name echoed by /health. */
   service?: string;
   onLog?: (line: string) => void;
@@ -75,19 +89,35 @@ export function createSandboxRequestHandler(
   core: SandboxCore,
   opts: SandboxServerOptions = {},
 ): (req: IncomingMessage, res: ServerResponse) => void {
+  assertOneAuthRegime(opts);
   const service = opts.service ?? 'sandbox-core';
   return (req, res) => {
-    handle(core, service, opts.token, req, res).catch((err) => sendError(res, err));
+    handle(core, service, opts, req, res).catch((err) => sendError(res, err));
   };
+}
+
+/** Token and TLS together are refused loudly (m13-plan Decision 1). */
+function assertOneAuthRegime(opts: SandboxServerOptions): void {
+  if (opts.token && opts.tls) {
+    throw new Error(
+      'DEVSPACE_INTERNAL_TOKEN and internal TLS are mutually exclusive — one auth regime per deployment',
+    );
+  }
+}
+
+/** Is this exec/secrets-grade route allowed to serve at all? (Decision 5 + M13.) */
+function transportAuthed(opts: SandboxServerOptions): boolean {
+  return Boolean(opts.token || opts.tls);
 }
 
 async function handle(
   core: SandboxCore,
   service: string,
-  token: string | undefined,
+  opts: SandboxServerOptions,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
+  const token = opts.token;
   const url = new URL(req.url ?? '/', 'http://localhost');
   const segments = url.pathname.split('/').filter(Boolean);
   const method = req.method ?? 'GET';
@@ -96,8 +126,16 @@ async function handle(
     return sendJson(res, 200, { status: 'ok', service });
   }
 
-  // Everything but /health sits behind the bearer once a token is configured.
-  if (token && !verifyBearer(req.headers.authorization, token)) {
+  // Everything but /health sits behind the peer check in TLS mode, or behind
+  // the bearer once a token is configured.
+  if (opts.tls) {
+    if (!peerAllowed(req, opts.tls.allow)) {
+      return sendJson(res, 403, {
+        code: 'FORBIDDEN',
+        message: `peer service ${peerServiceName(req) ?? '(unauthenticated)'} is not allowed here`,
+      });
+    }
+  } else if (token && !verifyBearer(req.headers.authorization, token)) {
     return sendJson(res, 401, { code: 'UNAUTHORIZED', message: 'bad or missing bearer token' });
   }
 
@@ -127,12 +165,13 @@ async function handle(
       }
       if (method === 'POST' && segments[2] === 'exec') {
         // Exec injects per-env secrets, so — like the upgrade stream — it
-        // never serves unauthenticated (Decision 5); fs/lifecycle stay open
-        // as the local ops surface they have been since M1.
-        if (!token) {
+        // never serves unauthenticated (Decision 5; transport auth counts,
+        // M13); fs/lifecycle stay open as the local ops surface they have
+        // been since M1.
+        if (!transportAuthed(opts)) {
           return sendJson(res, 503, {
             code: 'INTERNAL',
-            message: 'exec requires DEVSPACE_INTERNAL_TOKEN',
+            message: 'exec requires DEVSPACE_INTERNAL_TOKEN or internal TLS',
           });
         }
         const execReq = ExecRequestSchema.parse(await readJson(req));
@@ -142,10 +181,10 @@ async function handle(
       if (method === 'POST' && segments[2] === 'secrets') {
         // Secret plaintext, so the same line as exec (Decision 5): never
         // served on the open tokenless surface.
-        if (!token) {
+        if (!transportAuthed(opts)) {
           return sendJson(res, 503, {
             code: 'INTERNAL',
-            message: 'applySecrets requires DEVSPACE_INTERNAL_TOKEN',
+            message: 'applySecrets requires DEVSPACE_INTERNAL_TOKEN or internal TLS',
           });
         }
         const { secrets } = ApplySecretsRequestSchema.parse(await readJson(req));
@@ -202,6 +241,7 @@ export function createSandboxUpgradeHandler(
   core: SandboxCore,
   opts: SandboxServerOptions = {},
 ): (req: IncomingMessage, socket: Socket, head: Buffer) => void {
+  assertOneAuthRegime(opts);
   const onLog = opts.onLog ?? (() => {});
   return (req, socket, head) => {
     serveUpgrade(core, opts, req, socket, head).catch((err) => {
@@ -225,11 +265,26 @@ async function serveUpgrade(
   if (!match || upgrade !== EXEC_UPGRADE_PROTOCOL) {
     return refuse(socket, 404, 'NOT_FOUND', `no upgrade route for ${url.pathname}`);
   }
-  // The exec stream NEVER serves unauthenticated (Decision 5).
-  if (!opts.token) {
-    return refuse(socket, 503, 'INTERNAL', 'exec stream requires DEVSPACE_INTERNAL_TOKEN');
+  // The exec stream NEVER serves unauthenticated (Decision 5; transport auth
+  // counts, M13). All refusals still answer BEFORE the 101.
+  if (!transportAuthed(opts)) {
+    return refuse(
+      socket,
+      503,
+      'INTERNAL',
+      'exec stream requires DEVSPACE_INTERNAL_TOKEN or internal TLS',
+    );
   }
-  if (!verifyBearer(req.headers.authorization, opts.token)) {
+  if (opts.tls) {
+    if (!peerAllowed(req, opts.tls.allow)) {
+      return refuse(
+        socket,
+        403,
+        'FORBIDDEN',
+        `peer service ${peerServiceName(req) ?? '(unauthenticated)'} is not allowed here`,
+      );
+    }
+  } else if (!verifyBearer(req.headers.authorization, opts.token!)) {
     return refuse(socket, 401, 'UNAUTHORIZED', 'bad or missing bearer token');
   }
 

@@ -59,6 +59,10 @@ services:
       # DEVSPACE_INTERNAL_TOKEN). Unset: the zero-config in-process sandbox
       # (M4) is unchanged.
       SANDBOX_HOSTS: ${SANDBOX_HOSTS:-}
+      # Live utilization ranking (M16), fleet mode only: sample every host's
+      # GET /stats on this cadence and demote measurably hot hosts in the
+      # placement ranking (admission stays on grants). Unset/0: off.
+      SANDBOX_STATS_INTERVAL_MS: ${SANDBOX_STATS_INTERVAL_MS:-}
       # Warm pools (M9): comma-separated repoUrl[#ref]=size entries, e.g.
       # SANDBOX_WARM_POOLS=https://github.com/acme/widgets.git#main=2 — the
       # orchestrator pre-provisions matching envs and a session on that repo

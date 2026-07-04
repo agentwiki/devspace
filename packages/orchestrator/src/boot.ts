@@ -34,6 +34,7 @@ import {
   nodeCommandRunner,
   previewProxyFromEnv,
   sandboxHostsFromEnv,
+  statsIntervalFromEnv,
   warmKeepOnStopFromEnv,
   warmPoolsFromEnv,
   type EnvStateStore,
@@ -131,6 +132,13 @@ export interface OrchestratorBootConfig {
    * the orchestrator provisions with, so a matching create claims a warm env.
    */
   warmPools?: WarmPoolConfig[];
+  /**
+   * Fleet utilization sampling cadence in ms (M16). Defaults to
+   * `statsIntervalFromEnv(process.env)` (SANDBOX_STATS_INTERVAL_MS); fleet
+   * mode only — placement ranking then weighs fresh live usage alongside
+   * grants. Unset/0 = off (the pure M12 grant ranking).
+   */
+  statsIntervalMs?: number;
 }
 
 export interface BootedOrchestrator {
@@ -160,6 +168,7 @@ export async function bootOrchestrator(
   const sandboxHosts = config.sandboxHosts ?? sandboxHostsFromEnv(process.env);
   let sandbox: SandboxCore;
   let preview: PreviewProxy | undefined;
+  let stopStatsSampling: (() => void) | undefined;
   if (sandboxHosts?.length) {
     const token = config.internalToken ?? process.env.DEVSPACE_INTERNAL_TOKEN;
     const tls = config.internalTls ?? internalTlsFromEnv(process.env);
@@ -190,6 +199,7 @@ export async function bootOrchestrator(
         draining: h.draining,
         core: new RemoteSandboxCore(h.url, token, tls ? { tls } : {}),
       })),
+      { onLog: (line) => console.log(`[orchestrator] fleet: ${line}`) },
     );
     // Fleet census (M9): re-learn live envs BEFORE the first placement so a
     // restart never zeroes counted load. A down host warns — lazy cold-miss
@@ -202,6 +212,14 @@ export async function bootOrchestrator(
       console.error(
         `[orchestrator] fleet census: host ${failure.host} unreachable: ${failure.error}`,
       );
+    }
+    // Live utilization sampling (M16): with a cadence configured, ranking
+    // weighs each host's fresh measured heat alongside its grants. Off by
+    // default; admission never consults it either way.
+    const statsIntervalMs = config.statsIntervalMs ?? statsIntervalFromEnv(process.env);
+    if (statsIntervalMs) {
+      stopStatsSampling = fleet.startStatsSampling(statsIntervalMs);
+      console.log(`[orchestrator] fleet utilization sampling every ${statsIntervalMs}ms`);
     }
     sandbox = fleet;
   } else {
@@ -314,6 +332,7 @@ export async function bootOrchestrator(
       // after a crash the next boot's fill() re-adopts them by pool mark,
       // M10) — unless SANDBOX_WARM_KEEP_ON_STOP hands them to the fleet (M15).
       await warm?.stop();
+      stopStatsSampling?.();
       await bus.stop();
       await preview?.stop();
     },

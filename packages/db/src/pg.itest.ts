@@ -55,7 +55,9 @@ suite('postgres repositories', () => {
 
   // Isolate every test from the others and from prior runs.
   afterEach(async () => {
-    await pool.query('TRUNCATE audit_log, events, secrets, work_units, conversations CASCADE');
+    await pool.query(
+      'TRUNCATE audit_log, events, leases, secrets, work_units, conversations CASCADE',
+    );
   });
 
   it('round-trips conversations, work units, secrets, and events', async () => {
@@ -239,6 +241,45 @@ suite('postgres repositories', () => {
       evt.id,
     ]);
     expect(await repos.events.claim(evt.id, 'ctrl-x', 60_000)).toBeNull();
+  });
+
+  it('lease acquire is atomic: one winner, renewal, expiry reclaim, release (M15)', async () => {
+    const repos = createPostgresRepositories(pool);
+
+    // Two controllers race the same role; exactly one upsert can win.
+    const [a, b] = await Promise.all([
+      repos.leases.acquire('pr-reconciler', 'ctrl-a', 60_000),
+      repos.leases.acquire('pr-reconciler', 'ctrl-b', 60_000),
+    ]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+    const holder = a ? 'ctrl-a' : 'ctrl-b';
+    const loser = a ? 'ctrl-b' : 'ctrl-a';
+    expect((await repos.leases.get('pr-reconciler'))?.holder).toBe(holder);
+
+    // The holder renews (tenure preserved); the loser stays locked out.
+    const before = await repos.leases.get('pr-reconciler');
+    expect(await repos.leases.acquire('pr-reconciler', holder, 60_000)).toBe(true);
+    const after = await repos.leases.get('pr-reconciler');
+    expect(after?.acquiredAt).toBe(before?.acquiredAt);
+    expect(Date.parse(after!.renewedAt)).toBeGreaterThanOrEqual(Date.parse(before!.renewedAt));
+    expect(await repos.leases.acquire('pr-reconciler', loser, 60_000)).toBe(false);
+
+    // An expired lease is presumed crashed: re-grantable, takeover resets tenure.
+    await pool.query(
+      `UPDATE leases SET renewed_at = now() - interval '10 minutes' WHERE name = $1`,
+      ['pr-reconciler'],
+    );
+    expect(await repos.leases.acquire('pr-reconciler', loser, 60_000)).toBe(true);
+    const taken = await repos.leases.get('pr-reconciler');
+    expect(taken?.holder).toBe(loser);
+    expect(taken?.acquiredAt).not.toBe(before?.acquiredAt);
+
+    // A non-holder release no-ops; the holder's frees the role immediately.
+    await repos.leases.release('pr-reconciler', holder);
+    expect((await repos.leases.get('pr-reconciler'))?.holder).toBe(loser);
+    await repos.leases.release('pr-reconciler', loser);
+    expect(await repos.leases.get('pr-reconciler')).toBeNull();
+    expect(await repos.leases.acquire('pr-reconciler', holder, 60_000)).toBe(true);
   });
 
   it('two live buses over one database: each event runs on exactly one (M14)', async () => {

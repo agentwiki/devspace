@@ -52,6 +52,14 @@ tenant's secrets (`applySecrets` — token-gated on the wire like exec), so
 the demo-critical cold-start path collapses from minutes to milliseconds
 (docs/m9-plan.md).
 
+Since M10 the warm stock survives its control plane: every fill is stamped
+with its pool's canonical key (`poolKey`, on the host's env table), so a
+restarted orchestrator's `fill()` re-adopts what its predecessor warmed
+instead of leaking it, and a claim is one host-side operation
+(`claimEnvironment`) that freshens the workspace clone and clears the mark
+before hand-out — the mark is the capability, so a tenant env can never be
+claimed or hard-reset (docs/m10-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

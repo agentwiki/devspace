@@ -403,18 +403,167 @@ describe('MultiHostSandboxCore census (M9)', () => {
   });
 });
 
+describe('weighted placement (M12)', () => {
+  /** A host whose envs echo a fixed resource grant. */
+  function sizedHost(name: string, cpu: number, memMB: number): ReturnType<typeof fakeHost> {
+    const host = fakeHost(name);
+    const create = host.createEnvironment.bind(host);
+    host.createEnvironment = async (req: CreateEnvironmentRequest) => {
+      const env = await create(req);
+      const sized = { ...env, resources: { cpu, memMB, diskMB: 20480 } };
+      host.envs.set(env.envId, sized);
+      return sized;
+    };
+    return host;
+  }
+
+  const sized = (cpu: number, memMB: number): CreateEnvironmentRequest => ({
+    resources: { cpu, memMB, diskMB: 20480 },
+    mounts: [],
+    secrets: [],
+  });
+
+  it('ranks by fractional utilization: the host with more free budget room wins', async () => {
+    // b is bigger; every env is the default grant (2 cores, 4096MB).
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: fakeHost('a'), capacity: 8, cpu: 4, memMB: 65536 },
+      { name: 'b', core: fakeHost('b'), capacity: 8, cpu: 16, memMB: 65536 },
+    ]);
+    expect((await multi.createEnvironment(CREATE)).envId).toContain('_a_'); // tie at 0: config order
+    // a sits at cpu 2/4 = 0.5; b climbs 0.125 → 0.25 → 0.375 — b wins four times.
+    for (let i = 0; i < 4; i++) {
+      expect((await multi.createEnvironment(CREATE)).envId).toContain('_b_');
+    }
+    // b reaches max(4/8, 8/16) = 0.5 = a's score: the tie breaks in config order.
+    expect((await multi.createEnvironment(CREATE)).envId).toContain('_a_');
+    // a is now cpu-full (4/4): the fit-check sends the next one to b.
+    expect((await multi.createEnvironment(CREATE)).envId).toContain('_b_');
+  });
+
+  it('fit-checks admission and refuses with a distinct message when slots exist but nothing fits', async () => {
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: fakeHost('a'), capacity: 8, cpu: 4, memMB: 8192 },
+    ]);
+    await multi.createEnvironment(sized(3, 4096));
+    // An env-count slot is free, but 3+2 cores > 4.
+    const err = await multi.createEnvironment(sized(2, 1024)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SandboxError);
+    expect((err as SandboxError).code).toBe('PROVISION_FAILED');
+    expect((err as SandboxError).message).toContain('fits the requested resources');
+    expect((err as SandboxError).message).toContain('cpu=2');
+    // A smaller request still lands.
+    await multi.createEnvironment(sized(1, 1024));
+  });
+
+  it('the max keeps a cpu-saturated, memory-empty host from winning on an average', async () => {
+    const a = sizedHost('a', 7, 1024); // fills a's cpu, barely touches memory
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: a, capacity: 8, cpu: 8, memMB: 65536 },
+      { name: 'b', core: fakeHost('b'), capacity: 8, cpu: 8, memMB: 65536 },
+    ]);
+    await multi.createEnvironment(sized(7, 1024)); // a: max(1/8, 7/8, tiny) = 0.875
+    // Average would say a (mean ≈ 0.45 vs b's 0); the max says b.
+    expect((await multi.createEnvironment(CREATE)).envId).toContain('_b_');
+  });
+
+  it('concurrent creates reserve their resource footprint, not just a slot', async () => {
+    function slowHost(name: string): SandboxCore {
+      const host = fakeHost(name);
+      const create = host.createEnvironment.bind(host);
+      return {
+        ...host,
+        async createEnvironment(req: CreateEnvironmentRequest) {
+          await new Promise((r) => setTimeout(r, 30));
+          return create(req);
+        },
+        async getEnvironment(envId) {
+          return host.envs.get(envId) ?? null;
+        },
+      };
+    }
+    // Room for exactly one 3-core env: the overlapping second must refuse
+    // even though the env-count capacity (8) has plenty of slots.
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: slowHost('a'), capacity: 8, cpu: 4, memMB: 65536 },
+    ]);
+    const results = await Promise.allSettled([
+      multi.createEnvironment(sized(3, 1024)),
+      multi.createEnvironment(sized(3, 1024)),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(String(rejected.reason)).toContain('fits the requested resources');
+  });
+
+  it('census adoption weighs echoed grants; an echo-less env weighs the defaults', async () => {
+    const big = sizedHost('a', 6, 4096);
+    await big.createEnvironment(sized(6, 4096)); // pre-restart: 6 of a's 8 cores
+    const plain = fakeHost('b');
+    await plain.createEnvironment(CREATE); // echo-less: weighs default 2 cores
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: big, capacity: 8, cpu: 8, memMB: 65536 },
+      { name: 'b', core: plain, capacity: 8, cpu: 8, memMB: 65536 },
+    ]);
+    expect((await multi.adoptFleet()).adopted).toBe(2);
+    // a: 6/8 cpu; b: 2/8 — and a cannot even fit another 4-core env.
+    expect((await multi.createEnvironment(sized(4, 1024))).envId).toContain('_b_');
+    // b: 6/8 now. A 2-core env fits both; b is still fractionally even, a=0.75, b=0.75
+    // — tie goes to config order, but a can only fit 2 more cores: it takes it.
+    expect((await multi.createEnvironment(sized(2, 1024))).envId).toContain('_a_');
+  });
+
+  it('destroy frees the weight along with the slot', async () => {
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: fakeHost('a'), capacity: 8, cpu: 4, memMB: 65536 },
+    ]);
+    const env = await multi.createEnvironment(sized(4, 1024));
+    await expect(multi.createEnvironment(sized(1, 1024))).rejects.toMatchObject({
+      code: 'PROVISION_FAILED',
+    });
+    await multi.destroyEnvironment(env.envId);
+    await multi.createEnvironment(sized(4, 1024));
+  });
+
+  it('a fleet that declares no budgets keeps the M8 count comparator (uniform capacities)', async () => {
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: fakeHost('a'), capacity: 2 },
+      { name: 'b', core: fakeHost('b'), capacity: 2 },
+    ]);
+    const order: string[] = [];
+    for (let i = 0; i < 4; i++) order.push((await multi.createEnvironment(CREATE)).envId);
+    expect(order.map((id) => id.split('_')[1])).toEqual(['a', 'b', 'a', 'b']);
+  });
+});
+
 describe('parseSandboxHosts', () => {
-  it('parses names, urls, capacities, and drain flags', () => {
-    expect(parseSandboxHosts('a=http://h1:4001, b=https://h2:4001/|4|drain')).toEqual([
+  it('parses names, urls, capacities, budgets, and drain flags', () => {
+    expect(
+      parseSandboxHosts(
+        'a=http://h1:4001, b=https://h2:4001/|4|drain, c=http://h3:1|cpu=16|mem=65536',
+      ),
+    ).toEqual([
       { name: 'a', url: 'http://h1:4001', capacity: DEFAULT_HOST_CAPACITY, draining: false },
       { name: 'b', url: 'https://h2:4001', capacity: 4, draining: true },
+      {
+        name: 'c',
+        url: 'http://h3:1',
+        capacity: DEFAULT_HOST_CAPACITY,
+        cpu: 16,
+        memMB: 65536,
+        draining: false,
+      },
     ]);
+    expect(parseSandboxHosts('a=http://h:1|cpu=7.5')[0]?.cpu).toBe(7.5);
   });
 
   it.each([
     ['http://no-name:1', 'not name=url'],
     ['a=not-a-url', 'http(s) url'],
     ['a=http://h:1|banana', 'unknown flag'],
+    ['a=http://h:1|cpu=0', 'cpu budget'],
+    ['a=http://h:1|cpu=lots', 'cpu budget'],
+    ['a=http://h:1|mem=-5', 'mem budget'],
+    ['a=http://h:1|mem=4.5', 'mem budget'],
     ['a=http://h:1,a=http://h2:1', 'unique'],
     ['  ,  ', 'names no hosts'],
   ])('rejects %s', (raw, message) => {

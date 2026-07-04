@@ -119,6 +119,14 @@ export const EnvironmentSchema = z.object({
   createdAt: z.string().datetime(),
   /** Present while the env is unclaimed warm-pool stock (M10). */
   poolKey: z.string().optional(),
+  /**
+   * The resource grant the host applied at provisioning (M12): the request's
+   * limits with schema defaults, i.e. what `--cpus`/`--memory` enforce.
+   * Optional so answers from pre-M12 hosts still parse; consumers weigh an
+   * echo-less env at the contract defaults — the same values its provisioner
+   * actually applied.
+   */
+  resources: ResourceLimitsSchema.optional(),
 });
 export type Environment = z.infer<typeof EnvironmentSchema>;
 

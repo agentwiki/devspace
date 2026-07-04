@@ -1,11 +1,13 @@
 /**
- * Multi-host placement (M8, m8-plan workstream C): compose N named
- * `SandboxCore` hosts behind the same interface. Placement is deliberately
- * dumb (Decision 6): fewest live envs wins, ties break in config order,
- * draining and full hosts are skipped. Routing is sticky and in-memory with
- * cold-miss rediscovery (Decision 7): the remote hosts durably ARE the env
- * table, so an orchestrator restart re-learns its fleet lazily by probing
- * `getEnvironment` instead of orphaning live envs.
+ * Multi-host placement (M8, m8-plan workstream C; weighted in M12): compose N
+ * named `SandboxCore` hosts behind the same interface. Placement admission is
+ * fit-checked per dimension — an env-count slot (the M8/M9 backstop) plus,
+ * when a host declares cpu/memory budgets, room for the request's grant —
+ * and ranking is least fractional utilization (m12-plan Decisions 4–5), ties
+ * in config order, draining and unfit hosts skipped. Routing is sticky and
+ * in-memory with cold-miss rediscovery (M8 Decision 7): the remote hosts
+ * durably ARE the env table, so an orchestrator restart re-learns its fleet
+ * lazily by probing `getEnvironment` instead of orphaning live envs.
  */
 import type {
   CreateEnvironmentRequest,
@@ -14,6 +16,7 @@ import type {
   FsEntry,
   SecretSpec,
 } from '@devspace/contracts';
+import { CreateEnvironmentRequestSchema, ResourceLimitsSchema } from '@devspace/contracts';
 import type { ExecStream } from './exec.js';
 import { SandboxError } from './sandbox.js';
 import type { SandboxCore } from './sandbox.js';
@@ -23,6 +26,10 @@ export interface SandboxHost {
   core: SandboxCore;
   /** Max live envs placed on (or adopted by) this host. */
   capacity: number;
+  /** Cpu budget in cores (M12); undefined = no cpu fit-check on this host. */
+  cpu?: number;
+  /** Memory budget in MB (M12); undefined = no memory fit-check. */
+  memMB?: number;
   /** A draining host takes no new envs but keeps serving its own. */
   draining?: boolean;
 }
@@ -32,21 +39,57 @@ export interface SandboxHostConfig {
   name: string;
   url: string;
   capacity: number;
+  cpu?: number;
+  memMB?: number;
   draining: boolean;
 }
 
 export const DEFAULT_HOST_CAPACITY = 8;
 
+/** The resource footprint an env (or in-flight placement) occupies. */
+interface EnvWeight {
+  cpu: number;
+  memMB: number;
+}
+
+/** A host's occupied load: the env count plus the summed weights. */
+interface HostLoad {
+  count: number;
+  cpu: number;
+  memMB: number;
+}
+
+/**
+ * What an echo-less env weighs (m12-plan Decision 2): the contract defaults —
+ * the same values a pre-M12 host's provisioner actually applied when the
+ * request omitted resources.
+ */
+const DEFAULT_ENV_WEIGHT: EnvWeight = (() => {
+  const { cpu, memMB } = ResourceLimitsSchema.parse({});
+  return { cpu, memMB };
+})();
+
+function weightOf(env: Environment): EnvWeight {
+  const grant = env.resources ?? DEFAULT_ENV_WEIGHT;
+  return { cpu: grant.cpu, memMB: grant.memMB };
+}
+
 export class MultiHostSandboxCore implements SandboxCore {
   private readonly hosts: SandboxHost[];
-  /** envId -> host name; the capacity count is this table grouped by host. */
-  private readonly routes = new Map<string, string>();
+  /**
+   * envId -> owning host + the weight it occupies there; a host's counted
+   * load is this table grouped by host. The weight lives on the route so
+   * eviction/destroy free it exactly when they free the slot (m12-plan
+   * Decision 7) — no second table to drift.
+   */
+  private readonly routes = new Map<string, { host: string; weight: EnvWeight }>();
   /**
    * In-flight placements per host. Provisioning takes minutes, so without a
    * reservation every concurrent create would read the same (stale) load and
-   * pile onto one host past its capacity.
+   * pile onto one host past its capacity — or, since M12, past a budget
+   * (m12-plan Decision 6).
    */
-  private readonly pending = new Map<string, number>();
+  private readonly pending = new Map<string, HostLoad>();
 
   constructor(hosts: SandboxHost[]) {
     if (hosts.length === 0) throw new Error('MultiHostSandboxCore needs at least one host');
@@ -64,7 +107,7 @@ export class MultiHostSandboxCore implements SandboxCore {
 
   /** Where an env lives, if this core knows it (introspection/tests). */
   hostOf(envId: string): string | undefined {
-    return this.routes.get(envId);
+    return this.routes.get(envId)?.host;
   }
 
   /**
@@ -89,21 +132,28 @@ export class MultiHostSandboxCore implements SandboxCore {
   }
 
   async createEnvironment(req: CreateEnvironmentRequest): Promise<Environment> {
-    const host = this.place();
-    this.pending.set(host.name, (this.pending.get(host.name) ?? 0) + 1);
+    // Parse for the schema defaults: the request's grant IS the placement
+    // weight (m12-plan Decision 1), known before any container exists.
+    const parsed = CreateEnvironmentRequestSchema.parse(req);
+    const weight: EnvWeight = { cpu: parsed.resources.cpu, memMB: parsed.resources.memMB };
+    const host = this.place(weight);
+    this.reserve(host.name, weight);
     try {
-      const env = await host.core.createEnvironment(req);
-      this.routes.set(env.envId, host.name);
+      const env = await host.core.createEnvironment(parsed);
+      // Prefer the host's echo (what it actually granted); our own hosts echo
+      // the parsed request back, so this only differs across version skew.
+      this.routes.set(env.envId, {
+        host: host.name,
+        weight: env.resources ? weightOf(env) : weight,
+      });
       return env;
     } finally {
-      const left = (this.pending.get(host.name) ?? 1) - 1;
-      if (left > 0) this.pending.set(host.name, left);
-      else this.pending.delete(host.name);
+      this.release(host.name, weight);
     }
   }
 
   async getEnvironment(envId: string): Promise<Environment | null> {
-    const routed = this.routes.get(envId);
+    const routed = this.routes.get(envId)?.host;
     if (routed) {
       const host = this.hosts.find((h) => h.name === routed)!;
       const env = await host.core.getEnvironment(envId);
@@ -185,43 +235,109 @@ export class MultiHostSandboxCore implements SandboxCore {
    * Only live envs count — a stopped/failed record must not eat capacity —
    * and an existing route wins (ids are host-generated, so a conflict cannot
    * arise from this codebase; first-hit-sticky keeps behavior deterministic).
+   * The env's echoed grant becomes its counted weight (defaults when a
+   * pre-M12 host echoes nothing).
    */
   private adopt(env: Environment, hostName: string): boolean {
     if (env.status !== 'provisioning' && env.status !== 'ready') return false;
     if (this.routes.has(env.envId)) return false;
-    this.routes.set(env.envId, hostName);
+    this.routes.set(env.envId, { host: hostName, weight: weightOf(env) });
     return true;
   }
 
-  /** Least-loaded placement over non-draining hosts with free capacity. */
-  private place(): SandboxHost {
-    const load = new Map<string, number>(this.pending);
-    for (const name of this.routes.values()) load.set(name, (load.get(name) ?? 0) + 1);
+  /** Reserve an in-flight placement's footprint on a host. */
+  private reserve(hostName: string, weight: EnvWeight): void {
+    const load = this.pending.get(hostName) ?? { count: 0, cpu: 0, memMB: 0 };
+    this.pending.set(hostName, {
+      count: load.count + 1,
+      cpu: load.cpu + weight.cpu,
+      memMB: load.memMB + weight.memMB,
+    });
+  }
 
+  /** Release an in-flight reservation (the route now carries it, or it failed). */
+  private release(hostName: string, weight: EnvWeight): void {
+    const load = this.pending.get(hostName);
+    if (!load) return;
+    if (load.count <= 1) this.pending.delete(hostName);
+    else {
+      this.pending.set(hostName, {
+        count: load.count - 1,
+        cpu: load.cpu - weight.cpu,
+        memMB: load.memMB - weight.memMB,
+      });
+    }
+  }
+
+  /** Occupied load per host: in-flight reservations + adopted/placed routes. */
+  private loads(): Map<string, HostLoad> {
+    const loads = new Map<string, HostLoad>();
+    for (const [name, load] of this.pending) loads.set(name, { ...load });
+    for (const { host, weight } of this.routes.values()) {
+      const load = loads.get(host) ?? { count: 0, cpu: 0, memMB: 0 };
+      loads.set(host, {
+        count: load.count + 1,
+        cpu: load.cpu + weight.cpu,
+        memMB: load.memMB + weight.memMB,
+      });
+    }
+    return loads;
+  }
+
+  /**
+   * Weighted least-loaded placement (m12-plan Decisions 4–5). Admission: not
+   * draining, an env-count slot free, and the request's grant fits every
+   * budget the host declares. Ranking: lowest max-fractional utilization over
+   * the host's declared dimensions (count/capacity always; cpu and memory
+   * when budgeted — the max keeps a cpu-saturated, memory-empty host from
+   * winning on an average). Strict `<` keeps ties in config order. The three
+   * refusals stay distinguishable: full, unfit, and draining are different
+   * operator problems.
+   */
+  private place(weight: EnvWeight): SandboxHost {
+    const loads = this.loads();
     let best: SandboxHost | undefined;
-    let bestLoad = Infinity;
-    let anyCapacity = false;
+    let bestScore = Infinity;
+    let anySlot = false;
+    let anyFit = false;
     for (const host of this.hosts) {
-      const current = load.get(host.name) ?? 0;
-      if (current < host.capacity) anyCapacity = true;
-      if (host.draining || current >= host.capacity) continue;
-      if (current < bestLoad) {
+      const load = loads.get(host.name) ?? { count: 0, cpu: 0, memMB: 0 };
+      const hasSlot = load.count < host.capacity;
+      const fits =
+        hasSlot &&
+        (host.cpu === undefined || load.cpu + weight.cpu <= host.cpu) &&
+        (host.memMB === undefined || load.memMB + weight.memMB <= host.memMB);
+      if (hasSlot) anySlot = true;
+      if (fits) anyFit = true;
+      if (host.draining || !fits) continue;
+      const score = Math.max(
+        load.count / host.capacity,
+        host.cpu === undefined ? 0 : load.cpu / host.cpu,
+        host.memMB === undefined ? 0 : load.memMB / host.memMB,
+      );
+      if (score < bestScore) {
         best = host;
-        bestLoad = current;
+        bestScore = score;
       }
     }
     if (best) return best;
+    if (anyFit) {
+      throw new SandboxError(
+        'PROVISION_FAILED',
+        'no sandbox host accepts placements (all non-full hosts are draining)',
+      );
+    }
     throw new SandboxError(
       'PROVISION_FAILED',
-      anyCapacity
-        ? 'no sandbox host accepts placements (all non-full hosts are draining)'
+      anySlot
+        ? `no sandbox host fits the requested resources (cpu=${weight.cpu}, mem=${weight.memMB}MB)`
         : 'no sandbox host has capacity left',
     );
   }
 
   /** Resolve an env's host; on a routing miss, probe the fleet and adopt. */
   private async findHost(envId: string): Promise<SandboxHost | undefined> {
-    const routed = this.routes.get(envId);
+    const routed = this.routes.get(envId)?.host;
     if (routed) return this.hosts.find((h) => h.name === routed);
     return this.probe(envId);
   }
@@ -240,7 +356,7 @@ export class MultiHostSandboxCore implements SandboxCore {
       try {
         const env = await host.core.getEnvironment(envId);
         if (env) {
-          this.routes.set(envId, host.name);
+          this.routes.set(envId, { host: host.name, weight: weightOf(env) });
           return host;
         }
       } catch (err) {
@@ -266,7 +382,8 @@ export class MultiHostSandboxCore implements SandboxCore {
 }
 
 /**
- * Parse `SANDBOX_HOSTS`: comma-separated `name=url[|capacity][|drain]`.
+ * Parse `SANDBOX_HOSTS`: comma-separated
+ * `name=url[|capacity][|cpu=<cores>][|mem=<MB>][|drain]`.
  * Config errors throw — a fleet with a typo'd host must fail at boot, not
  * place envs onto half a fleet (the hardening fail-fast precedent).
  */
@@ -287,17 +404,33 @@ export function parseSandboxHosts(raw: string): SandboxHostConfig[] {
       throw new Error(`SANDBOX_HOSTS entry "${name}" needs an http(s) url, got "${url ?? ''}"`);
     }
     let capacity = DEFAULT_HOST_CAPACITY;
+    let cpu: number | undefined;
+    let memMB: number | undefined;
     let draining = false;
     for (const flag of flags) {
       if (flag === 'drain') {
         draining = true;
+      } else if (flag.startsWith('cpu=')) {
+        const value = Number(flag.slice(4));
+        if (!Number.isFinite(value) || value <= 0) {
+          throw new Error(`SANDBOX_HOSTS entry "${name}": cpu budget must be positive cores`);
+        }
+        cpu = value;
+      } else if (flag.startsWith('mem=')) {
+        const value = flag.slice(4);
+        if (!/^\d+$/.test(value) || Number(value) < 1) {
+          throw new Error(
+            `SANDBOX_HOSTS entry "${name}": mem budget must be a positive MB integer`,
+          );
+        }
+        memMB = Number(value);
       } else if (/^\d+$/.test(flag) && Number(flag) > 0) {
         capacity = Number(flag);
       } else {
         throw new Error(`SANDBOX_HOSTS entry "${name}": unknown flag "${flag}"`);
       }
     }
-    hosts.push({ name, url: url.replace(/\/+$/, ''), capacity, draining });
+    hosts.push({ name, url: url.replace(/\/+$/, ''), capacity, cpu, memMB, draining });
   }
   if (hosts.length === 0) throw new Error('SANDBOX_HOSTS is set but names no hosts');
   const names = new Set(hosts.map((h) => h.name));

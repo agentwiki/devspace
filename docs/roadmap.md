@@ -14,6 +14,7 @@ Expansion IX (multi-controller coordination): **M14.**
 Expansion X (singleton reconciler election): **M15.**
 Expansion XI (live utilization truth + usage-aware ranking): **M16.**
 Expansion XII (work-unit lifecycle reclamation): **M17.**
+Expansion XIII (idle warnings + PR_OPEN env release): **M18.**
 
 ## M0 — Scaffolding (done)
 
@@ -640,7 +641,47 @@ Landed:
   destroy. Wired in orchestrator-svc and the in-process demo; both TTL
   knobs unset = no reaper, byte-for-byte pre-M17.
 
-## M18+ — Expansion XIII
+## M18 — Expansion XIII: idle warnings + PR_OPEN env release (done)
+
+The two reclamation seeds the M17 closeout left unpaid: the tenant heard
+about an idle reap only when it happened, and a PR under review held its
+container for the whole review. Zero new mechanisms — one additive column +
+contract field, two additive repo methods, two knobs, and new phases in the
+sweep the elected reaper already runs. Off by default, independently.
+Design of record: docs/m18-plan.md.
+
+Landed:
+
+- **Idle warnings** — `DEVSPACE_IDLE_WARN_MS` opens a warning window before
+  the idle TTL: one message per idle period ("will be reclaimed in about X —
+  send a message to keep it"), recorded in `work_units.idle_warned_at`
+  (additive migration 0005, written only by `WorkUnitRepo.markIdleWarned`,
+  never cleared — staleness is a comparison against the M17 idle clock, so
+  tenant activity invalidates a warning without a write). With the knob set,
+  **no idle reap ever happens unwarned**: the reap fires only once a warning
+  posted after the last sign of life has stood for the full window — a unit
+  discovered already past the TTL (fresh election, knob just tightened) is
+  warned first and reaped a window later, never on the spot. Warn without
+  TTL and warn ≥ TTL refuse at boot; post-first-mark-second means a failed
+  post retries unmarked and a failed mark re-warns once.
+- **PR_OPEN env release** — `DEVSPACE_PR_OPEN_ENV_TTL_MS` pays the M17
+  exemption's env cost without touching its correctness: a PR_OPEN unit
+  idle past the TTL loses its ENVIRONMENT only (container, per-env network,
+  preview routes), audited as `env.released` and announced after the fact.
+  The destroy tolerates only NOT_FOUND — `envId` is the control plane's
+  sole pointer to the container, so any other failure keeps the pointer and
+  retries next sweep rather than leaking it — then `releaseEnv` nulls
+  `envId` + `agentSessionId` (the ACP session died with the container; a
+  stale id would route a leftover approval click to a dead session). The
+  unit keeps its state, secrets, and PR fields: the reconciler, webhook,
+  merge/close announcement, and terminal grace all proceed unchanged, and
+  the M6 guards already answer "no running environment" gracefully.
+- **A third independent enabler** — any of the three TTLs brings the reaper
+  up under the same `lifecycle-reaper` lease; the interval-without-anything
+  refusal now checks all three. The sweep result grows `warned`/`released`
+  counts in the boot log.
+
+## M19+ — Expansion XIV
 
 NATS bus (still unnecessary: LISTEN/NOTIFY + the M14 claim survives N
 orchestrators by construction; `EventBus` remains the seam if volume ever
@@ -651,15 +692,14 @@ eviction (the unpaid half of M16: scheduling on measured usage needs an
 eviction story — ranking got the win without the cost) and disk-weighted
 placement (host disk budgets interact with image/layer sharing in ways
 neither grants nor `docker stats` — which reports no disk at all — model);
-PR_OPEN env reclamation (a PR under review deliberately keeps its env and
-secrets — M17 Decision 4; reclaiming just the env needs a partial-destroy
-path and a re-provision story if it earns its own milestone) and idle
-warnings before reclamation (chat UX over the same activity truth);
-certificate rotation/revocation tooling (at three certs per deployment,
-re-minting IS the revocation story — until it isn't); Discord
-Forum-channel session dashboard (presentation upgrade over `/sessions`).
-UI surface remains chat only — no self-hosted web UI (see
-docs/analysis/chat-platform-ui-parity.md).
+session resume / PR re-provision (a released PR_OPEN unit answers `view-pr`
+and announces its merge/close, but CONTINUING work on an open PR needs a
+fresh env + agent session — a product "resume" feature, the same
+transcript-persistence line the gap analysis tracks); certificate
+rotation/revocation tooling (at three certs per deployment, re-minting IS
+the revocation story — until it isn't); Discord Forum-channel session
+dashboard (presentation upgrade over `/sessions`). UI surface remains chat
+only — no self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 

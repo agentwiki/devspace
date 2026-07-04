@@ -645,14 +645,20 @@ describe('durable env table (M11)', () => {
     expect(summary.discarded).toEqual([]);
 
     const recovered = await second.core.getEnvironment(env.envId);
-    expect(recovered).toMatchObject({ status: 'ready', containerId: 'cont-1', poolKey: 'pool-key-1' });
+    expect(recovered).toMatchObject({
+      status: 'ready',
+      containerId: 'cont-1',
+      poolKey: 'pool-key-1',
+    });
     expect(recovered?.ports).toEqual([]);
     // The per-exec secret map came back EMPTY — secrets are never on disk.
     const stream = await second.core.exec(env.envId, { cmd: ['cat', '--', '/x'], tty: false });
     for await (const _ of stream.frames) void _;
     expect(container.lastEnv).toEqual({});
     // applySecrets is the re-attach seam.
-    await second.core.applySecrets(env.envId, [{ name: 'GH_TOKEN', value: 're-applied', target: 'env' }]);
+    await second.core.applySecrets(env.envId, [
+      { name: 'GH_TOKEN', value: 're-applied', target: 'env' },
+    ]);
     const stream2 = await second.core.exec(env.envId, { cmd: ['cat', '--', '/x'], tty: false });
     for await (const _ of stream2.frames) void _;
     expect(container.lastEnv).toMatchObject({ GH_TOKEN: 're-applied' });
@@ -679,7 +685,11 @@ describe('durable env table (M11)', () => {
     const first = makeCore(new FakeContainer(), {}, { stateStore: store });
     const env = await first.core.createEnvironment(POOLED);
 
-    const second = makeCore(new FakeContainer(), {}, { stateStore: store, exists: async () => false });
+    const second = makeCore(
+      new FakeContainer(),
+      {},
+      { stateStore: store, exists: async () => false },
+    );
     const summary = await second.core.recover();
     expect(summary.recovered).toEqual([]);
     expect(summary.discarded).toEqual([env.envId]);
@@ -698,7 +708,11 @@ describe('durable env table (M11)', () => {
       networkName: 'devspace-net-crashed',
       createdAt: '2026-01-01T00:00:00.000Z',
     });
-    const { core, destroy, removeNetwork } = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const { core, destroy, removeNetwork } = makeCore(
+      new FakeContainer(),
+      {},
+      { stateStore: store },
+    );
     const summary = await core.recover();
     expect(summary.discarded).toEqual(['env_crashed']);
     expect(destroy).toHaveBeenCalledWith('cont-zombie');

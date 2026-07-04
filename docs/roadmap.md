@@ -7,6 +7,7 @@ Expansion II (preview WS upgrade, Discord UI parity): **M7.**
 Expansion III (exec over the wire, multi-host placement): **M8.**
 Expansion IV (fleet capacity truth, warm pools): **M9.**
 Expansion V (pool identity, claim-time refresh): **M10.**
+Expansion VI (durable host env tables): **M11.**
 
 ## M0 — Scaffolding (done)
 
@@ -381,19 +382,51 @@ Landed:
   foreign marks / unmarked tenant envs are never touched. Tolerant like
   the census: a listing failure logs and the top-up still runs.
 
-## M11+ — Expansion VI
+## M11 — Expansion VI: durable host env tables (done)
+
+The host-persistence seed every milestone since M8 pointed at: a sandbox
+host's env table — pool marks included — survives a sandbox-core-svc
+restart. Zero contract changes; everything is a sandbox-core internal plus
+boot wiring. Design of record: docs/m11-plan.md.
+
+Landed:
+
+- **The durable table** — `SANDBOX_STATE_DIR` opts a host into one atomic
+  JSON state file per env, metadata only: the M1/M5 line holds — secret
+  values and preview capability tokens never land on host disk (recovered
+  envs come back with an empty per-exec secret map; `applySecrets` is the
+  re-attach seam). Written at provisioning/ready/claim-unmark, removed at
+  destroy; a claim persists its unmark BEFORE applying it, so a forgotten
+  unmark can never resurrect a pool mark over a tenant workspace (the M10
+  Decision-3 hazard, closed at the persistence layer too). Unset, the
+  documented in-memory posture is byte-for-byte unchanged. Docker labels
+  were rejected as the store: immutable after create, and the mark must
+  clear at claim.
+- **Recovery trusts the daemon** — boot-time `recover()` re-adopts only
+  `ready` records whose container the daemon still confirms; anything else
+  is a crashed transition and is COMPLETED (container + per-env network
+  destroyed, file dropped) rather than re-homed — the mid-provision leak
+  closes. Corrupt state files log and skip; torn `.tmp` writes are swept;
+  neither ever fails boot.
+- **The restart story composes for free** — recovery runs before the
+  listener at both boots (sandbox-core-svc, in-process orchestrator), and
+  the M9 fleet census and M10 orphan sweep only ever read
+  `listEnvironments()`, so they now survive a HOST restart, not just an
+  orchestrator restart: recovered warm stock is re-adopted by `fill()`
+  instead of re-provisioned, containers that died with the host are
+  discarded and replaced, and unmarked tenant envs are never touched.
+
+## M12+ — Expansion VII
 
 NATS bus (meaningful when the _orchestrator_ scales out — the sandbox fleet
 already did; LISTEN/NOTIFY survives that split; `EventBus` is the seam);
 per-service identity on the internal API (mTLS — deployment-layer,
 replacing the shared token; also the milestone where multi-controller
-coordination would land — M10's pool marks assume one control plane);
-resource-aware placement (capacity still counts envs, deliberately —
-cpu/mem-aware scheduling needs host-side resource accounting; M9 made the
-count TRUE, M11+ makes it weighted); durable host env tables (a
-sandbox-core-svc restart forgets its in-memory env table — pool marks
-included; the containers, labeled `devspace.envId` since M1, become an ops
-concern); Discord Forum-channel session dashboard (presentation upgrade
+coordination would land — M10's pool marks and M11's per-host state dir
+assume one control plane / one host process); resource-aware placement
+(capacity still counts envs, deliberately — cpu/mem-aware scheduling needs
+host-side resource accounting; M9 made the count TRUE, M12+ makes it
+weighted); Discord Forum-channel session dashboard (presentation upgrade
 over `/sessions`). UI surface remains chat only — no self-hosted web UI
 (see docs/analysis/chat-platform-ui-parity.md).
 
@@ -406,9 +439,10 @@ over `/sessions`). UI surface remains chat only — no self-hosted web UI
 3. PAT leakage → short-lived OAuth; read-only in-container; push/PR via wrapper; redact output.
 4. cold-start latency → prebuilt images + warm pool + cached agent-runtime volume (<15s warm);
    answered in M9 (claim-from-pool provisioning behind the SandboxCore seam — a matching
-   session claims a pre-provisioned env in milliseconds) and hardened in M10 (warm stock
+   session claims a pre-provisioned env in milliseconds), hardened in M10 (warm stock
    survives an orchestrator crash via host-side pool marks; claims hand out a clone
-   freshened at claim time, not fill time).
+   freshened at claim time, not fill time), and again in M11 (the host's own table is
+   durable — warm stock now survives a sandbox-host restart too).
 5. runaway agent loops → per-turn budgets; auto-abort.
 6. codex-acp version drift → pin in image; isolate behind AgentBackend.
 7. FSM vs GitHub drift → webhooks as source of truth; gh poll reconciliation.

@@ -2,7 +2,7 @@
 
 Design of record for M11. The host-persistence seed every milestone since M8
 has been pointing at lands: a sandbox host's env table — pool marks included —
-survives a sandbox-core-svc restart. M9 taught a restarted *orchestrator* to
+survives a sandbox-core-svc restart. M9 taught a restarted _orchestrator_ to
 re-learn its fleet (`adoptFleet`) and M10 taught it to reclaim its warm stock
 (the orphan sweep); both reads go through `listEnvironments()`, which until now
 answered from a `Map` that a host restart wipes. M11 makes that table durable,

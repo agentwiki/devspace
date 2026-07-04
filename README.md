@@ -4,7 +4,7 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M10 (expansion V).** The full vertical is live end to end — sandbox
+> **Status: M11 (expansion VI).** The full vertical is live end to end — sandbox
 > engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
 > secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
 > (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
@@ -13,10 +13,12 @@ interface — a self-hostable "Claude Code on the web."
 > parity (M7), multi-host foundations — the exec stream between machines with
 > backpressure preserved, fleet placement (M8) — capacity truth + warm pools
 > (`SANDBOX_MAX_ENVS`, a boot-time census, `SANDBOX_WARM_POOLS=` pools a
-> matching session claims in milliseconds — M9), and M10 makes the warm stock
-> durable and fresh: pool-marked envs survive an orchestrator crash and are
-> re-adopted at the next boot, and every claim hands out a clone refreshed at
-> claim time. See [`docs/roadmap.md`](docs/roadmap.md).
+> matching session claims in milliseconds — M9), warm stock that survives an
+> orchestrator crash and claims that hand out a clone refreshed at claim time
+> (M10), and M11 makes the host itself durable: with `SANDBOX_STATE_DIR` set,
+> a sandbox host's env table — pool marks included — survives a restart and
+> is recovered against what the Docker daemon still confirms.
+> See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing
 

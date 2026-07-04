@@ -308,7 +308,11 @@ export class DevcontainerSandboxCore implements SandboxCore {
    * files are reported in `skipped`, never fatal. No-op without a store.
    */
   async recover(): Promise<{ recovered: string[]; discarded: string[]; skipped: string[] }> {
-    const summary = { recovered: [] as string[], discarded: [] as string[], skipped: [] as string[] };
+    const summary = {
+      recovered: [] as string[],
+      discarded: [] as string[],
+      skipped: [] as string[],
+    };
     if (!this.stateStore) return summary;
     const { states, skipped } = await this.stateStore.loadAll();
     summary.skipped = skipped;

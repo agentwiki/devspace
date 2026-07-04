@@ -60,6 +60,15 @@ instead of leaking it, and a claim is one host-side operation
 before hand-out — the mark is the capability, so a tenant env can never be
 claimed or hard-reset (docs/m10-plan.md).
 
+Since M11 the host's own table is durable: `SANDBOX_STATE_DIR` persists one
+atomic JSON state file per env (metadata only — secret values and preview
+tokens never touch host disk), and boot-time `recover()` re-adopts only
+records the Docker daemon still confirms, completing crashed transitions
+instead of re-homing them. Because the M9 census and M10 orphan sweep read
+`listEnvironments()`, they now survive a sandbox HOST restart too — recovered
+warm stock is re-adopted, and a recovered env gets its secrets re-attached
+through `applySecrets` (docs/m11-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

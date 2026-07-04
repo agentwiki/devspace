@@ -72,6 +72,10 @@ services:
       # Host-side capacity backstop (M9): cap live envs at this host no
       # matter what the placement layer believes. Unset: uncapped (pre-M9).
       SANDBOX_MAX_ENVS: ${SANDBOX_MAX_ENVS:-}
+      # Durable env table (M11): point at a persistent path (mount a volume)
+      # and this host's env table — pool marks included — survives a restart.
+      # Unset: the documented in-memory posture (pre-M11).
+      SANDBOX_STATE_DIR: ${SANDBOX_STATE_DIR:-}
     ports:
       - '4001:4001'
 

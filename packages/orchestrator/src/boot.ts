@@ -29,11 +29,13 @@ import {
   assertRuntimeAvailable,
   envStateStoreFromEnv,
   hardeningFromEnv,
+  internalTlsFromEnv,
   nodeCommandRunner,
   previewProxyFromEnv,
   sandboxHostsFromEnv,
   warmPoolsFromEnv,
   type EnvStateStore,
+  type InternalTlsIdentity,
   type PreviewProxyOptions,
   type SandboxCore,
   type SandboxHardening,
@@ -105,6 +107,13 @@ export interface OrchestratorBootConfig {
   /** Bearer for the sandbox hosts (defaults to DEVSPACE_INTERNAL_TOKEN). */
   internalToken?: string;
   /**
+   * Internal TLS identity (M13). Defaults to `internalTlsFromEnv(process.env)`
+   * (DEVSPACE_TLS_*); when set, sandbox hosts are dialed over mutual TLS as
+   * service `sandbox-core` with this orchestrator identity, and the bearer
+   * token must be unset — one auth regime per deployment (m13-plan Decision 1).
+   */
+  internalTls?: InternalTlsIdentity;
+  /**
    * Durable env table for the LOCAL in-process sandbox (M11). Defaults to
    * `envStateStoreFromEnv(process.env)` (SANDBOX_STATE_DIR); recovery runs
    * before boot returns. In fleet mode the table belongs to each sandbox
@@ -150,7 +159,17 @@ export async function bootOrchestrator(
   let preview: PreviewProxy | undefined;
   if (sandboxHosts?.length) {
     const token = config.internalToken ?? process.env.DEVSPACE_INTERNAL_TOKEN;
-    if (!token) throw new Error('SANDBOX_HOSTS requires DEVSPACE_INTERNAL_TOKEN');
+    const tls = config.internalTls ?? internalTlsFromEnv(process.env);
+    if (token && tls) {
+      throw new Error(
+        'DEVSPACE_INTERNAL_TOKEN and DEVSPACE_TLS_* are mutually exclusive — one auth regime per deployment',
+      );
+    }
+    if (!token && !tls) {
+      throw new Error(
+        'SANDBOX_HOSTS requires DEVSPACE_INTERNAL_TOKEN or the DEVSPACE_TLS_* identity',
+      );
+    }
     // Explicitly-passed local sandbox options would be silently dead in fleet
     // mode — refuse loudly instead (env-var equivalents are simply not read
     // here: they may legitimately target the sandbox hosts' own boots).
@@ -166,7 +185,7 @@ export async function bootOrchestrator(
         cpu: h.cpu,
         memMB: h.memMB,
         draining: h.draining,
-        core: new RemoteSandboxCore(h.url, token),
+        core: new RemoteSandboxCore(h.url, token, tls ? { tls } : {}),
       })),
     );
     // Fleet census (M9): re-learn live envs BEFORE the first placement so a

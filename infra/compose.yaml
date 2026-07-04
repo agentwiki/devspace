@@ -42,6 +42,14 @@ services:
       # transport + internal API light up; unset, render surfaces to logs.
       DEVSPACE_INTERNAL_TOKEN: ${DEVSPACE_INTERNAL_TOKEN:-}
       GATEWAY_RENDER_URL: ${DEVSPACE_INTERNAL_TOKEN:+http://chat-gateway:4002/render}
+      # mTLS mode (M13): mount PEM files and set DEVSPACE_TLS_CERT/KEY/CA
+      # (paths) INSTEAD of the shared token — never both. The split API then
+      # serves the chat gateway on DEVSPACE_TLS_PORT (default PORT+1) over
+      # mutual TLS and internal urls switch to https; the plain port keeps
+      # /health + webhooks only.
+      DEVSPACE_TLS_CERT: ${DEVSPACE_TLS_CERT:-}
+      DEVSPACE_TLS_KEY: ${DEVSPACE_TLS_KEY:-}
+      DEVSPACE_TLS_CA: ${DEVSPACE_TLS_CA:-}
       # Fleet mode (M8; weighted M12): comma-separated
       # name=url[|capacity][|cpu=<cores>][|mem=<MB>][|drain] entries, e.g.
       # SANDBOX_HOSTS=local=http://sandbox-core:4001|8|cpu=16|mem=65536 — the
@@ -68,6 +76,12 @@ services:
       # and the devspace-exec stream serves; unset, the JSON surface stays a
       # local ops tool and the exec stream refuses (m8-plan Decision 5).
       DEVSPACE_INTERNAL_TOKEN: ${DEVSPACE_INTERNAL_TOKEN:-}
+      # mTLS mode (M13): the alternative to the token (never both) — the full
+      # surface then serves the orchestrator on DEVSPACE_TLS_PORT (default
+      # PORT+1); the plain port keeps /health only.
+      DEVSPACE_TLS_CERT: ${DEVSPACE_TLS_CERT:-}
+      DEVSPACE_TLS_KEY: ${DEVSPACE_TLS_KEY:-}
+      DEVSPACE_TLS_CA: ${DEVSPACE_TLS_CA:-}
       # Ports preview proxy (M6): set PREVIEW_PROXY_PORT (e.g. 4010) and map
       # it below; PREVIEW_BASE_URL is what users reach (TLS in front).
       PREVIEW_PROXY_PORT: ${PREVIEW_PROXY_PORT:-}
@@ -97,6 +111,12 @@ services:
       # the orchestrator and needs no database at all.
       DEVSPACE_INTERNAL_TOKEN: ${DEVSPACE_INTERNAL_TOKEN:-}
       ORCHESTRATOR_URL: ${DEVSPACE_INTERNAL_TOKEN:+http://orchestrator:4000}
+      # mTLS mode (M13): the alternative to the token (never both) — /render
+      # then serves the orchestrator on DEVSPACE_TLS_PORT (default PORT+1) and
+      # ORCHESTRATOR_URL must point at the orchestrator's https TLS port.
+      DEVSPACE_TLS_CERT: ${DEVSPACE_TLS_CERT:-}
+      DEVSPACE_TLS_KEY: ${DEVSPACE_TLS_KEY:-}
+      DEVSPACE_TLS_CA: ${DEVSPACE_TLS_CA:-}
     ports:
       - '4002:4002'
 

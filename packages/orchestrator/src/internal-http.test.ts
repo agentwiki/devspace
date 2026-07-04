@@ -57,7 +57,7 @@ function fakeDeps(): InternalApiDeps & {
 } {
   const seen: ChatEvent[] = [];
   return {
-    token: TOKEN,
+    auth: { token: TOKEN },
     seen,
     async handleChatEvent(event) {
       seen.push(event);
@@ -113,7 +113,7 @@ describe('internal API over loopback', () => {
   });
 
   it('POST /chat-events runs the handler synchronously and returns its result', async () => {
-    const emit = httpChatEventEmitter(base, TOKEN);
+    const emit = httpChatEventEmitter(base, { token: TOKEN });
     const result = await emit({
       type: 'conversation.created',
       platform: 'slack',
@@ -161,7 +161,7 @@ describe('internal API over loopback', () => {
   });
 
   it('serves the binding cold-miss reads', async () => {
-    const reads = httpOrchestratorReads(base, TOKEN);
+    const reads = httpOrchestratorReads(base, { token: TOKEN });
     expect(await reads.resolveConversationId('slack', 'C1:111.222')).toBe('conv_1');
     expect(await reads.resolveConversationId('slack', 'C9:000')).toBeNull();
     expect(await reads.conversationRef('conv_1')).toBe('C1:111.222');
@@ -169,7 +169,7 @@ describe('internal API over loopback', () => {
   });
 
   it('serves the session list and validates the platform', async () => {
-    const reads = httpOrchestratorReads(base, TOKEN);
+    const reads = httpOrchestratorReads(base, { token: TOKEN });
     expect(await reads.listSessions('slack', 'U1')).toEqual([SESSION]);
     expect(await reads.listSessions('slack', 'U2')).toEqual([]);
     const bad = await fetch(`${base}/sessions?platform=irc&userId=U1`, {
@@ -196,7 +196,7 @@ describe('render over loopback', () => {
   beforeAll(async () => {
     server = createServer((req, res) => {
       void handleRenderRequest(req, res, {
-        token: TOKEN,
+        auth: { token: TOKEN },
         render: async (cmd) => {
           rendered.push(cmd);
         },
@@ -216,7 +216,7 @@ describe('render over loopback', () => {
   });
 
   it('delivers a command end to end through the real transport', async () => {
-    const transport = httpRenderTransport(`${base}/render`, TOKEN, { backoffMs: 0 });
+    const transport = httpRenderTransport(`${base}/render`, { token: TOKEN }, { backoffMs: 0 });
     const cmd: RenderCommand = { type: 'post_message', conversationId: 'conv_1', text: 'hello' };
     await transport(cmd);
     expect(rendered).toEqual([cmd]);
@@ -252,11 +252,15 @@ describe('httpRenderTransport retry policy', () => {
       .mockRejectedValueOnce(new Error('ECONNREFUSED'))
       .mockResolvedValueOnce(status(503))
       .mockResolvedValueOnce(ok);
-    const transport = httpRenderTransport('http://gw/render', TOKEN, {
-      fetchImpl,
-      warn,
-      backoffMs: 0,
-    });
+    const transport = httpRenderTransport(
+      'http://gw/render',
+      { token: TOKEN },
+      {
+        fetchImpl,
+        warn,
+        backoffMs: 0,
+      },
+    );
     await transport(CMD);
     expect(fetchImpl).toHaveBeenCalledTimes(3);
     expect(warn).not.toHaveBeenCalled();
@@ -265,12 +269,16 @@ describe('httpRenderTransport retry policy', () => {
   it('never throws: exhausted retries log and drop', async () => {
     const warn = vi.fn();
     const fetchImpl = vi.fn().mockRejectedValue(new Error('down'));
-    const transport = httpRenderTransport('http://gw/render', TOKEN, {
-      fetchImpl,
-      warn,
-      attempts: 3,
-      backoffMs: 0,
-    });
+    const transport = httpRenderTransport(
+      'http://gw/render',
+      { token: TOKEN },
+      {
+        fetchImpl,
+        warn,
+        attempts: 3,
+        backoffMs: 0,
+      },
+    );
     await expect(transport(CMD)).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(3);
     expect(warn).toHaveBeenCalledTimes(1);
@@ -280,11 +288,15 @@ describe('httpRenderTransport retry policy', () => {
   it('does not retry 4xx (config errors) and still never throws', async () => {
     const warn = vi.fn();
     const fetchImpl = vi.fn().mockResolvedValue(status(401));
-    const transport = httpRenderTransport('http://gw/render', TOKEN, {
-      fetchImpl,
-      warn,
-      backoffMs: 0,
-    });
+    const transport = httpRenderTransport(
+      'http://gw/render',
+      { token: TOKEN },
+      {
+        fetchImpl,
+        warn,
+        backoffMs: 0,
+      },
+    );
     await expect(transport(CMD)).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('HTTP 401'));
@@ -293,15 +305,19 @@ describe('httpRenderTransport retry policy', () => {
   it('honors exponential backoff between attempts', async () => {
     const sleeps: number[] = [];
     const fetchImpl = vi.fn().mockRejectedValue(new Error('down'));
-    const transport = httpRenderTransport('http://gw/render', TOKEN, {
-      fetchImpl,
-      warn: () => {},
-      attempts: 3,
-      backoffMs: 100,
-      sleep: async (ms) => {
-        sleeps.push(ms);
+    const transport = httpRenderTransport(
+      'http://gw/render',
+      { token: TOKEN },
+      {
+        fetchImpl,
+        warn: () => {},
+        attempts: 3,
+        backoffMs: 100,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
       },
-    });
+    );
     await transport(CMD);
     expect(sleeps).toEqual([100, 200]);
   });

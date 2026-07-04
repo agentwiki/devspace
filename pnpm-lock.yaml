@@ -53,6 +53,9 @@ importers:
       '@devspace/orchestrator':
         specifier: workspace:*
         version: link:../../packages/orchestrator
+      '@devspace/sandbox-core':
+        specifier: workspace:*
+        version: link:../../packages/sandbox-core
       pg:
         specifier: ^8.13.1
         version: 8.22.0
@@ -63,9 +66,6 @@ importers:
       '@devspace/db':
         specifier: workspace:*
         version: link:../../packages/db
-      '@devspace/sandbox-core':
-        specifier: workspace:*
-        version: link:../../packages/sandbox-core
       '@types/pg':
         specifier: ^8.11.10
         version: 8.20.0

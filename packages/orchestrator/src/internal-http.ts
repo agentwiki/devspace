@@ -9,8 +9,11 @@
  *   gateway -> orchestrator   GET  /conversations/:id     (binding cold miss, out)
  *   gateway -> orchestrator   GET  /sessions              (App Home list, M6-D)
  *
- * Every call carries `Authorization: Bearer <DEVSPACE_INTERNAL_TOKEN>`,
- * verified timing-safely on both servers (m6-plan Decision 3). Transport
+ * Auth is one regime per deployment (m13-plan Decision 1): either every call
+ * carries `Authorization: Bearer <DEVSPACE_INTERNAL_TOKEN>`, verified
+ * timing-safely on both servers (m6-plan Decision 3), or — M13 — both servers
+ * sit on mTLS listeners and authorize the peer's service certificate instead;
+ * the discriminated unions below make "both" unrepresentable. Transport
  * changes, semantics don't (Decision 1): /chat-events is synchronous and
  * returns the same `ChatEventResult` the in-process seam returns, and the
  * render client retries then logs-and-drops so the "render path never throws"
@@ -21,6 +24,7 @@
  */
 import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { peerAllowed, tlsFetch, type InternalTlsIdentity } from '@devspace/sandbox-core';
 import type {
   ChatEvent,
   ChatEventResult,
@@ -60,6 +64,29 @@ export function verifyBearer(header: string | undefined, token: string): boolean
   expected.copy(b);
   // timingSafeEqual over equal-length padded copies; require true length match.
   return timingSafeEqual(a, b) && presented.length === expected.length;
+}
+
+/** Server-side auth: the shared bearer, or the mTLS peer allowlist (M13). */
+export type InternalServerAuth = { token: string } | { tlsAllow: string[] };
+
+/** Client-side auth: the shared bearer, or this service's TLS identity (M13). */
+export type InternalClientAuth =
+  { token: string } | { tls: InternalTlsIdentity & { expectService: string } };
+
+/** Verify one internal request against whichever regime is configured. */
+export function verifyInternalRequest(req: IncomingMessage, auth: InternalServerAuth): boolean {
+  return 'token' in auth
+    ? verifyBearer(req.headers.authorization, auth.token)
+    : peerAllowed(req, auth.tlsAllow);
+}
+
+/** The refusal matching the regime: 401 bad bearer / 403 wrong peer service. */
+function refuseUnauthorized(res: ServerResponse, auth: InternalServerAuth): void {
+  if ('token' in auth) {
+    json(res, 401, { code: 'UNAUTHORIZED', message: 'bad or missing bearer token' });
+  } else {
+    json(res, 403, { code: 'FORBIDDEN', message: 'peer service is not allowed here' });
+  }
 }
 
 const MAX_BODY_BYTES = 1024 * 1024; // internal API; nothing legitimate is bigger
@@ -107,7 +134,7 @@ function errStatus(err: unknown): number {
 
 /** The narrow orchestrator surface the internal API exposes (fake-able). */
 export interface InternalApiDeps {
-  token: string;
+  auth: InternalServerAuth;
   handleChatEvent(event: ChatEvent): Promise<ChatEventResult | void>;
   resolveConversationId(platform: string, externalChannelId: string): Promise<string | null>;
   /** The conversation's platform thread ref, for the outbound cold miss. */
@@ -135,8 +162,8 @@ export async function handleInternalApi(
     /^\/conversations\/[^/]+$/.test(path);
   if (!isOurs) return false;
 
-  if (!verifyBearer(req.headers.authorization, deps.token)) {
-    json(res, 401, { code: 'UNAUTHORIZED', message: 'bad or missing bearer token' });
+  if (!verifyInternalRequest(req, deps.auth)) {
+    refuseUnauthorized(res, deps.auth);
     return true;
   }
 
@@ -219,12 +246,12 @@ export async function handleInternalApi(
 export async function handleRenderRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  deps: { token: string; render: (command: RenderCommand) => Promise<unknown> },
+  deps: { auth: InternalServerAuth; render: (command: RenderCommand) => Promise<unknown> },
 ): Promise<boolean> {
   const url = new URL(req.url ?? '/', 'http://internal');
   if (url.pathname !== '/render') return false;
-  if (!verifyBearer(req.headers.authorization, deps.token)) {
-    json(res, 401, { code: 'UNAUTHORIZED', message: 'bad or missing bearer token' });
+  if (!verifyInternalRequest(req, deps.auth)) {
+    refuseUnauthorized(res, deps.auth);
     return true;
   }
   if (req.method !== 'POST') {
@@ -269,8 +296,27 @@ export interface InternalClientOptions {
 
 const defaultFetch: FetchLike = (url, init) => fetch(url, init);
 
-function authHeaders(token: string): Record<string, string> {
-  return { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+/**
+ * The transport + auth headers for whichever client regime is configured:
+ * bearer headers over plain fetch, or `tlsFetch` presenting the service
+ * identity (the header is then the handshake). An injected fetchImpl always
+ * wins so the retry-policy tests keep driving exact failure sequences.
+ */
+function clientTransport(
+  auth: InternalClientAuth,
+  url: string,
+  fetchImpl?: FetchLike,
+): { doFetch: FetchLike; headers: Record<string, string> } {
+  if ('token' in auth) {
+    return {
+      doFetch: fetchImpl ?? defaultFetch,
+      headers: { authorization: `Bearer ${auth.token}` },
+    };
+  }
+  if (!fetchImpl && !url.startsWith('https://')) {
+    throw new Error(`internal TLS requires an https:// url, got ${url}`);
+  }
+  return { doFetch: fetchImpl ?? tlsFetch(auth.tls), headers: {} };
 }
 
 const trimSlash = (base: string): string => base.replace(/\/+$/, '');
@@ -283,15 +329,15 @@ const trimSlash = (base: string): string => base.replace(/\/+$/, '');
  */
 export function httpChatEventEmitter(
   orchestratorUrl: string,
-  token: string,
+  auth: InternalClientAuth,
   opts: InternalClientOptions = {},
 ): (event: ChatEvent) => Promise<ChatEventResult> {
-  const doFetch = opts.fetchImpl ?? defaultFetch;
+  const { doFetch, headers } = clientTransport(auth, orchestratorUrl, opts.fetchImpl);
   const base = trimSlash(orchestratorUrl);
   return async (event) => {
     const res = await doFetch(`${base}/chat-events`, {
       method: 'POST',
-      headers: authHeaders(token),
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify(event),
     });
     if (!res.ok) throw new Error(`POST /chat-events -> ${res.status}: ${await res.text()}`);
@@ -302,16 +348,15 @@ export function httpChatEventEmitter(
 /** Gateway -> orchestrator binding + App Home reads. Null on 404, throw on other failures. */
 export function httpOrchestratorReads(
   orchestratorUrl: string,
-  token: string,
+  auth: InternalClientAuth,
   opts: InternalClientOptions = {},
 ): {
   resolveConversationId(platform: string, externalChannelId: string): Promise<string | null>;
   conversationRef(conversationId: string): Promise<string | null>;
   listSessions(platform: ChatPlatform, userId: string): Promise<SessionSummary[]>;
 } {
-  const doFetch = opts.fetchImpl ?? defaultFetch;
+  const { doFetch, headers } = clientTransport(auth, orchestratorUrl, opts.fetchImpl);
   const base = trimSlash(orchestratorUrl);
-  const headers = { authorization: `Bearer ${token}` };
   return {
     async resolveConversationId(platform, externalChannelId) {
       const qs = new URLSearchParams({ platform, externalChannelId });
@@ -355,10 +400,10 @@ export interface RenderTransportOptions extends InternalClientOptions {
  */
 export function httpRenderTransport(
   gatewayRenderUrl: string,
-  token: string,
+  auth: InternalClientAuth,
   opts: RenderTransportOptions = {},
 ): (command: RenderCommand) => Promise<void> {
-  const doFetch = opts.fetchImpl ?? defaultFetch;
+  const { doFetch, headers } = clientTransport(auth, gatewayRenderUrl, opts.fetchImpl);
   const warn = opts.warn ?? ((m) => console.warn(`[render-http] ${m}`));
   const attempts = opts.attempts ?? 3;
   const backoffMs = opts.backoffMs ?? 250;
@@ -370,7 +415,7 @@ export function httpRenderTransport(
       try {
         const res = await doFetch(gatewayRenderUrl, {
           method: 'POST',
-          headers: authHeaders(token),
+          headers: { ...headers, 'content-type': 'application/json' },
           body: JSON.stringify(command),
         });
         if (res.ok) return;

@@ -125,6 +125,19 @@ export function buildGitCloneArgs(repoUrl: string, dest: string, ref?: string): 
   return args;
 }
 
+/**
+ * Claim-time refresh (M10, m10-plan Decision 5): the fetch half of freshening
+ * a warm env's clone — same shallow, branch-pinned shape as the clone above;
+ * `HEAD` covers pools on the default branch. The caller pairs it with
+ * `GIT_REFRESH_RESET_ARGS` (hard reset to what was just fetched).
+ */
+export function buildGitRefreshArgs(ref?: string): string[] {
+  return ['fetch', '--depth', '1', 'origin', ref ?? 'HEAD'];
+}
+
+/** The reset half of the claim-time refresh; always to FETCH_HEAD. */
+export const GIT_REFRESH_RESET_ARGS: readonly string[] = ['reset', '--hard', 'FETCH_HEAD'];
+
 export function buildDevcontainerUpArgs(input: {
   workspaceFolder: string;
   configPath: string;

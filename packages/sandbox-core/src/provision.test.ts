@@ -5,8 +5,10 @@ import { describe, expect, it } from 'vitest';
 import type { CommandRunner, RunResult } from './cli.js';
 import {
   DevcontainerProvisioner,
+  GIT_REFRESH_RESET_ARGS,
   buildDevcontainerUpArgs,
   buildGitCloneArgs,
+  buildGitRefreshArgs,
   mergeDevcontainerConfig,
   mountConfigEntries,
   parseDevcontainerUpOutput,
@@ -153,6 +155,12 @@ describe('argv builders', () => {
       'https://x/r.git',
       '/ws',
     ]);
+  });
+
+  it('builds the claim-time refresh fetch, HEAD when no ref is pinned', () => {
+    expect(buildGitRefreshArgs('main')).toEqual(['fetch', '--depth', '1', 'origin', 'main']);
+    expect(buildGitRefreshArgs()).toEqual(['fetch', '--depth', '1', 'origin', 'HEAD']);
+    expect(GIT_REFRESH_RESET_ARGS).toEqual(['reset', '--hard', 'FETCH_HEAD']);
   });
 
   it('builds devcontainer up args with config + id label', () => {

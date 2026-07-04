@@ -153,6 +153,12 @@ async function handle(
         res.writeHead(204).end();
         return;
       }
+      if (method === 'POST' && segments[2] === 'claim' && segments.length === 3) {
+        // Pool hand-out (M10): refresh + unmark on the owning host. No secret
+        // plaintext crosses, so — like the rest of the lifecycle — it stays
+        // on the open local-ops surface (m10-plan Decision 4).
+        return sendJson(res, 200, await core.claimEnvironment(envId));
+      }
       if (method === 'POST' && segments[2] === 'fs' && segments[3] === 'read') {
         const { path } = FsReadRequestSchema.parse(await readJson(req));
         return sendJson(res, 200, { data: toBase64(await core.fsRead(envId, path)) });

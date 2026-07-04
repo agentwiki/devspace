@@ -27,11 +27,12 @@ function tenantRequest(secrets: SecretSpec[] = []): CreateEnvironmentRequest {
   return { ...TEMPLATE, secrets };
 }
 
-/** A fake inner core recording creates/destroys/secret applications. */
+/** A fake inner core recording creates/destroys/claims/secret applications. */
 function fakeInner(): SandboxCore & {
   envs: Map<string, Environment>;
   created: number;
   destroyed: string[];
+  claimed: string[];
   secretsApplied: Array<{ envId: string; names: string[] }>;
 } {
   let seq = 0;
@@ -40,14 +41,16 @@ function fakeInner(): SandboxCore & {
     envs,
     created: 0,
     destroyed: [] as string[],
+    claimed: [] as string[],
     secretsApplied: [] as Array<{ envId: string; names: string[] }>,
-    async createEnvironment(): Promise<Environment> {
+    async createEnvironment(req: CreateEnvironmentRequest): Promise<Environment> {
       self.created += 1;
       const env: Environment = {
         envId: `env_${++seq}`,
         status: 'ready',
         ports: [],
         createdAt: new Date().toISOString(),
+        ...(req.poolKey ? { poolKey: req.poolKey } : {}),
       };
       envs.set(env.envId, env);
       return env;
@@ -60,6 +63,17 @@ function fakeInner(): SandboxCore & {
     },
     async applySecrets(envId: string, secrets: SecretSpec[]): Promise<void> {
       self.secretsApplied.push({ envId, names: secrets.map((s) => s.name) });
+    },
+    async claimEnvironment(envId: string): Promise<Environment> {
+      const env = envs.get(envId);
+      if (!env) throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
+      if (env.status !== 'ready' || !env.poolKey) {
+        throw new SandboxError('CONFLICT', `environment ${envId} is not pool-owned`);
+      }
+      self.claimed.push(envId);
+      const { poolKey: _poolKey, ...rest } = env;
+      envs.set(envId, rest);
+      return rest;
     },
     async destroyEnvironment(envId: string): Promise<void> {
       if (!envs.delete(envId)) throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
@@ -210,9 +224,9 @@ describe('WarmPoolSandboxCore', () => {
     const inner = fakeInner();
     let failures = 1;
     const innerCreate = inner.createEnvironment.bind(inner);
-    inner.createEnvironment = async () => {
+    inner.createEnvironment = async (req) => {
       if (failures-- > 0) throw new SandboxError('PROVISION_FAILED', 'daemon hiccup');
-      return innerCreate();
+      return innerCreate(req);
     };
     const logs: string[] = [];
     const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }], {

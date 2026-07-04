@@ -120,6 +120,10 @@ export class WarmPoolSandboxCore implements SandboxCore {
     return this.inner.applySecrets(envId, secrets);
   }
 
+  claimEnvironment(envId: string): Promise<Environment> {
+    return this.inner.claimEnvironment(envId);
+  }
+
   destroyEnvironment(envId: string): Promise<void> {
     // Defensive: an externally-destroyed pooled id must not be handed out.
     for (const pool of this.pools.values()) {

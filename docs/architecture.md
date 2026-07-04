@@ -90,6 +90,18 @@ service — not its hostname — so a compromised gateway certificate can no
 longer be replayed against a sandbox host. `/health` probes and the
 HMAC-verified GitHub webhooks stay on the plain port (docs/m13-plan.md).
 
+Since M14 the control plane itself scales out: N orchestrators over one
+Postgres and one sandbox fleet is a supported shape. Bus rows are
+claim-leased (`claimed_by`/`claimed_at` + a TTL, arbitrated by one atomic
+UPDATE), so every instance hears every NOTIFY but exactly one runs the
+handlers — delivery stays at-least-once and handlers stay idempotent. Warm
+pools treat the host's env table as the only ledger: a lost claim race
+drops instead of destroys, a local miss adopts sibling-filled stock, and
+top-up gates on the global marked count. The M12 grant budgets gain their
+host-side backstop (`SANDBOX_CPU_BUDGET`/`SANDBOX_MEM_BUDGET`, the
+`SANDBOX_MAX_ENVS` counterpart) — enforced where the truth lives, whatever
+any controller believes (docs/m14-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

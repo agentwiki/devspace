@@ -159,7 +159,10 @@ export class DevcontainerSandboxCore implements SandboxCore {
             `host cpu budget exhausted (${cpuUsed} of ${this.budgets.cpu} cores granted; requested ${req.resources.cpu})`,
           );
         }
-        if (this.budgets.memMB !== undefined && memUsed + req.resources.memMB > this.budgets.memMB) {
+        if (
+          this.budgets.memMB !== undefined &&
+          memUsed + req.resources.memMB > this.budgets.memMB
+        ) {
           throw new SandboxError(
             'PROVISION_FAILED',
             `host memory budget exhausted (${memUsed} of ${this.budgets.memMB} MB granted; requested ${req.resources.memMB})`,

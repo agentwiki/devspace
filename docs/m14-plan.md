@@ -49,7 +49,7 @@ In (per roadmap M14+, the "multi-controller coordination" seed):
 
 - **Singleton event consumption.** A bus row is CLAIMED before it is
   processed: an atomic `claimed_by`/`claimed_at` stamp (one `UPDATE … WHERE
-  consumed_at IS NULL AND (claimed_at IS NULL OR claimed_at < now() - ttl)`)
+consumed_at IS NULL AND (claimed_at IS NULL OR claimed_at < now() - ttl)`)
   decides which instance runs the handlers. Losers skip. A claimer that
   crashes mid-handler is covered by the lease TTL: the recovery sweep
   re-claims and re-runs — delivery stays at-least-once, handlers stay
@@ -149,8 +149,8 @@ Out (seeded to M15+, with rationale):
   migration `0002` (generated, additive only).
 - `EventRepo.claim(id, owner, ttlMs)` (Decision 2): Pg = single
   `UPDATE events SET claimed_by=$2, claimed_at=now() WHERE id=$1 AND
-  consumed_at IS NULL AND (claimed_at IS NULL OR claimed_at < now() -
-  ttl) RETURNING *`; in-memory mirrors it. `EventRecord` gains the two
+consumed_at IS NULL AND (claimed_at IS NULL OR claimed_at < now() -
+ttl) RETURNING *`; in-memory mirrors it. `EventRecord` gains the two
   optional fields.
 - `createPgEventBus(pool, repo, { instanceId?, claimTtlMs? })`: `process`
   becomes claim → fanOut → markConsumed (skip silently on a lost claim);

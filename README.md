@@ -4,7 +4,7 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M16 (expansion XI).** The full vertical is live end to end — sandbox
+> **Status: M17 (expansion XII).** The full vertical is live end to end — sandbox
 > engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
 > secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
 > (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
@@ -38,7 +38,12 @@ interface — a self-hostable "Claude Code on the web."
 > adds live utilization truth: hosts report measured per-env usage
 > (`GET /stats`, grant units), and `SANDBOX_STATS_INTERVAL_MS` lets fleet
 > placement ranking demote measurably hot hosts while admission stays on
-> grants. See [`docs/roadmap.md`](docs/roadmap.md).
+> grants. M17 gives sessions an enforced end: work units track tenant
+> activity, and an elected reaper (the second advisory-lease role) tears
+> down idle pre-PR sessions past `DEVSPACE_IDLE_TTL_MS` (announced in the
+> thread; PR_OPEN exempt) and terminal units past
+> `DEVSPACE_TERMINAL_GRACE_MS` — envs, tokens, and secrets no longer
+> outlive their conversation. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing
 

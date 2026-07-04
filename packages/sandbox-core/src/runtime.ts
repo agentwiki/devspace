@@ -21,6 +21,12 @@ export interface ContainerRuntime {
   destroy(containerId: string): Promise<void>;
   /** True if the container still exists (any state). */
   exists(containerId: string): Promise<boolean>;
+  /**
+   * One usage sample per RUNNING container (M16): measured cpu in cores and
+   * memory in MB — grant units. Optional: a runtime without it simply cannot
+   * report host stats.
+   */
+  stats?(): Promise<ContainerUsage[]>;
   /** Remove a per-env network created at provision time (M5 hardening). */
   removeNetwork?(name: string): Promise<void>;
   /**
@@ -100,6 +106,100 @@ export function parseContainerIp(stdout: string, networkName?: string): string |
   return null;
 }
 
+/** One container's measured usage, as reported by the runtime (M16). */
+export interface ContainerUsage {
+  /** The id docker reports — SHORT (12-char) for `docker stats`. */
+  containerId: string;
+  /** Measured cpu in cores (docker's CPUPerc is percent-of-one-core). */
+  cpu: number;
+  /** Measured memory in MB. */
+  memMB: number;
+}
+
+/**
+ * Argv for one usage sample of every running container. Deliberately not
+ * per-id: a container that died between listing and sampling would fail the
+ * whole read; sampling everything and attributing afterwards cannot.
+ */
+export const dockerStatsArgs = (): string[] => ['stats', '--no-stream', '--format', '{{json .}}'];
+
+/**
+ * Parse `docker stats --no-stream --format '{{json .}}'` output (one JSON
+ * object per line) into usage rows in grant units. Pure and total: malformed
+ * lines, unparsable percentages, and unknown size units are skipped — a
+ * stats read never throws over one garbled row.
+ */
+export function parseDockerStats(stdout: string): ContainerUsage[] {
+  const rows: ContainerUsage[] = [];
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== 'object' || parsed === null) continue;
+    const row = parsed as {
+      ID?: unknown;
+      Container?: unknown;
+      CPUPerc?: unknown;
+      MemUsage?: unknown;
+    };
+    const containerId =
+      typeof row.ID === 'string' && row.ID
+        ? row.ID
+        : typeof row.Container === 'string'
+          ? row.Container
+          : '';
+    if (!containerId) continue;
+    const cpu = parseCpuPercent(row.CPUPerc);
+    const memMB = parseMemUsage(row.MemUsage);
+    if (cpu === null || memMB === null) continue;
+    rows.push({ containerId, cpu, memMB });
+  }
+  return rows;
+}
+
+/** "12.34%" → 0.1234 cores-of-use per percent-of-one-core; null on garbage. */
+function parseCpuPercent(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const match = /^([\d.]+)\s*%$/.exec(value.trim());
+  if (!match) return null;
+  const percent = Number(match[1]);
+  return Number.isFinite(percent) ? percent / 100 : null;
+}
+
+/** "1.5GiB / 15.61GiB" → the USED half in MB; null on garbage. */
+function parseMemUsage(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const used = value.split('/')[0]?.trim();
+  if (!used) return null;
+  return parseByteSize(used);
+}
+
+const BYTE_UNITS: Record<string, number> = {
+  b: 1,
+  kb: 1000,
+  kib: 1024,
+  mb: 1000 ** 2,
+  mib: 1024 ** 2,
+  gb: 1000 ** 3,
+  gib: 1024 ** 3,
+  tb: 1000 ** 4,
+  tib: 1024 ** 4,
+};
+
+/** "556KiB" / "1.5GB" → MB (MiB — the unit `--memory` enforces); null on garbage. */
+export function parseByteSize(value: string): number | null {
+  const match = /^([\d.]+)\s*([a-z]+)$/i.exec(value.trim());
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const unit = BYTE_UNITS[match[2]!.toLowerCase()];
+  if (!Number.isFinite(amount) || unit === undefined) return null;
+  return (amount * unit) / 1024 ** 2;
+}
+
 export interface DockerRuntimeOptions {
   /** Path/name of the docker binary. */
   dockerPath?: string;
@@ -127,6 +227,11 @@ export class DockerRuntime implements ContainerRuntime {
   async exists(containerId: string): Promise<boolean> {
     const result = await this.runner.run(this.docker, dockerInspectArgs(containerId));
     return result.code === 0;
+  }
+
+  async stats(): Promise<ContainerUsage[]> {
+    const result = await runOrThrow(this.runner, this.docker, dockerStatsArgs());
+    return parseDockerStats(result.stdout);
   }
 
   async removeNetwork(name: string): Promise<void> {

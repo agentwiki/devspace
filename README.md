@@ -4,7 +4,7 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M15 (expansion X).** The full vertical is live end to end — sandbox
+> **Status: M16 (expansion XI).** The full vertical is live end to end — sandbox
 > engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
 > secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
 > (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
@@ -34,8 +34,11 @@ interface — a self-hostable "Claude Code on the web."
 > frugal: advisory leases elect a single PR poll reconciler (crash failover
 > within 2× the interval, immediate handover on clean shutdown), and
 > `SANDBOX_WARM_KEEP_ON_STOP=1` hands still-unclaimed warm stock to the
-> surviving controllers on a rolling deploy instead of destroying it.
-> See [`docs/roadmap.md`](docs/roadmap.md).
+> surviving controllers on a rolling deploy instead of destroying it. M16
+> adds live utilization truth: hosts report measured per-env usage
+> (`GET /stats`, grant units), and `SANDBOX_STATS_INTERVAL_MS` lets fleet
+> placement ranking demote measurably hot hosts while admission stays on
+> grants. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing
 

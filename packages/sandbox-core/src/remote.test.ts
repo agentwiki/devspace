@@ -514,3 +514,29 @@ describe('the devspace-exec wire', () => {
     expect(settled).toBeLessThan(500);
   });
 });
+
+describe('remote host stats (M16)', () => {
+  it('round-trips GET /stats when the core reports', async () => {
+    const sample = {
+      sampledAt: new Date().toISOString(),
+      cpuCount: 8,
+      memTotalMB: 16384,
+      envs: [{ envId: 'env_1', cpu: 0.5, memMB: 256 }],
+    };
+    const { client } = await startLoopback(
+      Object.assign(fakeCore(), { getHostStats: async () => sample }),
+    );
+    expect(await client.getHostStats()).toEqual(sample);
+  });
+
+  it('maps a stats-less core to NOT_FOUND (the sampler treats it as "no sample")', async () => {
+    const { client } = await startLoopback(fakeCore());
+    await expect(client.getHostStats()).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('requires the bearer like every non-health route', async () => {
+    const { url } = await startLoopback(fakeCore());
+    const bad = new RemoteSandboxCore(url, 'wrong-token');
+    await expect(bad.getHostStats()).rejects.toThrow(/bearer/i);
+  });
+});

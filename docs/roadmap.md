@@ -12,6 +12,7 @@ Expansion VII (resource-aware placement): **M12.**
 Expansion VIII (per-service identity on the internal API): **M13.**
 Expansion IX (multi-controller coordination): **M14.**
 Expansion X (singleton reconciler election): **M15.**
+Expansion XI (live utilization truth + usage-aware ranking): **M16.**
 
 ## M0 — Scaffolding (done)
 
@@ -564,23 +565,61 @@ Landed:
   "leak N containers on Ctrl-C" is the wrong zero-config failure mode. The
   stop-races-provision path honors the same choice.
 
-## M16+ — Expansion XI
+## M16 — Expansion XI: live utilization truth + usage-aware ranking (done)
+
+The ready half of the "live-utilization scheduling" seed lands: hosts
+report what their envs actually consume, and fleet placement RANKING weighs
+that live signal — admission stays entirely on grants, so the eviction
+story the seed's caveat warned about is deliberately not needed. One
+additive contract type, one optional runtime method, one host route, one
+orchestrator knob. Design of record: docs/m16-plan.md.
+
+Landed:
+
+- **Host utilization truth** — `docker stats --no-stream` behind the same
+  pure-argv/pure-parse discipline as every docker call since M1
+  (`ContainerRuntime.stats()`, optional on the seam), surfaced as
+  `getHostStats()`: per-env usage attributed by container-id prefix to OUR
+  live envs, in GRANT UNITS (cpu cores, MB — the units of
+  `ResourceLimits`, host budgets, and the `cpu=`/`mem=` flags), plus the
+  host's physical capacity and a sample timestamp. `GET /stats` serves it
+  with the census read's auth posture (no secret material); a core that
+  cannot report answers 404 and the fleet treats that as "no sample".
+- **Usage-aware ranking** — `SANDBOX_STATS_INTERVAL_MS` starts a tolerant
+  background sampler in the fleet layer (per-host failures log on
+  transitions and keep the old sample; placement never dials a host).
+  Ranking becomes `max(grant fractions, live fractions)` for hosts with a
+  FRESH sample (3× the interval): measured heat can only DEMOTE a
+  candidate, never admit or veto one, so a wrong/stale sample costs at
+  most one placement M12 would have made anyway. Live fractions weigh
+  usage against the declared budget when one exists, else against the
+  host's reported physical capacity. Unset/0 = byte-for-byte M12 ranking.
+- **Admission untouched, documented** — fit-checks (count slot, M12
+  budgets, the M14 host-side backstop) still evaluate grants only:
+  admitting on an instantaneous low reading invites oversubscription the
+  moment idle envs wake, and then something must be evicted — the half of
+  the seed that stays unpaid (M17+).
+
+## M17+ — Expansion XII
 
 NATS bus (still unnecessary: LISTEN/NOTIFY + the M14 claim survives N
 orchestrators by construction; `EventBus` remains the seam if volume ever
 demands it); turn-level failover (a controller that dies mid-turn loses
 that turn; the conversation resumes on whichever instance gets the next
-message — checkpointing is a product decision); live-utilization
-scheduling (M12/M14 weigh grants, deliberately — usage-based placement
-needs a cgroup stats pipeline and an eviction story) and disk-weighted
-placement (host disk budgets interact with image/layer sharing in ways a
-sum of grants does not model); certificate rotation/revocation tooling (at
-three certs per deployment, re-minting IS the revocation story — until it
-isn't); Discord Forum-channel session dashboard (presentation upgrade over
-`/sessions`); generalizing the M15 election to other roles when a genuinely
-singleton periodic task appears (nothing else wants it today: warm-pool
-top-up converges on the global ledger, the bus sweep is arbitrated per row
-by the claim). UI surface remains chat only — no self-hosted web UI (see
+message — checkpointing is a product decision); usage-based ADMISSION and
+eviction (the unpaid half of M16: scheduling on measured usage needs an
+eviction story — ranking got the win without the cost) and disk-weighted
+placement (host disk budgets interact with image/layer sharing in ways
+neither grants nor `docker stats` — which reports no disk at all — model);
+certificate rotation/revocation tooling (at three certs per deployment,
+re-minting IS the revocation story — until it isn't); Discord
+Forum-channel session dashboard (presentation upgrade over `/sessions`);
+generalizing the M15 election to other roles when a genuinely singleton
+periodic task appears (nothing else wants it today: warm-pool top-up
+converges on the global ledger, the bus sweep is arbitrated per row by the
+claim — and the M16 sampler deliberately runs on EVERY controller: each
+one's ranking needs the cache, and N cheap reads beat electing a
+publisher). UI surface remains chat only — no self-hosted web UI (see
 docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)

@@ -139,6 +139,17 @@ describe.skipIf(!availability.ok)('sandbox-core live integration', () => {
     expect(limits.nanoCpus).toBe(1_000_000_000); // 1 cpu
   });
 
+  it('reports a live utilization sample attributing our env (M16)', async () => {
+    const stats = await core.getHostStats();
+    expect(stats.cpuCount).toBeGreaterThan(0);
+    expect(stats.memTotalMB).toBeGreaterThan(0);
+    expect(Date.parse(stats.sampledAt)).not.toBeNaN();
+    const ours = stats.envs.find((e) => e.envId === env.envId);
+    expect(ours).toBeDefined();
+    expect(ours!.cpu).toBeGreaterThanOrEqual(0);
+    expect(ours!.memMB).toBeGreaterThan(0); // a running container occupies SOME memory
+  }, 60_000);
+
   it('tears an environment down and stops the container', async () => {
     const throwaway = await core.createEnvironment({
       baseImage: TEST_IMAGE,

@@ -9,6 +9,7 @@ import type { Provisioner, ProvisionResult } from './provision.js';
 import {
   DevcontainerSandboxCore,
   SandboxError,
+  hasHostStats,
   hostBudgetsFromEnv,
   maxEnvsFromEnv,
   parseFindOutput,
@@ -140,6 +141,8 @@ function makeCore(
     budgets?: HostBudgets;
     stateStore?: EnvStateStore;
     exists?: () => Promise<boolean>;
+    stats?: ContainerRuntime['stats'];
+    hostInfo?: { cpuCount: number; memTotalMB: number };
   } = {},
 ) {
   const destroy = vi.fn(async () => {});
@@ -163,6 +166,7 @@ function makeCore(
     exists: opts.exists ?? (async () => true),
     removeNetwork,
     containerIp,
+    ...(opts.stats ? { stats: opts.stats } : {}),
   };
   const provisioner: Provisioner = {
     provision: vi.fn(async (): Promise<ProvisionResult> => ({
@@ -192,6 +196,7 @@ function makeCore(
       maxEnvs: opts.maxEnvs,
       budgets: opts.budgets,
       stateStore: opts.stateStore,
+      hostInfo: opts.hostInfo,
     }),
     container,
     destroy,
@@ -837,5 +842,56 @@ describe('durable env table (M11)', () => {
     const summary = await core.recover(); // same process: the env is already live
     expect(summary.recovered).toEqual([]);
     expect((await core.listEnvironments()).filter((e) => e.envId === env.envId)).toHaveLength(1);
+  });
+});
+
+describe('getHostStats (M16 utilization truth)', () => {
+  const FULL_ID = 'abc123def4567890abc123def4567890abc123def4567890abc123def4567890';
+
+  it('attributes runtime samples to live envs by container-id prefix', async () => {
+    const stats = vi.fn(async () => [
+      { containerId: FULL_ID.slice(0, 12), cpu: 1.25, memMB: 512 },
+      { containerId: 'ffff00001111', cpu: 3, memMB: 2048 }, // foreign container
+    ]);
+    const { core } = makeCore(
+      new FakeContainer(),
+      { containerId: FULL_ID },
+      {
+        stats,
+        hostInfo: { cpuCount: 16, memTotalMB: 32768 },
+      },
+    );
+    const env = await core.createEnvironment({});
+    const sample = await core.getHostStats();
+    expect(sample.cpuCount).toBe(16);
+    expect(sample.memTotalMB).toBe(32768);
+    expect(sample.sampledAt).toMatch(/^\d{4}-/);
+    // Ours is attributed; the foreign container appears in no per-env row.
+    expect(sample.envs).toEqual([{ envId: env.envId, cpu: 1.25, memMB: 512 }]);
+  });
+
+  it('excludes non-ready envs and rejects without a stats-capable runtime', async () => {
+    const stats = vi.fn(async () => [{ containerId: 'cont-1', cpu: 1, memMB: 100 }]);
+    const withStats = makeCore(
+      new FakeContainer(),
+      {},
+      {
+        stats,
+        hostInfo: { cpuCount: 4, memTotalMB: 8192 },
+      },
+    );
+    const env = await withStats.core.createEnvironment({});
+    await withStats.core.destroyEnvironment(env.envId);
+    expect((await withStats.core.getHostStats()).envs).toEqual([]);
+
+    const without = makeCore();
+    await expect(without.core.getHostStats()).rejects.toMatchObject({ code: 'EXEC_FAILED' });
+  });
+
+  it('hasHostStats duck-checks the capability', () => {
+    expect(hasHostStats(makeCore().core)).toBe(true);
+    expect(hasHostStats({})).toBe(false);
+    expect(hasHostStats(null)).toBe(false);
+    expect(hasHostStats({ getHostStats: 42 })).toBe(false);
   });
 });

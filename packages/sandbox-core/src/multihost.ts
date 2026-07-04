@@ -4,21 +4,27 @@
  * fit-checked per dimension — an env-count slot (the M8/M9 backstop) plus,
  * when a host declares cpu/memory budgets, room for the request's grant —
  * and ranking is least fractional utilization (m12-plan Decisions 4–5), ties
- * in config order, draining and unfit hosts skipped. Routing is sticky and
- * in-memory with cold-miss rediscovery (M8 Decision 7): the remote hosts
- * durably ARE the env table, so an orchestrator restart re-learns its fleet
- * lazily by probing `getEnvironment` instead of orphaning live envs.
+ * in config order, draining and unfit hosts skipped. Since M16 an optional
+ * background sampler polls each host's live utilization (`getHostStats`) and
+ * ranking takes `max(grant fractions, fresh live fractions)` — the live
+ * signal only ever demotes a hot host, admission never consults it, and a
+ * stale/missing sample degrades to the pure grant score (m16-plan
+ * Decisions 3–4). Routing is sticky and in-memory with cold-miss rediscovery
+ * (M8 Decision 7): the remote hosts durably ARE the env table, so an
+ * orchestrator restart re-learns its fleet lazily by probing `getEnvironment`
+ * instead of orphaning live envs.
  */
 import type {
   CreateEnvironmentRequest,
   Environment,
   ExecRequest,
   FsEntry,
+  HostStats,
   SecretSpec,
 } from '@devspace/contracts';
 import { CreateEnvironmentRequestSchema, ResourceLimitsSchema } from '@devspace/contracts';
 import type { ExecStream } from './exec.js';
-import { SandboxError } from './sandbox.js';
+import { SandboxError, hasHostStats } from './sandbox.js';
 import type { SandboxCore } from './sandbox.js';
 
 export interface SandboxHost {
@@ -45,6 +51,17 @@ export interface SandboxHostConfig {
 }
 
 export const DEFAULT_HOST_CAPACITY = 8;
+
+export interface MultiHostOptions {
+  onLog?: (line: string) => void;
+  /** Clock seam for staleness tests. */
+  now?: () => number;
+  /**
+   * Freshness window override for tests; production takes 3× the sampling
+   * interval from `startStatsSampling` (m16-plan Decision 4).
+   */
+  statsStaleMs?: number;
+}
 
 /** The resource footprint an env (or in-flight placement) occupies. */
 interface EnvWeight {
@@ -91,11 +108,26 @@ export class MultiHostSandboxCore implements SandboxCore {
    */
   private readonly pending = new Map<string, HostLoad>();
 
-  constructor(hosts: SandboxHost[]) {
+  /** Latest utilization sample per host (M16); read by ranking, never admission. */
+  private readonly samples = new Map<string, { atMs: number; stats: HostStats }>();
+  /** Last sampling failure per host — logged on transitions only. */
+  private readonly lastStatsError = new Map<string, string>();
+  /** Samples older than this are ignored; undefined = live ranking off. */
+  private staleMs?: number;
+  private stopSampling?: () => void;
+  private readonly onLog: (line: string) => void;
+  private readonly now: () => number;
+  private readonly statsStaleMsOverride?: number;
+
+  constructor(hosts: SandboxHost[], opts: MultiHostOptions = {}) {
     if (hosts.length === 0) throw new Error('MultiHostSandboxCore needs at least one host');
     const names = new Set(hosts.map((h) => h.name));
     if (names.size !== hosts.length) throw new Error('sandbox host names must be unique');
     this.hosts = hosts.map((h) => ({ ...h }));
+    this.onLog = opts.onLog ?? (() => {});
+    this.now = opts.now ?? Date.now;
+    this.statsStaleMsOverride = opts.statsStaleMs;
+    this.staleMs = opts.statsStaleMs;
   }
 
   /** Flip a host's drain flag at runtime (placement-only; routing unaffected). */
@@ -129,6 +161,58 @@ export class MultiHostSandboxCore implements SandboxCore {
       }
     }
     return { adopted, failures };
+  }
+
+  /**
+   * One tolerant sampling round (M16): every stats-capable host is polled;
+   * a failure logs on transition and KEEPS the old sample (it fades out via
+   * staleness rather than flapping the ranking on one slow answer). A host
+   * that answers NOT_FOUND simply cannot report — logged, never an error.
+   */
+  async sampleStats(): Promise<void> {
+    for (const host of this.hosts) {
+      if (!hasHostStats(host.core)) continue;
+      try {
+        const stats = await host.core.getHostStats();
+        this.samples.set(host.name, { atMs: this.now(), stats });
+        if (this.lastStatsError.delete(host.name)) {
+          this.onLog(`stats: host ${host.name} reporting again`);
+        }
+      } catch (err) {
+        const message =
+          err instanceof SandboxError && err.code === 'NOT_FOUND'
+            ? 'host does not report stats'
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        if (this.lastStatsError.get(host.name) !== message) {
+          this.lastStatsError.set(host.name, message);
+          this.onLog(`stats: host ${host.name}: ${message}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Start the background utilization sampler (M16, m16-plan Decision 4).
+   * Freshness is 3× the interval unless a test override was constructed in.
+   * Returns the stop fn; stopping ends live ranking (samples go unfresh).
+   */
+  startStatsSampling(intervalMs: number): () => void {
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+      throw new Error(`stats sampling interval must be positive milliseconds, got ${intervalMs}`);
+    }
+    if (this.stopSampling) throw new Error('stats sampling is already running');
+    this.staleMs = this.statsStaleMsOverride ?? 3 * intervalMs;
+    void this.sampleStats();
+    const timer = setInterval(() => void this.sampleStats(), intervalMs);
+    timer.unref?.();
+    this.stopSampling = () => {
+      clearInterval(timer);
+      this.staleMs = this.statsStaleMsOverride;
+      this.stopSampling = undefined;
+    };
+    return this.stopSampling;
   }
 
   async createEnvironment(req: CreateEnvironmentRequest): Promise<Environment> {
@@ -285,14 +369,38 @@ export class MultiHostSandboxCore implements SandboxCore {
   }
 
   /**
+   * A host's live utilization fractions (M16): summed measured usage over the
+   * declared budget when one exists (the operator's dial), else over the
+   * host's reported physical capacity. Undefined without a FRESH sample —
+   * ranking then falls back to grants alone, never to unplaceable.
+   */
+  private liveFractions(host: SandboxHost): { cpu: number; memMB: number } | undefined {
+    if (this.staleMs === undefined) return undefined;
+    const sample = this.samples.get(host.name);
+    if (!sample || this.now() - sample.atMs > this.staleMs) return undefined;
+    let cpu = 0;
+    let memMB = 0;
+    for (const env of sample.stats.envs) {
+      cpu += env.cpu;
+      memMB += env.memMB;
+    }
+    return {
+      cpu: cpu / (host.cpu ?? sample.stats.cpuCount),
+      memMB: memMB / (host.memMB ?? sample.stats.memTotalMB),
+    };
+  }
+
+  /**
    * Weighted least-loaded placement (m12-plan Decisions 4–5). Admission: not
    * draining, an env-count slot free, and the request's grant fits every
    * budget the host declares. Ranking: lowest max-fractional utilization over
    * the host's declared dimensions (count/capacity always; cpu and memory
    * when budgeted — the max keeps a cpu-saturated, memory-empty host from
-   * winning on an average). Strict `<` keeps ties in config order. The three
-   * refusals stay distinguishable: full, unfit, and draining are different
-   * operator problems.
+   * winning on an average), since M16 maxed with the host's fresh live
+   * fractions — measured heat can DEMOTE a candidate, never admit or veto
+   * one (m16-plan Decision 3). Strict `<` keeps ties in config order. The
+   * three refusals stay distinguishable: full, unfit, and draining are
+   * different operator problems.
    */
   private place(weight: EnvWeight): SandboxHost {
     const loads = this.loads();
@@ -310,10 +418,13 @@ export class MultiHostSandboxCore implements SandboxCore {
       if (hasSlot) anySlot = true;
       if (fits) anyFit = true;
       if (host.draining || !fits) continue;
+      const live = this.liveFractions(host);
       const score = Math.max(
         load.count / host.capacity,
         host.cpu === undefined ? 0 : load.cpu / host.cpu,
         host.memMB === undefined ? 0 : load.memMB / host.memMB,
+        live?.cpu ?? 0,
+        live?.memMB ?? 0,
       );
       if (score < bestScore) {
         best = host;
@@ -445,4 +556,20 @@ export function sandboxHostsFromEnv(
   const raw = env.SANDBOX_HOSTS?.trim();
   if (!raw) return undefined;
   return parseSandboxHosts(raw);
+}
+
+/**
+ * `SANDBOX_STATS_INTERVAL_MS` from the environment (M16): the fleet's
+ * utilization sampling cadence. Unset or 0 = off (byte-for-byte M12 grant
+ * ranking); anything else must be a positive integer of milliseconds — a
+ * typo'd knob refuses at boot, never silently means "off" (the fail-fast
+ * precedent).
+ */
+export function statsIntervalFromEnv(env: Record<string, string | undefined>): number | undefined {
+  const raw = env.SANDBOX_STATS_INTERVAL_MS?.trim();
+  if (!raw || raw === '0') return undefined;
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`SANDBOX_STATS_INTERVAL_MS must be a nonnegative integer of ms, got "${raw}"`);
+  }
+  return Number(raw);
 }

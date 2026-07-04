@@ -7,7 +7,10 @@ import {
   dockerInspectArgs,
   dockerInspectNetworksArgs,
   dockerRmArgs,
+  dockerStatsArgs,
+  parseByteSize,
   parseContainerIp,
+  parseDockerStats,
 } from './runtime.js';
 
 describe('docker argv builders', () => {
@@ -141,5 +144,87 @@ describe('parseContainerIp (M6 preview)', () => {
     const rt = new DockerRuntime(runner);
     expect(await rt.containerIp('c1', 'devspace_env_1')).toBe('172.29.0.2');
     expect(await rt.containerIp('gone')).toBeNull();
+  });
+});
+
+describe('docker stats (M16 utilization truth)', () => {
+  const LINE = (over: Record<string, string>): string =>
+    JSON.stringify({
+      ID: 'abc123def456',
+      Container: 'abc123def456',
+      Name: 'devspace_env',
+      CPUPerc: '12.50%',
+      MemPerc: '3.20%',
+      MemUsage: '512MiB / 15.61GiB',
+      NetIO: '1.2kB / 0B',
+      BlockIO: '0B / 0B',
+      PIDs: '7',
+      ...over,
+    });
+
+  it('builds the argv (sample everything, never named ids)', () => {
+    expect(dockerStatsArgs()).toEqual(['stats', '--no-stream', '--format', '{{json .}}']);
+  });
+
+  it('parses usage rows into grant units (cores + MB)', () => {
+    const rows = parseDockerStats(
+      `${LINE({})}\n${LINE({ ID: 'ffff00001111', CPUPerc: '250.00%', MemUsage: '1.5GiB / 15.61GiB' })}\n`,
+    );
+    expect(rows).toEqual([
+      { containerId: 'abc123def456', cpu: 0.125, memMB: 512 },
+      { containerId: 'ffff00001111', cpu: 2.5, memMB: 1536 },
+    ]);
+  });
+
+  it('falls back to Container when ID is missing', () => {
+    const raw = JSON.stringify({
+      Container: 'cafe00000000',
+      CPUPerc: '0.00%',
+      MemUsage: '1MiB / 1GiB',
+    });
+    expect(parseDockerStats(raw)).toEqual([{ containerId: 'cafe00000000', cpu: 0, memMB: 1 }]);
+  });
+
+  it('is total: junk lines, bad percentages, and unknown units are skipped', () => {
+    const garbage = [
+      'not json',
+      'null',
+      '{}',
+      LINE({ CPUPerc: 'hot' }),
+      LINE({ MemUsage: 'lots' }),
+      LINE({ MemUsage: '3parsecs / 1GiB' }),
+      JSON.stringify({ CPUPerc: '1.00%', MemUsage: '1MiB / 1GiB' }), // no id at all
+      LINE({ ID: 'good00000000' }),
+    ].join('\n');
+    expect(parseDockerStats(garbage)).toEqual([
+      { containerId: 'good00000000', cpu: 0.125, memMB: 512 },
+    ]);
+  });
+
+  it('parseByteSize handles binary and decimal units (and rejects garbage)', () => {
+    expect(parseByteSize('512MiB')).toBe(512);
+    expect(parseByteSize('1.5GiB')).toBe(1536);
+    expect(parseByteSize('1024KiB')).toBe(1);
+    expect(parseByteSize('1MB')).toBeCloseTo(1000 ** 2 / 1024 ** 2, 6);
+    expect(parseByteSize('42B')).toBeCloseTo(42 / 1024 ** 2, 9);
+    expect(parseByteSize('fast')).toBeNull();
+    expect(parseByteSize('12XB')).toBeNull();
+    expect(parseByteSize('')).toBeNull();
+  });
+
+  it('DockerRuntime.stats runs the argv and parses (throwing on failure)', async () => {
+    const runner: CommandRunner = {
+      run: vi.fn(async () => ({ code: 0, stdout: `${LINE({})}\n`, stderr: '' })),
+      stream: vi.fn(),
+    };
+    const rt = new DockerRuntime(runner, { dockerPath: '/usr/bin/docker' });
+    expect(await rt.stats()).toEqual([{ containerId: 'abc123def456', cpu: 0.125, memMB: 512 }]);
+    expect(runner.run).toHaveBeenCalledWith('/usr/bin/docker', dockerStatsArgs(), undefined);
+
+    const failing: CommandRunner = {
+      run: vi.fn(async () => ({ code: 1, stdout: '', stderr: 'daemon down' })),
+      stream: vi.fn(),
+    };
+    await expect(new DockerRuntime(failing).stats()).rejects.toThrow(/daemon down/);
   });
 });

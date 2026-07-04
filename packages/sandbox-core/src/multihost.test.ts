@@ -11,6 +11,7 @@ import {
   MultiHostSandboxCore,
   parseSandboxHosts,
   sandboxHostsFromEnv,
+  statsIntervalFromEnv,
 } from './multihost.js';
 import { SandboxError } from './sandbox.js';
 import type { SandboxCore } from './sandbox.js';
@@ -574,5 +575,159 @@ describe('parseSandboxHosts', () => {
     expect(sandboxHostsFromEnv({})).toBeUndefined();
     expect(sandboxHostsFromEnv({ SANDBOX_HOSTS: '  ' })).toBeUndefined();
     expect(sandboxHostsFromEnv({ SANDBOX_HOSTS: 'a=http://h:1' })).toHaveLength(1);
+  });
+});
+
+describe('usage-aware ranking (M16)', () => {
+  type Sample = {
+    sampledAt: string;
+    cpuCount: number;
+    memTotalMB: number;
+    envs: { envId: string; cpu: number; memMB: number }[];
+  };
+  const sample = (cpu: number, memMB: number, over: Partial<Sample> = {}): Sample => ({
+    sampledAt: new Date(0).toISOString(),
+    cpuCount: 4,
+    memTotalMB: 8192,
+    envs: [{ envId: 'env_x', cpu, memMB }],
+    ...over,
+  });
+
+  /** A fake host whose getHostStats is swappable per test. */
+  function statsHost(name: string, getHostStats: () => Promise<Sample>) {
+    return Object.assign(fakeHost(name), { getHostStats });
+  }
+
+  it('a fresh hot sample demotes a host out of the tie it would win on grants', async () => {
+    let clock = 1_000;
+    const a = statsHost('a', async () => sample(3, 128)); // 3/4 cores busy
+    const b = statsHost('b', async () => sample(0.1, 64)); // idle
+    const multi = new MultiHostSandboxCore(
+      [
+        { name: 'a', core: a, capacity: 4 },
+        { name: 'b', core: b, capacity: 4 },
+      ],
+      { now: () => clock, statsStaleMs: 1_000 },
+    );
+    await multi.sampleStats();
+
+    // Grants tie at zero → config order says a; the live signal says b.
+    expect((await multi.createEnvironment(CREATE)).envId).toMatch(/^env_b_/);
+
+    // Past the freshness window the samples fall away: pure grant ranking
+    // again, and with one env now counted on b the tie-break returns to a.
+    clock += 1_001;
+    expect((await multi.createEnvironment(CREATE)).envId).toMatch(/^env_a_/);
+  });
+
+  it('weighs live usage against the declared budget when one exists', async () => {
+    const clock = 1_000;
+    // Same measured heat; a's operator budgeted 2 cores (fraction 1.5 — over),
+    // b is unbudgeted so the physical 16 cores apply (fraction ~0.19).
+    const a = statsHost('a', async () => sample(3, 64, { cpuCount: 16 }));
+    const b = statsHost('b', async () => sample(3, 64, { cpuCount: 16 }));
+    const multi = new MultiHostSandboxCore(
+      [
+        { name: 'a', core: a, capacity: 4, cpu: 8 },
+        { name: 'b', core: b, capacity: 4 },
+      ],
+      { now: () => clock, statsStaleMs: 1_000 },
+    );
+    await multi.sampleStats();
+    void clock;
+    expect((await multi.createEnvironment(CREATE)).envId).toMatch(/^env_b_/);
+  });
+
+  it('never vetoes admission: the only fitting host places even when scorching', async () => {
+    const clock = 1_000;
+    const a = statsHost('a', async () => sample(3.9, 8000));
+    const multi = new MultiHostSandboxCore([{ name: 'a', core: a, capacity: 4 }], {
+      now: () => clock,
+      statsStaleMs: 1_000,
+    });
+    await multi.sampleStats();
+    void clock;
+    expect((await multi.createEnvironment(CREATE)).envId).toMatch(/^env_a_/);
+  });
+
+  it('is byte-for-byte grant ranking when sampling never ran', async () => {
+    const a = statsHost('a', async () => sample(4, 8192)); // would demote if consulted
+    const b = statsHost('b', async () => sample(0, 0));
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: a, capacity: 2 },
+      { name: 'b', core: b, capacity: 2 },
+    ]);
+    expect((await multi.createEnvironment(CREATE)).envId).toMatch(/^env_a_/);
+  });
+
+  it('tolerates failing hosts: old samples persist, errors log on transitions only', async () => {
+    let clock = 1_000;
+    const logs: string[] = [];
+    let mode: 'ok' | 'boom' | 'unsupported' = 'ok';
+    const a = statsHost('a', async () => {
+      if (mode === 'boom') throw new SandboxError('EXEC_FAILED', 'connection refused');
+      if (mode === 'unsupported')
+        throw new SandboxError('NOT_FOUND', 'this sandbox core does not report host stats');
+      return sample(3, 128);
+    });
+    const b = statsHost('b', async () => sample(0.1, 64));
+    const multi = new MultiHostSandboxCore(
+      [
+        { name: 'a', core: a, capacity: 4 },
+        { name: 'b', core: b, capacity: 4 },
+      ],
+      { now: () => clock, statsStaleMs: 1_000, onLog: (line) => logs.push(line) },
+    );
+    await multi.sampleStats();
+
+    // The next two rounds fail — the old sample holds (still fresh) and the
+    // identical error logs once, not per round.
+    mode = 'boom';
+    clock += 400;
+    await multi.sampleStats();
+    clock += 400;
+    await multi.sampleStats();
+    expect(logs).toEqual(['stats: host a: connection refused']);
+    expect((await multi.createEnvironment(CREATE)).envId).toMatch(/^env_b_/); // sample from t=1000 still fresh
+
+    // A host that answers NOT_FOUND is "cannot report", a distinct transition.
+    mode = 'unsupported';
+    await multi.sampleStats();
+    expect(logs[1]).toBe('stats: host a: host does not report stats');
+
+    // Recovery logs the flip back and fresh data flows again.
+    mode = 'ok';
+    await multi.sampleStats();
+    expect(logs[2]).toBe('stats: host a reporting again');
+  });
+
+  it('startStatsSampling: immediate round, guarded restarts, stop ends live ranking', async () => {
+    let calls = 0;
+    const a = statsHost('a', async () => {
+      calls += 1;
+      return sample(1, 64);
+    });
+    const multi = new MultiHostSandboxCore([{ name: 'a', core: a, capacity: 4 }]);
+    expect(() => multi.startStatsSampling(0)).toThrow(/positive/);
+    const stop = multi.startStatsSampling(60_000);
+    expect(() => multi.startStatsSampling(60_000)).toThrow(/already running/);
+    await new Promise((r) => setImmediate(r));
+    expect(calls).toBe(1); // the immediate round; the next is 60s out
+    stop();
+    const again = multi.startStatsSampling(60_000); // restart after stop is fine
+    again();
+  });
+
+  it('statsIntervalFromEnv parses, defaults off, and refuses garbage', () => {
+    expect(statsIntervalFromEnv({})).toBeUndefined();
+    expect(statsIntervalFromEnv({ SANDBOX_STATS_INTERVAL_MS: '' })).toBeUndefined();
+    expect(statsIntervalFromEnv({ SANDBOX_STATS_INTERVAL_MS: '0' })).toBeUndefined();
+    expect(statsIntervalFromEnv({ SANDBOX_STATS_INTERVAL_MS: '15000' })).toBe(15_000);
+    expect(() => statsIntervalFromEnv({ SANDBOX_STATS_INTERVAL_MS: 'fast' })).toThrow(
+      /SANDBOX_STATS_INTERVAL_MS/,
+    );
+    expect(() => statsIntervalFromEnv({ SANDBOX_STATS_INTERVAL_MS: '-5' })).toThrow(
+      /SANDBOX_STATS_INTERVAL_MS/,
+    );
   });
 });

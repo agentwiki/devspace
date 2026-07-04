@@ -44,7 +44,7 @@ import {
   verifyBearer,
   writeJsonLine,
 } from './remote-protocol.js';
-import { SandboxError } from './sandbox.js';
+import { SandboxError, hasHostStats } from './sandbox.js';
 import type { SandboxCore } from './sandbox.js';
 
 export const ERROR_STATUS: Record<ErrorCode, number> = {
@@ -137,6 +137,17 @@ async function handle(
     }
   } else if (token && !verifyBearer(req.headers.authorization, token)) {
     return sendJson(res, 401, { code: 'UNAUTHORIZED', message: 'bad or missing bearer token' });
+  }
+
+  // Live utilization (M16): usage numbers and env ids only — no secret
+  // material — so it keeps the census read's auth posture (m16-plan
+  // Decision 6). A core without the capability is a 404 the fleet sampler
+  // treats as "no sample", never an error.
+  if (method === 'GET' && url.pathname === '/stats') {
+    if (!hasHostStats(core)) {
+      throw new SandboxError('NOT_FOUND', 'this sandbox core does not report host stats');
+    }
+    return sendJson(res, 200, await core.getHostStats());
   }
 
   if (segments[0] === 'environments') {

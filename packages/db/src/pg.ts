@@ -60,6 +60,7 @@ function mapWorkUnit(r: WorkUnitRow): WorkUnit {
     prUrl: opt(r.prUrl),
     createdAt: iso(r.createdAt),
     updatedAt: iso(r.updatedAt),
+    lastActivityAt: r.lastActivityAt ? iso(r.lastActivityAt) : undefined,
   };
 }
 
@@ -211,6 +212,12 @@ export function createPostgresRepositories(pool: Pool): Repositories {
             .returning();
           return mapWorkUnit(row!);
         });
+      },
+      async touch(id) {
+        await db
+          .update(workUnits)
+          .set({ lastActivityAt: sql`now()` })
+          .where(eq(workUnits.id, id));
       },
     },
 

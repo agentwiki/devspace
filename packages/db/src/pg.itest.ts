@@ -137,6 +137,25 @@ suite('postgres repositories', () => {
     expect(rows[1]?.action).toBe('teardown');
   });
 
+  it('touch stamps lastActivityAt without moving updatedAt or state (M17)', async () => {
+    const repos = createPostgresRepositories(pool);
+    const conv = await repos.conversations.create({
+      platform: 'slack',
+      externalChannelId: 'C-touch',
+      userId: 'u1',
+    });
+    const wu = await repos.workUnits.create({ conversationId: conv.id });
+    expect(wu.lastActivityAt).toBeUndefined(); // nullable column: pre-touch rows read as absent
+
+    await repos.workUnits.touch(wu.id);
+    const touched = await repos.workUnits.get(wu.id);
+    expect(touched?.lastActivityAt).toBeTruthy();
+    expect(touched?.updatedAt).toBe(wu.updatedAt);
+    expect(touched?.state).toBe('CREATED');
+    // Missing ids are a no-op, matching the in-memory contract.
+    await expect(repos.workUnits.touch('missing')).resolves.toBeUndefined();
+  });
+
   it('rejects a genuinely illegal transition', async () => {
     const repos = createPostgresRepositories(pool);
     const conv = await repos.conversations.create({

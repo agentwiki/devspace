@@ -1,0 +1,1 @@
+ALTER TABLE "work_units" ADD COLUMN "last_activity_at" timestamp with time zone;

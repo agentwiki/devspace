@@ -154,6 +154,18 @@ export class Orchestrator {
     return this.deps.render(command);
   }
 
+  /**
+   * Stamp tenant activity (M17): the idle clock the lifecycle reaper reads.
+   * Best-effort — activity bookkeeping must never fail the event it rode in on.
+   */
+  private async touchActivity(workUnitId: string): Promise<void> {
+    try {
+      await this.workUnits.touch(workUnitId);
+    } catch {
+      /* best-effort */
+    }
+  }
+
   /** The in-chat entry point for secret setup (M6-D) — a single stable action
    * id the platform adapter turns into its own UI (Slack: a modal). */
   private emitSecretsPrompt(conversationId: string): Promise<void> {
@@ -318,6 +330,8 @@ export class Orchestrator {
   ): Promise<void> {
     await this.assertOwnership(event.conversationId, event.userId);
     const registry = this.registryFor(event.conversationId);
+    const wu = await this.deps.repos.workUnits.getByConversation(event.conversationId);
+    if (wu) await this.touchActivity(wu.id);
     // Register the plaintext BEFORE anything else can render: an agent (or
     // user) echoing the value is redacted from the moment it exists here.
     registry.register(event.value);
@@ -347,6 +361,7 @@ export class Orchestrator {
     await this.assertOwnership(event.conversationId, event.userId);
     const registry = this.registryFor(event.conversationId);
     const wu = await this.requireWorkUnit(event.conversationId);
+    await this.touchActivity(wu.id);
 
     if (STATE_RANK[wu.state] < STATE_RANK['READY']) {
       await this.emit(
@@ -450,6 +465,7 @@ export class Orchestrator {
     await this.assertOwnership(event.conversationId, event.userId);
     const registry = this.registryFor(event.conversationId);
     const wu = await this.requireWorkUnit(event.conversationId);
+    await this.touchActivity(wu.id);
     const action = classifyAction(event.actionId);
 
     switch (action.kind) {

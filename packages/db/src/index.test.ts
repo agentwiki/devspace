@@ -68,6 +68,34 @@ describe('in-memory repositories', () => {
     await expect(repos.conversations.listByUser('slack', 'nobody')).resolves.toEqual([]);
   });
 
+  it('touch bumps lastActivityAt only — updatedAt stays owned by transition (M17)', async () => {
+    let tick = 0;
+    const repos = createInMemoryRepositories(() => new Date(tick).toISOString());
+    const conv = await repos.conversations.create({
+      platform: 'slack',
+      externalChannelId: 'chan-t',
+      userId: 'u1',
+    });
+    const wu = await repos.workUnits.create({ conversationId: conv.id });
+    expect(wu.lastActivityAt).toBeUndefined(); // never touched — the idle clock falls back to updatedAt
+
+    tick = 5_000;
+    await repos.workUnits.touch(wu.id);
+    const touched = await repos.workUnits.get(wu.id);
+    expect(touched?.lastActivityAt).toBe(new Date(5_000).toISOString());
+    expect(touched?.updatedAt).toBe(wu.updatedAt); // untouched
+    expect(touched?.state).toBe(wu.state);
+
+    // A transition leaves lastActivityAt alone in return.
+    tick = 9_000;
+    const moved = await repos.workUnits.transition(wu.id, 'repoChoice');
+    expect(moved.lastActivityAt).toBe(new Date(5_000).toISOString());
+    expect(moved.updatedAt).toBe(new Date(9_000).toISOString());
+
+    // Touching a missing unit is a no-op.
+    await expect(repos.workUnits.touch('missing')).resolves.toBeUndefined();
+  });
+
   it('rejects an illegal transition', async () => {
     const repos = createInMemoryRepositories();
     const conv = await repos.conversations.create({

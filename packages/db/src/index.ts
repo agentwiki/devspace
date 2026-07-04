@@ -71,6 +71,12 @@ export interface WorkUnitRepo {
   listByState(state: WorkState): Promise<WorkUnit[]>;
   /** Apply an FSM transition atomically; throws on an illegal transition. */
   transition(id: string, event: WorkEvent, patch?: Partial<WorkUnit>): Promise<WorkUnit>;
+  /**
+   * Record tenant activity (M17): bump `lastActivityAt` and nothing else —
+   * `updatedAt` stays owned by `transition`. A missing id is a no-op; the
+   * lifecycle reaper measures idleness against max(lastActivityAt, updatedAt).
+   */
+  touch(id: string): Promise<void>;
 }
 
 export interface SecretRepo {
@@ -234,6 +240,10 @@ export function createInMemoryRepositories(
         const updated: WorkUnit = { ...wu, ...patch, state: next, updatedAt: now() };
         workUnits.set(wid, updated);
         return updated;
+      },
+      async touch(wid) {
+        const wu = workUnits.get(wid);
+        if (wu) workUnits.set(wid, { ...wu, lastActivityAt: now() });
       },
     },
     secrets: {

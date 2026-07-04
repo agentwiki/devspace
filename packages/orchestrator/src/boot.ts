@@ -27,11 +27,13 @@ import {
   RemoteSandboxCore,
   WarmPoolSandboxCore,
   assertRuntimeAvailable,
+  envStateStoreFromEnv,
   hardeningFromEnv,
   nodeCommandRunner,
   previewProxyFromEnv,
   sandboxHostsFromEnv,
   warmPoolsFromEnv,
+  type EnvStateStore,
   type PreviewProxyOptions,
   type SandboxCore,
   type SandboxHardening,
@@ -103,6 +105,13 @@ export interface OrchestratorBootConfig {
   /** Bearer for the sandbox hosts (defaults to DEVSPACE_INTERNAL_TOKEN). */
   internalToken?: string;
   /**
+   * Durable env table for the LOCAL in-process sandbox (M11). Defaults to
+   * `envStateStoreFromEnv(process.env)` (SANDBOX_STATE_DIR); recovery runs
+   * before boot returns. In fleet mode the table belongs to each sandbox
+   * host's own boot, like hardening/preview.
+   */
+  envStateStore?: EnvStateStore;
+  /**
    * Warm pools (M9, m9-plan Decision 8). Defaults to
    * `warmPoolsFromEnv(process.env)` (SANDBOX_WARM_POOLS=repoUrl[#ref]=size,…).
    * When set, the sandbox — local or fleet — is wrapped in a
@@ -145,9 +154,9 @@ export async function bootOrchestrator(
     // Explicitly-passed local sandbox options would be silently dead in fleet
     // mode — refuse loudly instead (env-var equivalents are simply not read
     // here: they may legitimately target the sandbox hosts' own boots).
-    if (config.sandboxHardening || config.preview) {
+    if (config.sandboxHardening || config.preview || config.envStateStore) {
       throw new Error(
-        'sandboxHosts is incompatible with sandboxHardening/preview — configure them on each sandbox host',
+        'sandboxHosts is incompatible with sandboxHardening/preview/envStateStore — configure them on each sandbox host',
       );
     }
     const fleet = new MultiHostSandboxCore(
@@ -184,7 +193,18 @@ export async function bootOrchestrator(
       preview = new PreviewProxy(previewOptions);
       await preview.start();
     }
-    sandbox = new DevcontainerSandboxCore({ hardening, preview });
+    // Durable env table (M11): the in-process sandbox recovers what its
+    // predecessor was serving BEFORE anything places or sweeps.
+    const stateStore = config.envStateStore ?? envStateStoreFromEnv(process.env);
+    const local = new DevcontainerSandboxCore({ hardening, preview, stateStore });
+    if (stateStore) {
+      const { recovered, discarded, skipped } = await local.recover();
+      console.log(
+        `[orchestrator] durable env table: recovered ${recovered.length}, cleaned up ${discarded.length}` +
+          (skipped.length ? `, skipped ${skipped.length} corrupt file(s)` : ''),
+      );
+    }
+    sandbox = local;
   }
   // Warm pools (M9) compose OVER whatever sandbox this boot built. Templates
   // are built with the same mounts the orchestrator provisions with — claim

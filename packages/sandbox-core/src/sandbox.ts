@@ -19,6 +19,7 @@ import type {
 import { CreateEnvironmentRequestSchema } from '@devspace/contracts';
 import { nodeCommandRunner, runOrThrow } from './cli.js';
 import type { CommandRunner } from './cli.js';
+import type { EnvStateStore, PersistedEnvState } from './env-state.js';
 import { captureExec } from './exec.js';
 import type { ExecStream } from './exec.js';
 import type { SandboxHardening } from './hardening.js';
@@ -97,12 +98,16 @@ export class DevcontainerSandboxCore implements SandboxCore {
   /** Host-side cap on live envs (M9, m9-plan Decision 3); undefined = uncapped. */
   private readonly maxEnvs?: number;
 
+  /** Durable env table (M11); absent = the documented in-memory posture. */
+  private readonly stateStore?: EnvStateStore;
+
   constructor(
     deps?: Partial<SandboxCoreDeps> & {
       runner?: CommandRunner;
       hardening?: SandboxHardening;
       maxEnvs?: number;
       gitPath?: string;
+      stateStore?: EnvStateStore;
     },
   ) {
     const runner = deps?.runner ?? nodeCommandRunner;
@@ -113,6 +118,7 @@ export class DevcontainerSandboxCore implements SandboxCore {
       deps?.provisioner ?? new DevcontainerProvisioner(runner, { hardening: deps?.hardening });
     this.preview = deps?.preview;
     this.maxEnvs = deps?.maxEnvs;
+    this.stateStore = deps?.stateStore;
   }
 
   async createEnvironment(input: CreateEnvironmentRequest): Promise<Environment> {
@@ -146,6 +152,17 @@ export class DevcontainerSandboxCore implements SandboxCore {
       ref: req.ref,
     };
     this.envs.set(envId, record);
+    if (this.stateStore) {
+      try {
+        await this.stateStore.save(persistedState(record));
+      } catch (err) {
+        record.env = { ...record.env, status: 'failed' };
+        throw new SandboxError(
+          'PROVISION_FAILED',
+          `failed to persist ${envId}: ${errMessage(err)}`,
+        );
+      }
+    }
 
     try {
       const { containerId, networkName, workspaceFolder } = await this.provisioner.provision(
@@ -156,12 +173,27 @@ export class DevcontainerSandboxCore implements SandboxCore {
       record.networkName = networkName;
       record.workspaceFolder = workspaceFolder;
       record.env = { ...record.env, status: 'ready', containerId };
+      if (this.stateStore) {
+        try {
+          await this.stateStore.save(persistedState(record));
+        } catch (err) {
+          // A durable host must not serve an env it will forget (m11-plan
+          // Decision 5) — destroy rather than hand out.
+          await this.runtime.destroy(containerId).catch(() => {});
+          if (networkName) await this.runtime.removeNetwork?.(networkName).catch(() => {});
+          record.containerId = undefined;
+          record.networkName = undefined;
+          throw new Error(`failed to persist env state: ${errMessage(err)}`);
+        }
+      }
       // File-target secrets land inside the container only after it is ready,
       // so nothing sensitive ever touches the workspace on disk.
       await this.writeFileSecrets(envId, req.secrets);
       return record.env;
     } catch (err) {
       record.env = { ...record.env, status: 'failed' };
+      // A failed env must not be re-adopted at the next boot.
+      await this.stateStore?.remove(envId).catch(() => {});
       throw new SandboxError(
         'PROVISION_FAILED',
         `failed to provision ${envId}: ${errMessage(err)}`,
@@ -223,6 +255,21 @@ export class DevcontainerSandboxCore implements SandboxCore {
       }
     }
     const { poolKey: _poolKey, ...claimed } = record.env;
+    // Persist the unmark BEFORE applying it in memory: a claim the durable
+    // table forgot would resurrect the pool mark at the next restart and let
+    // the orphan sweep hard-reset a TENANT workspace (m11-plan Decision 5).
+    // On failure nothing moved — memory and disk still agree the env is
+    // pool-owned, and the claimer destroys and goes cold.
+    if (this.stateStore) {
+      try {
+        await this.stateStore.save(persistedState({ ...record, env: claimed }));
+      } catch (err) {
+        throw new SandboxError(
+          'EXEC_FAILED',
+          `claim of ${envId} failed to persist: ${errMessage(err)}`,
+        );
+      }
+    }
     record.env = claimed;
     return record.env;
   }
@@ -231,6 +278,9 @@ export class DevcontainerSandboxCore implements SandboxCore {
     const record = this.envs.get(envId);
     if (!record) throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
     record.env = { ...record.env, status: 'stopping' };
+    // Best-effort: an interrupted destroy must not be re-adopted as ready at
+    // the next boot — recovery completes it instead (m11-plan Decision 4).
+    if (this.stateStore) await this.stateStore.save(persistedState(record)).catch(() => {});
     // No preview URL survives its env (m6-plan Decision 5).
     this.preview?.revokeEnv(envId);
     if (record.containerId) {
@@ -243,6 +293,60 @@ export class DevcontainerSandboxCore implements SandboxCore {
       record.networkName = undefined;
     }
     record.env = { ...record.env, status: 'stopped', containerId: undefined };
+    // Best-effort: a leftover file for a dead container is dropped at recovery.
+    if (this.stateStore) await this.stateStore.remove(envId).catch(() => {});
+  }
+
+  /**
+   * Boot-time recovery (M11): re-adopt what the durable table remembers,
+   * trusting the daemon over the file (m11-plan Decision 4). Only a `ready`
+   * record whose container still exists comes back — with an EMPTY per-exec
+   * secret map (secrets are never on host disk; the control plane re-attaches
+   * via `applySecrets`) and empty `ports` (preview routes are in-memory
+   * capabilities). Anything else is a crashed transition: best-effort destroy
+   * of container + per-env network, and the record is dropped. Corrupt state
+   * files are reported in `skipped`, never fatal. No-op without a store.
+   */
+  async recover(): Promise<{ recovered: string[]; discarded: string[]; skipped: string[] }> {
+    const summary = {
+      recovered: [] as string[],
+      discarded: [] as string[],
+      skipped: [] as string[],
+    };
+    if (!this.stateStore) return summary;
+    const { states, skipped } = await this.stateStore.loadAll();
+    summary.skipped = skipped;
+    for (const state of states) {
+      if (this.envs.has(state.envId)) continue;
+      const alive = state.containerId ? await this.runtime.exists(state.containerId) : false;
+      if (state.status === 'ready' && alive) {
+        this.envs.set(state.envId, {
+          env: {
+            envId: state.envId,
+            status: 'ready',
+            containerId: state.containerId,
+            ports: [],
+            createdAt: state.createdAt,
+            ...(state.poolKey ? { poolKey: state.poolKey } : {}),
+          },
+          containerId: state.containerId,
+          networkName: state.networkName,
+          secretEnv: {},
+          workspaceFolder: state.workspaceFolder,
+          repoUrl: state.repoUrl,
+          ref: state.ref,
+        });
+        summary.recovered.push(state.envId);
+      } else {
+        if (alive) await this.runtime.destroy(state.containerId!).catch(() => {});
+        if (state.networkName) {
+          await this.runtime.removeNetwork?.(state.networkName).catch(() => {});
+        }
+        await this.stateStore.remove(state.envId).catch(() => {});
+        summary.discarded.push(state.envId);
+      }
+    }
+    return summary;
   }
 
   // `async` so a failed env lookup rejects the promise rather than throwing synchronously.
@@ -371,6 +475,24 @@ export function maxEnvsFromEnv(env: Record<string, string | undefined>): number 
     throw new Error(`SANDBOX_MAX_ENVS must be a positive integer, got "${raw}"`);
   }
   return Number(raw);
+}
+
+/**
+ * The durable slice of an env record (M11): metadata only — `secretEnv` and
+ * `ports` (capability tokens) never land on host disk (m11-plan Decision 2).
+ */
+function persistedState(record: EnvRecord): PersistedEnvState {
+  return {
+    envId: record.env.envId,
+    status: record.env.status,
+    createdAt: record.env.createdAt,
+    ...(record.containerId ? { containerId: record.containerId } : {}),
+    ...(record.networkName ? { networkName: record.networkName } : {}),
+    ...(record.workspaceFolder ? { workspaceFolder: record.workspaceFolder } : {}),
+    ...(record.repoUrl ? { repoUrl: record.repoUrl } : {}),
+    ...(record.ref ? { ref: record.ref } : {}),
+    ...(record.env.poolKey ? { poolKey: record.env.poolKey } : {}),
+  };
 }
 
 /** Collect env-target secrets into a plain map for exec injection. */

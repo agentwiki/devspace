@@ -15,6 +15,7 @@ export * from './exec.js';
 export * from './process-stream.js';
 export * from './cli.js';
 export * from './egress-proxy.js';
+export * from './env-state.js';
 export * from './preview-proxy.js';
 export * from './hardening.js';
 export * from './runtime.js';

@@ -4,6 +4,7 @@ import type { CommandRunner } from './cli.js';
 import { toBase64 } from './exec.js';
 import type { ExecStream } from './exec.js';
 import type { ContainerRuntime } from './runtime.js';
+import type { EnvStateStore, PersistedEnvState } from './env-state.js';
 import type { Provisioner, ProvisionResult } from './provision.js';
 import {
   DevcontainerSandboxCore,
@@ -113,10 +114,30 @@ function scriptStream(
   };
 }
 
+/** In-memory EnvStateStore: inspectable, with injectable save failures. */
+class FakeEnvStateStore implements EnvStateStore {
+  readonly states = new Map<string, PersistedEnvState>();
+  failSave: ((state: PersistedEnvState) => boolean) | undefined;
+  async save(state: PersistedEnvState): Promise<void> {
+    if (this.failSave?.(state)) throw new Error('disk full');
+    this.states.set(state.envId, { ...state });
+  }
+  async remove(envId: string): Promise<void> {
+    this.states.delete(envId);
+  }
+  async loadAll(): Promise<{ states: PersistedEnvState[]; skipped: string[] }> {
+    return { states: [...this.states.values()], skipped: [] };
+  }
+}
+
 function makeCore(
   container = new FakeContainer(),
   provisionResult: Partial<ProvisionResult> = {},
-  opts: { maxEnvs?: number } = {},
+  opts: {
+    maxEnvs?: number;
+    stateStore?: EnvStateStore;
+    exists?: () => Promise<boolean>;
+  } = {},
 ) {
   const destroy = vi.fn(async () => {});
   const removeNetwork = vi.fn(async () => {});
@@ -136,7 +157,7 @@ function makeCore(
   const runtime: ContainerRuntime = {
     execStream: (_id, req) => container.exec(req),
     destroy,
-    exists: async () => true,
+    exists: opts.exists ?? (async () => true),
     removeNetwork,
     containerIp,
   };
@@ -166,6 +187,7 @@ function makeCore(
       preview,
       runner,
       maxEnvs: opts.maxEnvs,
+      stateStore: opts.stateStore,
     }),
     container,
     destroy,
@@ -523,5 +545,190 @@ describe('forwardPort (M6 preview)', () => {
     await core.destroyEnvironment(env.envId);
     expect(preview.revokeEnv).toHaveBeenCalledWith(env.envId);
     await expect(core.forwardPort(env.envId, 3000)).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+});
+
+describe('durable env table (M11)', () => {
+  const POOLED = {
+    repoUrl: 'https://github.com/acme/widgets.git',
+    ref: 'main',
+    poolKey: 'pool-key-1',
+  };
+
+  it('persists provisioning then ready, metadata only — never secret values', async () => {
+    const store = new FakeEnvStateStore();
+    const { core } = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const env = await core.createEnvironment({
+      ...POOLED,
+      secrets: [{ name: 'GH_TOKEN', value: 'secret-abc', target: 'env' as const }],
+    });
+    const persisted = store.states.get(env.envId)!;
+    expect(persisted).toEqual({
+      envId: env.envId,
+      status: 'ready',
+      containerId: 'cont-1',
+      workspaceFolder: '/ws',
+      repoUrl: POOLED.repoUrl,
+      ref: 'main',
+      poolKey: 'pool-key-1',
+      createdAt: env.createdAt,
+    });
+    expect(JSON.stringify(persisted)).not.toContain('secret-abc');
+  });
+
+  it('a claim persists its unmark; the file loses the poolKey', async () => {
+    const store = new FakeEnvStateStore();
+    const { core } = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const env = await core.createEnvironment(POOLED);
+    await core.claimEnvironment(env.envId);
+    expect(store.states.get(env.envId)?.poolKey).toBeUndefined();
+    expect(store.states.get(env.envId)?.status).toBe('ready');
+  });
+
+  it('a claim that cannot persist is EXEC_FAILED and nothing moves — memory and disk stay marked', async () => {
+    const store = new FakeEnvStateStore();
+    const { core } = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const env = await core.createEnvironment(POOLED);
+    store.failSave = () => true;
+    await expect(core.claimEnvironment(env.envId)).rejects.toMatchObject({
+      code: 'EXEC_FAILED',
+      message: expect.stringContaining('failed to persist'),
+    });
+    expect((await core.getEnvironment(env.envId))?.poolKey).toBe('pool-key-1');
+    expect(store.states.get(env.envId)?.poolKey).toBe('pool-key-1');
+    // Disk back: the claim goes through.
+    store.failSave = undefined;
+    await expect(core.claimEnvironment(env.envId)).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('a create that cannot persist ready destroys the container and is PROVISION_FAILED', async () => {
+    const store = new FakeEnvStateStore();
+    const { core, destroy } = makeCore(new FakeContainer(), {}, { stateStore: store });
+    await core.createEnvironment({}); // prove the happy path first
+    store.failSave = (s) => s.status === 'ready'; // provisioning persists; ready cannot
+    await expect(core.createEnvironment({})).rejects.toMatchObject({
+      code: 'PROVISION_FAILED',
+      message: expect.stringContaining('persist'),
+    });
+    expect(destroy).toHaveBeenCalledWith('cont-1');
+  });
+
+  it('a provision failure leaves no state file behind', async () => {
+    const store = new FakeEnvStateStore();
+    const { core, provisioner } = makeCore(new FakeContainer(), {}, { stateStore: store });
+    (provisioner.provision as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'));
+    await core.createEnvironment({}).catch(() => {});
+    expect(store.states.size).toBe(0);
+  });
+
+  it('destroy removes the state file', async () => {
+    const store = new FakeEnvStateStore();
+    const { core } = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const env = await core.createEnvironment({});
+    await core.destroyEnvironment(env.envId);
+    expect(store.states.has(env.envId)).toBe(false);
+  });
+
+  it('recover() re-adopts a ready env with its mark, an empty secret map, and empty ports', async () => {
+    const store = new FakeEnvStateStore();
+    const first = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const env = await first.core.createEnvironment({
+      ...POOLED,
+      secrets: [{ name: 'GH_TOKEN', value: 'secret-abc', target: 'env' as const }],
+    });
+
+    // "Restart": a fresh core over the SAME store; the daemon still knows cont-1.
+    const container = new FakeContainer();
+    const second = makeCore(container, {}, { stateStore: store });
+    const summary = await second.core.recover();
+    expect(summary.recovered).toEqual([env.envId]);
+    expect(summary.discarded).toEqual([]);
+
+    const recovered = await second.core.getEnvironment(env.envId);
+    expect(recovered).toMatchObject({
+      status: 'ready',
+      containerId: 'cont-1',
+      poolKey: 'pool-key-1',
+    });
+    expect(recovered?.ports).toEqual([]);
+    // The per-exec secret map came back EMPTY — secrets are never on disk.
+    const stream = await second.core.exec(env.envId, { cmd: ['cat', '--', '/x'], tty: false });
+    for await (const _ of stream.frames) void _;
+    expect(container.lastEnv).toEqual({});
+    // applySecrets is the re-attach seam.
+    await second.core.applySecrets(env.envId, [
+      { name: 'GH_TOKEN', value: 're-applied', target: 'env' },
+    ]);
+    const stream2 = await second.core.exec(env.envId, { cmd: ['cat', '--', '/x'], tty: false });
+    for await (const _ of stream2.frames) void _;
+    expect(container.lastEnv).toMatchObject({ GH_TOKEN: 're-applied' });
+  });
+
+  it('a recovered pool env claims with the SAME refresh argv, cwd included', async () => {
+    const store = new FakeEnvStateStore();
+    const first = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const env = await first.core.createEnvironment(POOLED);
+
+    const second = makeCore(new FakeContainer(), {}, { stateStore: store });
+    await second.core.recover();
+    const claimed = await second.core.claimEnvironment(env.envId);
+    expect(second.gitCalls).toEqual([
+      { cmd: 'git', args: ['fetch', '--depth', '1', 'origin', 'main'], cwd: '/ws' },
+      { cmd: 'git', args: ['reset', '--hard', 'FETCH_HEAD'], cwd: '/ws' },
+    ]);
+    expect(claimed.poolKey).toBeUndefined();
+    expect(store.states.get(env.envId)?.poolKey).toBeUndefined();
+  });
+
+  it('recover() discards a record whose container is gone (the daemon is truth)', async () => {
+    const store = new FakeEnvStateStore();
+    const first = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const env = await first.core.createEnvironment(POOLED);
+
+    const second = makeCore(
+      new FakeContainer(),
+      {},
+      { stateStore: store, exists: async () => false },
+    );
+    const summary = await second.core.recover();
+    expect(summary.recovered).toEqual([]);
+    expect(summary.discarded).toEqual([env.envId]);
+    expect(await second.core.getEnvironment(env.envId)).toBeNull();
+    expect(store.states.size).toBe(0);
+    // The dead record never blocks the daemon's real containers.
+    expect(second.destroy).not.toHaveBeenCalled();
+  });
+
+  it('recover() completes a crashed transition: destroys container + network, drops the file', async () => {
+    const store = new FakeEnvStateStore();
+    store.states.set('env_crashed', {
+      envId: 'env_crashed',
+      status: 'stopping',
+      containerId: 'cont-zombie',
+      networkName: 'devspace-net-crashed',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    const { core, destroy, removeNetwork } = makeCore(
+      new FakeContainer(),
+      {},
+      { stateStore: store },
+    );
+    const summary = await core.recover();
+    expect(summary.discarded).toEqual(['env_crashed']);
+    expect(destroy).toHaveBeenCalledWith('cont-zombie');
+    expect(removeNetwork).toHaveBeenCalledWith('devspace-net-crashed');
+    expect(store.states.size).toBe(0);
+  });
+
+  it('recover() is a no-op without a store and never double-adopts a live env', async () => {
+    const bare = makeCore();
+    expect(await bare.core.recover()).toEqual({ recovered: [], discarded: [], skipped: [] });
+
+    const store = new FakeEnvStateStore();
+    const { core } = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const env = await core.createEnvironment(POOLED);
+    const summary = await core.recover(); // same process: the env is already live
+    expect(summary.recovered).toEqual([]);
+    expect((await core.listEnvironments()).filter((e) => e.envId === env.envId)).toHaveLength(1);
   });
 });

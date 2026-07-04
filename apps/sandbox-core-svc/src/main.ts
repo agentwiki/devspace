@@ -19,6 +19,7 @@ import {
   assertRuntimeAvailable,
   createSandboxRequestHandler,
   createSandboxUpgradeHandler,
+  envStateStoreFromEnv,
   hardeningFromEnv,
   maxEnvsFromEnv,
   nodeCommandRunner,
@@ -71,7 +72,19 @@ if (previewOptions) {
 const maxEnvs = maxEnvsFromEnv(process.env);
 if (maxEnvs !== undefined) console.log(`[${SERVICE}] capacity cap: ${maxEnvs} live env(s)`);
 
-const core = new DevcontainerSandboxCore({ hardening, preview, maxEnvs });
+// Durable env table (M11): with SANDBOX_STATE_DIR set, this host's env table
+// — pool marks included — survives a restart. Recovery runs BEFORE the
+// listener, so the first fleet census / orphan sweep already sees what was
+// re-adopted; without the var, the documented in-memory posture is unchanged.
+const stateStore = envStateStoreFromEnv(process.env);
+const core = new DevcontainerSandboxCore({ hardening, preview, maxEnvs, stateStore });
+if (stateStore) {
+  const { recovered, discarded, skipped } = await core.recover();
+  console.log(
+    `[${SERVICE}] durable env table: recovered ${recovered.length}, cleaned up ${discarded.length}` +
+      (skipped.length ? `, skipped ${skipped.length} corrupt file(s): ${skipped.join(', ')}` : ''),
+  );
+}
 
 const server = createServer(createSandboxRequestHandler(core, { token: TOKEN, service: SERVICE }));
 server.on(

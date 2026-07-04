@@ -64,8 +64,13 @@ services:
       # orchestrator pre-provisions matching envs and a session on that repo
       # claims one in milliseconds. Unset: every create is a cold provision.
       SANDBOX_WARM_POOLS: ${SANDBOX_WARM_POOLS:-}
-      # Multi-controller (M14): names this instance in bus claim diagnostics
-      # when several orchestrators share one database. Unset: a per-boot id.
+      # Rolling-deploy handover (M15): 1/true leaves still-unclaimed warm
+      # stock alive (pool-marked, adoptable by siblings / the next boot) on
+      # clean shutdown instead of destroying it. Unset/0: destroy (M9).
+      SANDBOX_WARM_KEEP_ON_STOP: ${SANDBOX_WARM_KEEP_ON_STOP:-}
+      # Multi-controller (M14/M15): names this instance in bus claim
+      # diagnostics and the reconciler lease when several orchestrators share
+      # one database. Unset: a per-boot id.
       DEVSPACE_INSTANCE_ID: ${DEVSPACE_INSTANCE_ID:-}
     ports:
       - '4000:4000'

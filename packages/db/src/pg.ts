@@ -20,11 +20,19 @@ import {
   type AuditRecord,
   type ConversationRecord,
   type EventRecord,
+  type LeaseRecord,
   type Repositories,
   type SecretRecord,
 } from './index.js';
-import { auditLog, conversations, events, secrets, workUnits } from './schema.js';
-import type { AuditRow, ConversationRow, EventRow, SecretRow, WorkUnitRow } from './schema.js';
+import { auditLog, conversations, events, leases, secrets, workUnits } from './schema.js';
+import type {
+  AuditRow,
+  ConversationRow,
+  EventRow,
+  LeaseRow,
+  SecretRow,
+  WorkUnitRow,
+} from './schema.js';
 
 const iso = (d: Date): string => d.toISOString();
 const opt = <T>(v: T | null): T | undefined => (v === null ? undefined : v);
@@ -88,6 +96,15 @@ function mapEvent(r: EventRow): EventRecord {
     consumedAt: r.consumedAt ? iso(r.consumedAt) : undefined,
     claimedBy: opt(r.claimedBy),
     claimedAt: r.claimedAt ? iso(r.claimedAt) : undefined,
+  };
+}
+
+function mapLease(r: LeaseRow): LeaseRecord {
+  return {
+    name: r.name,
+    holder: r.holder,
+    acquiredAt: iso(r.acquiredAt),
+    renewedAt: iso(r.renewedAt),
   };
 }
 
@@ -287,6 +304,38 @@ export function createPostgresRepositories(pool: Pool): Repositories {
           .update(events)
           .set({ consumedAt: new Date() })
           .where(and(eq(events.id, id), isNull(events.consumedAt)));
+      },
+    },
+
+    leases: {
+      async acquire(name, owner, ttlMs) {
+        // One upsert decides free/expired/own/foreign (m15-plan Decision 1),
+        // evaluated in database time like events.claim. Granted iff a row
+        // returns; a re-acquire by the holder renews without resetting tenure.
+        const [row] = await db
+          .insert(leases)
+          .values({ name, holder: owner })
+          .onConflictDoUpdate({
+            target: leases.name,
+            set: {
+              holder: owner,
+              renewedAt: sql`now()`,
+              acquiredAt: sql`CASE WHEN ${leases.holder} = ${owner} THEN ${leases.acquiredAt} ELSE now() END`,
+            },
+            setWhere: or(
+              eq(leases.holder, owner),
+              lt(leases.renewedAt, sql`now() - make_interval(secs => ${ttlMs / 1000})`),
+            ),
+          })
+          .returning();
+        return row !== undefined;
+      },
+      async release(name, owner) {
+        await db.delete(leases).where(and(eq(leases.name, name), eq(leases.holder, owner)));
+      },
+      async get(name) {
+        const [row] = await db.select().from(leases).where(eq(leases.name, name));
+        return row ? mapLease(row) : null;
       },
     },
 

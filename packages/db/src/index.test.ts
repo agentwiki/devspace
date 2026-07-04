@@ -179,6 +179,47 @@ describe('in-memory repositories', () => {
     tick = 10_000_000;
     expect(await repos.events.claim(e.id, 'ctrl-c', 60_000)).toBeNull();
   });
+
+  it('lease acquire: free/expired/own grant, a live foreign lease refuses (M15)', async () => {
+    let tick = 0;
+    const repos = createInMemoryRepositories(() => new Date(tick).toISOString());
+
+    // Free → granted; a live foreign lease refuses.
+    expect(await repos.leases.acquire('pr-reconciler', 'ctrl-a', 60_000)).toBe(true);
+    expect(await repos.leases.acquire('pr-reconciler', 'ctrl-b', 60_000)).toBe(false);
+    // Re-acquire by the holder renews without resetting tenure.
+    tick = 50_000;
+    expect(await repos.leases.acquire('pr-reconciler', 'ctrl-a', 60_000)).toBe(true);
+    const renewed = await repos.leases.get('pr-reconciler');
+    expect(renewed).toMatchObject({ holder: 'ctrl-a' });
+    expect(renewed?.acquiredAt).toBe(new Date(0).toISOString());
+    expect(renewed?.renewedAt).toBe(new Date(50_000).toISOString());
+    // The renewal pushed expiry out: at 109s the lease still holds…
+    tick = 109_000;
+    expect(await repos.leases.acquire('pr-reconciler', 'ctrl-b', 60_000)).toBe(false);
+    // …past renewedAt + TTL it is presumed orphaned and re-grantable.
+    tick = 111_000;
+    expect(await repos.leases.acquire('pr-reconciler', 'ctrl-b', 60_000)).toBe(true);
+    const taken = await repos.leases.get('pr-reconciler');
+    expect(taken).toMatchObject({ holder: 'ctrl-b' });
+    expect(taken?.acquiredAt).toBe(new Date(111_000).toISOString());
+    // Leases are independent per name.
+    expect(await repos.leases.acquire('other-role', 'ctrl-a', 60_000)).toBe(true);
+  });
+
+  it('lease release is holder-guarded and idempotent (M15)', async () => {
+    const repos = createInMemoryRepositories();
+    await repos.leases.acquire('pr-reconciler', 'ctrl-a', 60_000);
+    // A non-holder's release is a no-op…
+    await repos.leases.release('pr-reconciler', 'ctrl-b');
+    expect(await repos.leases.acquire('pr-reconciler', 'ctrl-b', 60_000)).toBe(false);
+    // …the holder's release frees the role immediately, no TTL wait.
+    await repos.leases.release('pr-reconciler', 'ctrl-a');
+    expect(await repos.leases.get('pr-reconciler')).toBeNull();
+    expect(await repos.leases.acquire('pr-reconciler', 'ctrl-b', 60_000)).toBe(true);
+    // Releasing a missing lease is a no-op.
+    await expect(repos.leases.release('missing', 'ctrl-a')).resolves.toBeUndefined();
+  });
 });
 
 describe('in-memory event bus', () => {

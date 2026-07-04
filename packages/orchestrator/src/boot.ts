@@ -11,6 +11,7 @@
  * orchestrator-svc logs commands, the demo service passes SlackAdapter.render.
  */
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type { RenderCommand } from '@devspace/contracts';
 import { CreateEnvironmentRequestSchema } from '@devspace/contracts';
 import {
@@ -33,6 +34,7 @@ import {
   nodeCommandRunner,
   previewProxyFromEnv,
   sandboxHostsFromEnv,
+  warmKeepOnStopFromEnv,
   warmPoolsFromEnv,
   type EnvStateStore,
   type InternalTlsIdentity,
@@ -44,6 +46,7 @@ import {
 } from '@devspace/sandbox-core';
 import { DefaultAgentRunner, agentRuntimeMount } from '@devspace/agent-runner';
 import { Orchestrator } from './index.js';
+import { startElectedTask } from './election.js';
 import { parseKeyring, SecretStore } from './secrets.js';
 import { createGitHubRestClient, type HostGitExec } from './git.js';
 
@@ -244,7 +247,12 @@ export async function bootOrchestrator(
           mounts: [agentRuntimeMount()],
         }),
       })),
-      { onLog: (line) => console.log(`[orchestrator] warm-pool: ${line}`) },
+      {
+        onLog: (line) => console.log(`[orchestrator] warm-pool: ${line}`),
+        // Rolling-deploy handover (M15): with the knob set, close() leaves
+        // marked stock for sibling controllers / the next boot to adopt.
+        keepStockOnStop: warmKeepOnStopFromEnv(process.env),
+      },
     );
     sandbox = warm;
     void warm.fill(); // background; never rejects — failures log and retry
@@ -254,12 +262,13 @@ export async function bootOrchestrator(
     // llmKeyRef is a secret record id resolved through the envelope store.
     resolveSecret: (ref) => secrets.resolveRef(ref),
   });
+  // One identity per controller (M15, m15-plan Decision 5): the SAME name
+  // shows up in bus-claim diagnostics and the reconciler lease, so an
+  // incident reads one id across `claimed_by` and `leases.holder`.
+  const instanceId = process.env.DEVSPACE_INSTANCE_ID?.trim() || `orch_${randomUUID()}`;
   // N controllers may share this bus (M14): rows are claim-leased, so the
   // handlers below run on exactly one instance per event in steady state.
-  // DEVSPACE_INSTANCE_ID names this controller in claim diagnostics.
-  const bus = createPgEventBus(pool, repos.events, {
-    instanceId: process.env.DEVSPACE_INSTANCE_ID?.trim() || undefined,
-  });
+  const bus = createPgEventBus(pool, repos.events, { instanceId });
 
   const orch = new Orchestrator({
     repos,
@@ -284,19 +293,26 @@ export async function bootOrchestrator(
     bus,
     secrets,
     startReconciler(intervalMs: number): () => void {
-      const timer = setInterval(() => {
-        void orch
-          .reconcileOpenPrs(async (e) => {
+      // Elected since M15: every controller ticks, but only the holder of
+      // the `pr-reconciler` lease polls GitHub — the M14 closeout's "N
+      // duplicate pollers" waste, closed. Publishes stay idempotent, so a
+      // rare double-poll (paused holder past its TTL) remains harmless.
+      return startElectedTask({
+        leases: repos.leases,
+        name: 'pr-reconciler',
+        instanceId,
+        intervalMs,
+        run: () =>
+          orch.reconcileOpenPrs(async (e) => {
             await bus.publish({ topic: e.topic, workUnitId: e.workUnitId, payload: {} });
-          })
-          .catch((err) => console.error(`[reconcile] ${String(err)}`));
-      }, intervalMs);
-      timer.unref();
-      return () => clearInterval(timer);
+          }),
+        onLog: (line) => console.log(`[reconcile] ${line}`),
+      });
     },
     async close() {
       // Unclaimed warm envs die with the control plane (clean-shutdown path;
-      // after a crash the next boot's fill() re-adopts them by pool mark, M10).
+      // after a crash the next boot's fill() re-adopts them by pool mark,
+      // M10) — unless SANDBOX_WARM_KEEP_ON_STOP hands them to the fleet (M15).
       await warm?.stop();
       await bus.stop();
       await preview?.stop();

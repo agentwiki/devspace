@@ -11,6 +11,7 @@ import {
   WarmPoolSandboxCore,
   canonicalRequestKey,
   parseWarmPools,
+  warmKeepOnStopFromEnv,
   warmPoolsFromEnv,
 } from './warm-pool.js';
 
@@ -479,6 +480,69 @@ describe('multi-controller coordination (M14) — the host is the ledger', () =>
   });
 });
 
+describe('warm-stock handover on clean shutdown (M15)', () => {
+  it('keepStockOnStop leaves marked stock alive and a sibling claims it warm', async () => {
+    const inner = fakeInner();
+    const a = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 2 }], {
+      keepStockOnStop: true,
+    });
+    await a.fill();
+    await a.stop();
+
+    // Nothing destroyed; both envs still pool-marked on the host.
+    expect(inner.destroyed).toEqual([]);
+    expect([...inner.envs.values()].filter((e) => e.poolKey)).toHaveLength(2);
+
+    // A sibling controller (fresh wrapper, never filled) claims the handed-
+    // over stock warm via its miss-sweep — no cold create.
+    const b = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 2 }]);
+    const env = await b.createEnvironment(tenantRequest());
+    expect(inner.created).toBe(2);
+    expect(inner.claimed).toContain(env.envId);
+  });
+
+  it('keepStockOnStop halts refills like the default stop', async () => {
+    const inner = fakeInner();
+    const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }], {
+      keepStockOnStop: true,
+    });
+    await pool.fill();
+    await pool.stop();
+    await pool.fill(); // stopped: no new provisions
+    expect(inner.created).toBe(1);
+  });
+
+  it('a provision that loses the race with stop() honors the knob both ways', async () => {
+    for (const keep of [true, false]) {
+      const inner = fakeInner();
+      // Gate the provision so stop() lands while the create is in flight.
+      let releaseCreate: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        const innerCreate = inner.createEnvironment.bind(inner);
+        inner.createEnvironment = async (req) => {
+          resolve();
+          await new Promise<void>((r) => {
+            releaseCreate = r;
+          });
+          return innerCreate(req);
+        };
+      });
+      const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }], {
+        keepStockOnStop: keep,
+      });
+      const filling = pool.fill();
+      await started;
+      const stopping = pool.stop();
+      releaseCreate!();
+      await Promise.all([filling, stopping]);
+
+      // The env completed after stop: kept (marked, adoptable) or destroyed.
+      expect(inner.envs.size).toBe(keep ? 1 : 0);
+      if (keep) expect([...inner.envs.values()][0]?.poolKey).toBeTruthy();
+    }
+  });
+});
+
 describe('parseWarmPools', () => {
   it('parses repoUrl, optional ref, and size', () => {
     expect(
@@ -504,6 +568,18 @@ describe('parseWarmPools', () => {
     expect(warmPoolsFromEnv({ SANDBOX_WARM_POOLS: ' ' })).toBeUndefined();
     expect(warmPoolsFromEnv({ SANDBOX_WARM_POOLS: 'https://github.com/a/b.git=1' })).toHaveLength(
       1,
+    );
+  });
+
+  it('warmKeepOnStopFromEnv: 1/true on, 0/false/unset off, garbage refuses (M15)', () => {
+    expect(warmKeepOnStopFromEnv({})).toBe(false);
+    expect(warmKeepOnStopFromEnv({ SANDBOX_WARM_KEEP_ON_STOP: ' ' })).toBe(false);
+    expect(warmKeepOnStopFromEnv({ SANDBOX_WARM_KEEP_ON_STOP: '0' })).toBe(false);
+    expect(warmKeepOnStopFromEnv({ SANDBOX_WARM_KEEP_ON_STOP: 'false' })).toBe(false);
+    expect(warmKeepOnStopFromEnv({ SANDBOX_WARM_KEEP_ON_STOP: '1' })).toBe(true);
+    expect(warmKeepOnStopFromEnv({ SANDBOX_WARM_KEEP_ON_STOP: 'true' })).toBe(true);
+    expect(() => warmKeepOnStopFromEnv({ SANDBOX_WARM_KEEP_ON_STOP: 'yes' })).toThrow(
+      'SANDBOX_WARM_KEEP_ON_STOP',
     );
   });
 });

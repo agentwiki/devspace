@@ -46,6 +46,7 @@ export * from './git.js';
 export * from './render.js';
 export * from './webhooks.js';
 export * from './internal-http.js';
+export * from './election.js';
 // boot.js imports Orchestrator from this module; the cycle is benign (the
 // class is only referenced inside bootOrchestrator's body, after module init).
 export * from './boot.js';

@@ -102,6 +102,18 @@ host-side backstop (`SANDBOX_CPU_BUDGET`/`SANDBOX_MEM_BUDGET`, the
 `SANDBOX_MAX_ENVS` counterpart) — enforced where the truth lives, whatever
 any controller believes (docs/m14-plan.md).
 
+Since M15 the multi-controller shape is also frugal: named advisory leases
+(a `leases` table; one atomic upsert grants a role iff it is free, expired,
+or already ours) elect a single PR poll reconciler — every controller
+ticks, only the `pr-reconciler` lease holder polls GitHub, a crashed
+holder is replaced within 2× the poll interval, and a clean shutdown
+releases the role immediately. The election is advisory: the publishes
+were always idempotent, so losing the dedup costs a redundant poll, never
+a wrong transition. Rolling deploys keep the fleet's warm stock:
+`SANDBOX_WARM_KEEP_ON_STOP=1` leaves still-unclaimed warm envs pool-marked
+on their hosts for siblings (or the next boot) to adopt instead of
+destroying them one controller at a time (docs/m15-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

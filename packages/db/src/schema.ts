@@ -78,6 +78,20 @@ export const events = pgTable(
   (t) => [index('events_topic_idx').on(t.topic), index('events_work_unit_idx').on(t.workUnitId)],
 );
 
+// Advisory role leases (M15): one row per named singleton role (e.g. the PR
+// poll reconciler). `acquire` is a single upsert arbitrated in database time;
+// a lease renewed longer ago than the caller's TTL is expired and re-grantable.
+// Advisory only — correctness never depends on holding one (m15-plan
+// Decision 2).
+export const leases = pgTable('leases', {
+  name: text('name').primaryKey().notNull(),
+  holder: text('holder').notNull(),
+  // When the current holder first took the role (tenure, for diagnostics).
+  acquiredAt: timestamp('acquired_at', { withTimezone: true }).defaultNow().notNull(),
+  // Last renewal; older than the TTL = expired.
+  renewedAt: timestamp('renewed_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 // Append-only audit trail of privileged operations (M5). One writer (the
 // orchestrator); detail payloads are built from ids/names/enums only — never
 // secret plaintext — so the log needs no redaction pass.
@@ -102,4 +116,5 @@ export type ConversationRow = typeof conversations.$inferSelect;
 export type WorkUnitRow = typeof workUnits.$inferSelect;
 export type SecretRow = typeof secrets.$inferSelect;
 export type EventRow = typeof events.$inferSelect;
+export type LeaseRow = typeof leases.$inferSelect;
 export type AuditRow = typeof auditLog.$inferSelect;

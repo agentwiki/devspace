@@ -98,6 +98,31 @@ export interface EventRepo {
   markConsumed(id: string): Promise<void>;
 }
 
+/** One named advisory role lease (M15) — e.g. the PR poll reconciler. */
+export interface LeaseRecord {
+  name: string;
+  holder: string;
+  /** When the current holder first took the role (tenure — diagnostics). */
+  acquiredAt: string;
+  /** Last renewal; older than the caller's TTL = expired, re-grantable. */
+  renewedAt: string;
+}
+
+export interface LeaseRepo {
+  /**
+   * Take (or renew) the named lease: granted iff it is free, expired
+   * (renewed longer ago than `ttlMs`), or already held by `owner` — a
+   * re-acquire renews without resetting tenure. One atomic statement
+   * decides every case (m15-plan Decision 1); arbitration happens in
+   * database time, like the M14 event claim.
+   */
+  acquire(name: string, owner: string, ttlMs: number): Promise<boolean>;
+  /** Give the lease up iff currently held by `owner`. Idempotent. */
+  release(name: string, owner: string): Promise<void>;
+  /** Read the lease row — who holds/held the role (diagnostics/tests). */
+  get(name: string): Promise<LeaseRecord | null>;
+}
+
 /** One privileged operation, as recorded in the append-only audit trail (M5). */
 export interface AuditRecord {
   id: string;
@@ -121,6 +146,7 @@ export interface Repositories {
   workUnits: WorkUnitRepo;
   secrets: SecretRepo;
   events: EventRepo;
+  leases: LeaseRepo;
   audit: AuditRepo;
 }
 
@@ -149,6 +175,7 @@ export function createInMemoryRepositories(
   const secretsById = new Map<string, SecretRecord>();
   const secretIdByKey = new Map<string, string>();
   const events: EventRecord[] = [];
+  const leaseRows = new Map<string, LeaseRecord>();
   const auditEntries: AuditRecord[] = [];
 
   const secretKey = (userId: string, conversationId: string | undefined, name: string): string =>
@@ -261,6 +288,28 @@ export function createInMemoryRepositories(
       async markConsumed(eid) {
         const rec = events.find((e) => e.id === eid);
         if (rec) rec.consumedAt = now();
+      },
+    },
+    leases: {
+      async acquire(name, owner, ttlMs) {
+        const rec = leaseRows.get(name);
+        const ts = now();
+        if (rec && rec.holder === owner) {
+          rec.renewedAt = ts; // renewal preserves tenure (acquiredAt)
+          return true;
+        }
+        // Same expiry arbitration as events.claim: a live foreign lease wins.
+        if (rec && !(Date.parse(rec.renewedAt) < Date.parse(ts) - ttlMs)) {
+          return false;
+        }
+        leaseRows.set(name, { name, holder: owner, acquiredAt: ts, renewedAt: ts });
+        return true;
+      },
+      async release(name, owner) {
+        if (leaseRows.get(name)?.holder === owner) leaseRows.delete(name);
+      },
+      async get(name) {
+        return leaseRows.get(name) ?? null;
       },
     },
     audit: {

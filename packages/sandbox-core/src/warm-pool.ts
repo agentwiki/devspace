@@ -49,6 +49,16 @@ export interface WarmPoolConfig {
 
 export interface WarmPoolOptions {
   onLog?: (line: string) => void;
+  /**
+   * Hand still-unclaimed warm stock back to the fleet on `stop()` instead of
+   * destroying it (M15, m15-plan Decision 6): the envs stay pool-marked on
+   * their hosts, so sibling controllers adopt them on their next sweep (M14)
+   * and a restarting single controller re-adopts them at the next `fill()`
+   * (M10). Off by default — leaving containers behind is only right when
+   * someone is left (or coming back) to claim them, and that is the
+   * operator's call (`SANDBOX_WARM_KEEP_ON_STOP`).
+   */
+  keepStockOnStop?: boolean;
 }
 
 interface Pool {
@@ -64,6 +74,7 @@ interface Pool {
 export class WarmPoolSandboxCore implements SandboxCore {
   private readonly pools = new Map<string, Pool>();
   private readonly onLog: (line: string) => void;
+  private readonly keepStockOnStop: boolean;
   private stopped = false;
 
   constructor(
@@ -72,6 +83,7 @@ export class WarmPoolSandboxCore implements SandboxCore {
     opts: WarmPoolOptions = {},
   ) {
     this.onLog = opts.onLog ?? (() => {});
+    this.keepStockOnStop = opts.keepStockOnStop ?? false;
     for (const spec of specs) {
       if (spec.size < 1 || !Number.isInteger(spec.size)) {
         throw new Error(`warm pool size must be a positive integer, got ${spec.size}`);
@@ -105,11 +117,24 @@ export class WarmPoolSandboxCore implements SandboxCore {
     await Promise.all([...this.pools.values()].map((pool) => this.topUp(pool)));
   }
 
-  /** Destroy still-unclaimed warm envs (clean shutdown; see m9-plan risks). */
+  /**
+   * Clean shutdown. Default: destroy still-unclaimed warm envs (m9-plan).
+   * With `keepStockOnStop` (M15): drop local tracking but leave the envs
+   * alive — still pool-marked on their hosts, so the fleet keeps its warm
+   * stock across a rolling deploy instead of losing it once per restarted
+   * controller (the m14-plan "wasteful at deploy time" risk, closed).
+   */
   async stop(): Promise<void> {
     this.stopped = true;
     for (const pool of this.pools.values()) {
-      for (const envId of pool.ready.splice(0)) {
+      const stock = pool.ready.splice(0);
+      if (this.keepStockOnStop) {
+        if (stock.length > 0) {
+          this.onLog(`stop: leaving ${stock.length} warm env(s) marked for siblings/next boot`);
+        }
+        continue;
+      }
+      for (const envId of stock) {
         await this.inner
           .destroyEnvironment(envId)
           .catch((err: unknown) => this.onLog(`stop: destroy ${envId} failed: ${message(err)}`));
@@ -368,7 +393,11 @@ export class WarmPoolSandboxCore implements SandboxCore {
           });
           if (this.stopped) {
             // stop() raced the provision: this env is unclaimed and untracked.
-            await this.inner.destroyEnvironment(env.envId).catch(() => {});
+            // Same choice as stop() itself (m15-plan Decision 6): marked
+            // stock is adoptable, so keep-on-stop leaves it for the fleet.
+            if (!this.keepStockOnStop) {
+              await this.inner.destroyEnvironment(env.envId).catch(() => {});
+            }
             return;
           }
           pool.ready.push(env.envId);
@@ -456,6 +485,20 @@ export function warmPoolsFromEnv(
   const raw = env.SANDBOX_WARM_POOLS?.trim();
   if (!raw) return undefined;
   return parseWarmPools(raw);
+}
+
+/**
+ * `SANDBOX_WARM_KEEP_ON_STOP` from the environment (M15): 1/true keeps
+ * still-unclaimed warm stock alive on clean shutdown, 0/false/unset destroys
+ * it (the M9 default). Anything else throws at boot — a typo'd knob must not
+ * silently mean either behavior.
+ */
+export function warmKeepOnStopFromEnv(env: Record<string, string | undefined>): boolean {
+  const raw = env.SANDBOX_WARM_KEEP_ON_STOP?.trim();
+  if (!raw) return false;
+  if (raw === '1' || raw === 'true') return true;
+  if (raw === '0' || raw === 'false') return false;
+  throw new Error(`SANDBOX_WARM_KEEP_ON_STOP must be 1/true or 0/false, got "${raw}"`);
 }
 
 function message(err: unknown): string {

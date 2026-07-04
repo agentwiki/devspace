@@ -15,6 +15,13 @@
       "when": 1783005795171,
       "tag": "0001_complex_squadron_supreme",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783158612138,
+      "tag": "0002_rare_the_hand",
+      "breakpoints": true
     }
   ]
 }

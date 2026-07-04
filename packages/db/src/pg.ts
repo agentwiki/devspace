@@ -10,7 +10,7 @@
  * state — it can never be misreported as an illegal transition.
  */
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import type { Pool } from 'pg';
 import type { WorkUnit } from '@devspace/contracts';
@@ -86,6 +86,8 @@ function mapEvent(r: EventRow): EventRecord {
     payload: r.payload as Record<string, unknown>,
     emittedAt: iso(r.emittedAt),
     consumedAt: r.consumedAt ? iso(r.consumedAt) : undefined,
+    claimedBy: opt(r.claimedBy),
+    claimedAt: r.claimedAt ? iso(r.claimedAt) : undefined,
   };
 }
 
@@ -260,6 +262,25 @@ export function createPostgresRepositories(pool: Pool): Repositories {
       async listUnconsumed() {
         const rows = await db.select().from(events).where(isNull(events.consumedAt));
         return rows.map(mapEvent);
+      },
+      async claim(id, owner, ttlMs) {
+        // One atomic UPDATE decides the race (m14-plan Decision 1), evaluated
+        // entirely in database time — controller clocks never enter into it.
+        const [row] = await db
+          .update(events)
+          .set({ claimedBy: owner, claimedAt: sql`now()` })
+          .where(
+            and(
+              eq(events.id, id),
+              isNull(events.consumedAt),
+              or(
+                isNull(events.claimedAt),
+                lt(events.claimedAt, sql`now() - make_interval(secs => ${ttlMs / 1000})`),
+              ),
+            ),
+          )
+          .returning();
+        return row ? mapEvent(row) : null;
       },
       async markConsumed(id) {
         await db

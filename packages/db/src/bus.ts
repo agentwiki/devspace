@@ -7,7 +7,14 @@
  * at-least-once — a dropped Postgres NOTIFY (fire-and-forget, not buffered) is
  * recovered by a periodic scan of `consumed_at IS NULL`. Handlers must be
  * idempotent.
+ *
+ * Since M14 processing is CLAIMED: every instance still hears every NOTIFY,
+ * but one atomic lease per row (`EventRepo.claim`) decides which controller
+ * runs the handlers — N orchestrators no longer each execute every effect.
+ * A claimer that crashes mid-handler is covered by the lease TTL: the
+ * recovery sweep re-claims and re-runs, so delivery stays at-least-once.
  */
+import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import type { BusEvent } from '@devspace/contracts';
 import type { EventRecord, EventRepo } from './index.js';
@@ -68,10 +75,24 @@ export function createInMemoryEventBus(repo: EventRepo): EventBus {
 export interface PgEventBusOptions {
   /** How often to sweep for unconsumed rows (missed-NOTIFY recovery). */
   recoveryIntervalMs?: number;
+  /**
+   * This controller's claim identity (M14) — diagnostics, not authorization
+   * (m14-plan Decision 3). Defaults to a per-boot random id; deployments
+   * that want readable incident logs set DEVSPACE_INSTANCE_ID and pass it.
+   */
+  instanceId?: string;
+  /**
+   * Claim lease TTL (M14): a row claimed longer ago than this is presumed
+   * orphaned by a crashed controller and is re-claimable. Handlers slower
+   * than the TTL can be double-run — the at-least-once contract, unchanged.
+   */
+  claimTtlMs?: number;
   /** Injected scheduler, so tests can drive recovery deterministically. */
   setInterval?: (fn: () => void, ms: number) => { unref?: () => void };
   clearInterval?: (handle: unknown) => void;
 }
+
+export const DEFAULT_CLAIM_TTL_MS = 5 * 60_000;
 
 /**
  * Postgres LISTEN/NOTIFY bus. A dedicated client holds the LISTEN; the pool is
@@ -85,6 +106,8 @@ export function createPgEventBus(
 ): EventBus {
   const handlers = new Set<EventHandler>();
   const recoveryIntervalMs = opts.recoveryIntervalMs ?? 30_000;
+  const instanceId = opts.instanceId ?? `bus_${randomUUID()}`;
+  const claimTtlMs = opts.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
   const schedule = opts.setInterval ?? ((fn, ms) => setInterval(fn, ms));
   const unschedule =
     opts.clearInterval ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>));
@@ -102,9 +125,10 @@ export function createPgEventBus(
     if (inFlight.has(id)) return;
     inFlight.add(id);
     try {
-      const rows = await repo.listUnconsumed();
-      const rec = rows.find((r) => r.id === id);
-      if (!rec) return; // already consumed by another path
+      // The claim is the cross-instance arbiter (M14): losing it means a
+      // sibling controller (or a live lease) owns the row — skip silently.
+      const rec = await repo.claim(id, instanceId, claimTtlMs);
+      if (!rec) return;
       await fanOut(handlers, rec);
       await repo.markConsumed(rec.id);
     } finally {
@@ -114,6 +138,10 @@ export function createPgEventBus(
 
   function enqueue(id: string): void {
     chain = chain.then(() => process(id)).catch(() => undefined);
+  }
+
+  function onNotification(msg: { channel: string; payload?: string }): void {
+    if (msg.channel === EVENT_CHANNEL && msg.payload) enqueue(msg.payload);
   }
 
   async function sweep(): Promise<void> {
@@ -137,9 +165,7 @@ export function createPgEventBus(
       if (started) return;
       started = true;
       listenClient = await pool.connect();
-      listenClient.on('notification', (msg) => {
-        if (msg.channel === EVENT_CHANNEL && msg.payload) enqueue(msg.payload);
-      });
+      listenClient.on('notification', onNotification);
       await listenClient.query(`LISTEN ${EVENT_CHANNEL}`);
       // Recover anything appended while we were down / any dropped NOTIFY.
       await sweep();
@@ -157,6 +183,11 @@ export function createPgEventBus(
         } catch {
           /* connection may already be gone */
         }
+        // Detach BEFORE releasing: the client returns to the shared pool, and
+        // a listener that rode along would keep enqueueing (and, since M14,
+        // claiming + consuming with zero handlers) if a later bus's LISTEN
+        // lands on this same pooled connection.
+        listenClient.off('notification', onNotification);
         listenClient.release();
         listenClient = undefined;
       }

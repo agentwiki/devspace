@@ -212,6 +212,103 @@ suite('postgres repositories', () => {
     }
   });
 
+  it('claim leases atomically: one winner per window, stale leases reclaim (M14)', async () => {
+    const repos = createPostgresRepositories(pool);
+    const evt = await repos.events.append({ topic: 'pr.merged', payload: {} });
+
+    // Two instances race the same row; exactly one UPDATE can match.
+    const [a, b] = await Promise.all([
+      repos.events.claim(evt.id, 'ctrl-a', 60_000),
+      repos.events.claim(evt.id, 'ctrl-b', 60_000),
+    ]);
+    const winners = [a, b].filter(Boolean);
+    expect(winners).toHaveLength(1);
+    expect(['ctrl-a', 'ctrl-b']).toContain(winners[0]?.claimedBy);
+
+    // Inside the TTL the loser stays locked out…
+    expect(await repos.events.claim(evt.id, 'ctrl-late', 60_000)).toBeNull();
+    // …but a lease older than the TTL is presumed crashed and reclaimable.
+    await pool.query(`UPDATE events SET claimed_at = now() - interval '10 minutes' WHERE id = $1`, [
+      evt.id,
+    ]);
+    expect((await repos.events.claim(evt.id, 'ctrl-late', 60_000))?.claimedBy).toBe('ctrl-late');
+
+    // A consumed row never reclaims, however old its lease.
+    await repos.events.markConsumed(evt.id);
+    await pool.query(`UPDATE events SET claimed_at = now() - interval '10 minutes' WHERE id = $1`, [
+      evt.id,
+    ]);
+    expect(await repos.events.claim(evt.id, 'ctrl-x', 60_000)).toBeNull();
+  });
+
+  it('two live buses over one database: each event runs on exactly one (M14)', async () => {
+    const repos = createPostgresRepositories(pool);
+    const handled: Array<{ bus: string; id: string }> = [];
+    const busA = createPgEventBus(pool, repos.events, {
+      recoveryIntervalMs: 60_000,
+      instanceId: 'ctrl-a',
+    });
+    const busB = createPgEventBus(pool, repos.events, {
+      recoveryIntervalMs: 60_000,
+      instanceId: 'ctrl-b',
+    });
+    busA.subscribe((evt) => void handled.push({ bus: 'a', id: evt.id }));
+    busB.subscribe((evt) => void handled.push({ bus: 'b', id: evt.id }));
+
+    await busA.start();
+    await busB.start();
+    try {
+      const published: string[] = [];
+      for (let i = 0; i < 8; i++) {
+        published.push((await busA.publish({ topic: 'pr.merged', payload: { i } })).id);
+      }
+      await waitFor(async () => (await repos.events.listUnconsumed()).length === 0);
+      // Give any straggling double-delivery a beat to land before asserting.
+      await sleep(100);
+      // Every event was handled — and by exactly ONE of the two controllers.
+      const byId = new Map<string, number>();
+      for (const h of handled) byId.set(h.id, (byId.get(h.id) ?? 0) + 1);
+      for (const id of published) expect(byId.get(id)).toBe(1);
+      expect(handled).toHaveLength(published.length);
+    } finally {
+      await busA.stop();
+      await busB.stop();
+    }
+  });
+
+  it('a row claimed by a crashed controller is re-run once the lease expires (M14)', async () => {
+    const repos = createPostgresRepositories(pool);
+    // The "crash": a claim taken long ago, never consumed, no NOTIFY pending.
+    const orphan = await repos.events.append({ topic: 'pr.closed', payload: {} });
+    expect(await repos.events.claim(orphan.id, 'ctrl-dead', 60_000)).toBeTruthy();
+    await pool.query(`UPDATE events SET claimed_at = now() - interval '10 minutes' WHERE id = $1`, [
+      orphan.id,
+    ]);
+
+    const bus = createPgEventBus(pool, repos.events, {
+      recoveryIntervalMs: 60_000,
+      instanceId: 'ctrl-b',
+      claimTtlMs: 60_000,
+    });
+    const received: string[] = [];
+    let resolveGot: () => void;
+    const got = new Promise<void>((r) => (resolveGot = r));
+    bus.subscribe((evt) => {
+      received.push(evt.id);
+      resolveGot();
+    });
+
+    // start()'s immediate recovery sweep must reclaim and run the orphan.
+    await bus.start();
+    try {
+      await withTimeout(got, 5_000, 'stale-leased row was not re-run');
+      expect(received).toContain(orphan.id);
+      await waitFor(async () => (await repos.events.listUnconsumed()).length === 0);
+    } finally {
+      await bus.stop();
+    }
+  });
+
   it('event bus recovers a missed NOTIFY via the unconsumed sweep', async () => {
     const repos = createPostgresRepositories(pool);
     // Simulate a dropped NOTIFY: append the row directly, no publish/pg_notify.

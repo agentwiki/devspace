@@ -254,7 +254,12 @@ export async function bootOrchestrator(
     // llmKeyRef is a secret record id resolved through the envelope store.
     resolveSecret: (ref) => secrets.resolveRef(ref),
   });
-  const bus = createPgEventBus(pool, repos.events);
+  // N controllers may share this bus (M14): rows are claim-leased, so the
+  // handlers below run on exactly one instance per event in steady state.
+  // DEVSPACE_INSTANCE_ID names this controller in claim diagnostics.
+  const bus = createPgEventBus(pool, repos.events, {
+    instanceId: process.env.DEVSPACE_INSTANCE_ID?.trim() || undefined,
+  });
 
   const orch = new Orchestrator({
     repos,

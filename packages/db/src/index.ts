@@ -77,6 +77,12 @@ export interface WorkUnitRepo {
    * lifecycle reaper measures idleness against max(lastActivityAt, updatedAt).
    */
   touch(id: string): Promise<void>;
+  /**
+   * Record an idle-reap warning (M18): bump `idleWarnedAt` and nothing else.
+   * Never cleared by anything — a warning is stale iff it predates
+   * max(lastActivityAt, updatedAt). A missing id is a no-op.
+   */
+  markIdleWarned(id: string): Promise<void>;
 }
 
 export interface SecretRepo {
@@ -244,6 +250,10 @@ export function createInMemoryRepositories(
       async touch(wid) {
         const wu = workUnits.get(wid);
         if (wu) workUnits.set(wid, { ...wu, lastActivityAt: now() });
+      },
+      async markIdleWarned(wid) {
+        const wu = workUnits.get(wid);
+        if (wu) workUnits.set(wid, { ...wu, idleWarnedAt: now() });
       },
     },
     secrets: {

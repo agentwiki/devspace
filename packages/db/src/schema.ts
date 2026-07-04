@@ -41,6 +41,9 @@ export const workUnits = pgTable(
     // touched; the idle clock falls back to updatedAt. Written only by
     // WorkUnitRepo.touch — transitions keep owning updatedAt.
     lastActivityAt: timestamp('last_activity_at', { withTimezone: true }),
+    // Last idle-reap warning (M18). Written only by WorkUnitRepo.markIdleWarned
+    // and never cleared — stale iff it predates max(lastActivityAt, updatedAt).
+    idleWarnedAt: timestamp('idle_warned_at', { withTimezone: true }),
   },
   (t) => [
     index('work_units_conversation_idx').on(t.conversationId),

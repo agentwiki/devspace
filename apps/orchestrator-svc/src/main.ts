@@ -183,6 +183,7 @@ export async function start(config: Config = loadConfig()): Promise<BootedServic
   console.log(
     config.reapPolicy
       ? `[${SERVICE}] lifecycle reaper on (idleTtlMs=${config.reapPolicy.idleTtlMs ?? 'off'}, ` +
+          `idleWarnMs=${config.reapPolicy.idleWarnMs ?? 'off'}, ` +
           `terminalGraceMs=${config.reapPolicy.terminalGraceMs ?? 'off'}, ` +
           `intervalMs=${config.reapPolicy.intervalMs})`
       : `[${SERVICE}] DEVSPACE_IDLE_TTL_MS / DEVSPACE_TERMINAL_GRACE_MS unset — lifecycle reaper off`,

@@ -10,7 +10,7 @@ import { createInMemoryRepositories, type Repositories } from '@devspace/db';
 import type { SandboxCore } from '@devspace/sandbox-core';
 import type { AgentRunner } from '@devspace/agent-runner';
 import { Orchestrator, SECRET_GH_TOKEN, SECRET_LLM_KEY } from './index.js';
-import { reapPolicyFromEnv } from './reaper.js';
+import { approxDuration, reapPolicyFromEnv } from './reaper.js';
 import { generateKeyEntry, parseKeyring, SecretStore } from './secrets.js';
 
 const KEY = generateKeyEntry('k1');
@@ -140,6 +140,35 @@ describe('reapPolicyFromEnv', () => {
       /reaps nothing/,
     );
   });
+
+  it('carries the warn window on the policy (M18)', () => {
+    expect(
+      reapPolicyFromEnv({ DEVSPACE_IDLE_TTL_MS: '3600000', DEVSPACE_IDLE_WARN_MS: '600000' }),
+    ).toEqual({
+      idleTtlMs: 3_600_000,
+      idleWarnMs: 600_000,
+      terminalGraceMs: undefined,
+      intervalMs: 60_000,
+    });
+  });
+
+  it('refuses a warn window without an idle TTL, or one at/over it (M18)', () => {
+    expect(() => reapPolicyFromEnv({ DEVSPACE_IDLE_WARN_MS: '600000' })).toThrow(
+      /no TTL to warn ahead of/,
+    );
+    expect(() =>
+      reapPolicyFromEnv({ DEVSPACE_IDLE_TTL_MS: '600000', DEVSPACE_IDLE_WARN_MS: '600000' }),
+    ).toThrow(/must be smaller/);
+    expect(() => reapPolicyFromEnv({ DEVSPACE_IDLE_WARN_MS: 'soon' })).toThrow(/positive integer/);
+  });
+});
+
+describe('approxDuration', () => {
+  it('renders chat-grade durations', () => {
+    expect(approxDuration(30_000)).toBe('30s');
+    expect(approxDuration(900_000)).toBe('15m');
+    expect(approxDuration(5_400_000)).toBe('1.5h');
+  });
 });
 
 describe('reapExpired (M17)', () => {
@@ -151,12 +180,17 @@ describe('reapExpired (M17)', () => {
     // Inside the TTL nothing happens…
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, HOUR - 1)).toEqual({
       reaped: 0,
+      warned: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
 
     // …at the TTL the unit dies the way a user-ended one would.
-    expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, HOUR)).toEqual({ reaped: 1, failed: 0 });
+    expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, HOUR)).toEqual({
+      reaped: 1,
+      warned: 0,
+      failed: 0,
+    });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('TORN_DOWN');
     expect(h.sandbox.destroyEnvironment).toHaveBeenCalledWith('env_1');
     expect(await h.repos.secrets.get('u1', SECRET_LLM_KEY, conv.id)).toBeNull();
@@ -175,6 +209,7 @@ describe('reapExpired (M17)', () => {
     // A second sweep is a no-op — teardown's idempotency holds for the reaper.
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 2 * HOUR)).toEqual({
       reaped: 0,
+      warned: 0,
       failed: 0,
     });
   });
@@ -187,6 +222,7 @@ describe('reapExpired (M17)', () => {
 
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 5 * HOUR + HOUR - 1)).toEqual({
       reaped: 0,
+      warned: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
@@ -198,10 +234,12 @@ describe('reapExpired (M17)', () => {
     const { wu } = await seedAt(h, 'READY', 'C3'); // updatedAt = 10h, never touched
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 10 * HOUR + HOUR - 1)).toEqual({
       reaped: 0,
+      warned: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 11 * HOUR)).toEqual({
       reaped: 1,
+      warned: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('TORN_DOWN');
@@ -212,7 +250,7 @@ describe('reapExpired (M17)', () => {
     const { conv, wu } = await seedAt(h, 'PR_OPEN', 'C4');
     expect(
       await h.orch.reapExpired({ idleTtlMs: HOUR, terminalGraceMs: HOUR }, 100 * HOUR),
-    ).toEqual({ reaped: 0, failed: 0 });
+    ).toEqual({ reaped: 0, warned: 0, failed: 0 });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_OPEN');
     // The reconciler's token survives with the unit.
     expect(await h.repos.secrets.get('u1', SECRET_GH_TOKEN, conv.id)).not.toBeNull();
@@ -223,10 +261,12 @@ describe('reapExpired (M17)', () => {
     const { conv, wu } = await seedAt(h, 'PR_MERGED', 'C5'); // updatedAt = 0
     expect(await h.orch.reapExpired({ terminalGraceMs: HOUR }, HOUR - 1)).toEqual({
       reaped: 0,
+      warned: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired({ terminalGraceMs: HOUR }, HOUR)).toEqual({
       reaped: 1,
+      warned: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('TORN_DOWN');
@@ -244,6 +284,7 @@ describe('reapExpired (M17)', () => {
 
     expect(await h.orch.reapExpired({ terminalGraceMs: HOUR }, 100 * HOUR)).toEqual({
       reaped: 1,
+      warned: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(idle.wu.id))?.state).toBe('WORKING');
@@ -251,6 +292,7 @@ describe('reapExpired (M17)', () => {
 
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 100 * HOUR)).toEqual({
       reaped: 1,
+      warned: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(idle.wu.id))?.state).toBe('TORN_DOWN');
@@ -264,8 +306,164 @@ describe('reapExpired (M17)', () => {
 
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 100 * HOUR)).toEqual({
       reaped: 1,
+      warned: 0,
       failed: 1,
     });
     expect((await h.repos.workUnits.get(second.wu.id))?.state).toBe('TORN_DOWN');
+  });
+});
+
+describe('idle warnings (M18)', () => {
+  const MIN = 60_000;
+  // Warning window opens 15m before the hour TTL.
+  const POLICY = { idleTtlMs: HOUR, idleWarnMs: 15 * MIN };
+
+  it('warns once inside the window, then reaps at the TTL', async () => {
+    const h = harness();
+    const { conv, wu } = await seedAt(h, 'WORKING', 'W1'); // alive at t=0
+
+    // Before the window: nothing.
+    expect(await h.orch.reapExpired(POLICY, 45 * MIN - 1)).toEqual({
+      reaped: 0,
+      warned: 0,
+      failed: 0,
+    });
+    // Window open: one warning, recorded on the row.
+    h.clock.set(45 * MIN);
+    expect(await h.orch.reapExpired(POLICY, 45 * MIN)).toEqual({
+      reaped: 0,
+      warned: 1,
+      failed: 0,
+    });
+    expect(h.rendered).toContainEqual(
+      expect.objectContaining({
+        type: 'post_message',
+        conversationId: conv.id,
+        text: expect.stringContaining('reclaimed in about 15m'),
+      }),
+    );
+    expect((await h.repos.workUnits.get(wu.id))?.idleWarnedAt).toBe(
+      new Date(45 * MIN).toISOString(),
+    );
+    // A later sweep inside the window does not re-warn.
+    h.clock.set(50 * MIN);
+    expect(await h.orch.reapExpired(POLICY, 50 * MIN)).toEqual({
+      reaped: 0,
+      warned: 0,
+      failed: 0,
+    });
+    // At the TTL the unit dies — the warning has stood for the full window.
+    h.clock.set(60 * MIN);
+    expect(await h.orch.reapExpired(POLICY, 60 * MIN)).toEqual({
+      reaped: 1,
+      warned: 0,
+      failed: 0,
+    });
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('TORN_DOWN');
+  });
+
+  it('tenant activity after a warning invalidates it — the cycle restarts', async () => {
+    const h = harness();
+    const { wu } = await seedAt(h, 'WORKING', 'W2'); // alive at t=0
+    h.clock.set(45 * MIN);
+    await h.orch.reapExpired(POLICY, 45 * MIN); // warned at 45m
+
+    h.clock.set(50 * MIN);
+    await h.repos.workUnits.touch(wu.id); // the user speaks at 50m
+
+    // Past the ORIGINAL TTL: the warning predates the activity — no reap.
+    expect(await h.orch.reapExpired(POLICY, 60 * MIN)).toEqual({
+      reaped: 0,
+      warned: 0,
+      failed: 0,
+    });
+    // The window reopens off the new activity clock (50m + 45m)…
+    expect(await h.orch.reapExpired(POLICY, 95 * MIN - 1)).toEqual({
+      reaped: 0,
+      warned: 0,
+      failed: 0,
+    });
+    h.clock.set(95 * MIN);
+    expect(await h.orch.reapExpired(POLICY, 95 * MIN)).toEqual({
+      reaped: 0,
+      warned: 1,
+      failed: 0,
+    });
+    // …and the reap honors the fresh warning's full window.
+    expect(await h.orch.reapExpired(POLICY, 110 * MIN - 1)).toEqual({
+      reaped: 0,
+      warned: 0,
+      failed: 0,
+    });
+    expect(await h.orch.reapExpired(POLICY, 110 * MIN)).toEqual({
+      reaped: 1,
+      warned: 0,
+      failed: 0,
+    });
+  });
+
+  it('a unit discovered past the TTL is warned first, reaped a full window later', async () => {
+    const h = harness();
+    const { wu } = await seedAt(h, 'WORKING', 'W3'); // alive at t=0
+
+    // First sweep lands at 10h — way past the TTL, but never warned: warn, don't reap.
+    h.clock.set(10 * HOUR);
+    expect(await h.orch.reapExpired(POLICY, 10 * HOUR)).toEqual({
+      reaped: 0,
+      warned: 1,
+      failed: 0,
+    });
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
+    // The reap waits out the whole window from the warning, not the TTL.
+    expect(await h.orch.reapExpired(POLICY, 10 * HOUR + 15 * MIN - 1)).toEqual({
+      reaped: 0,
+      warned: 0,
+      failed: 0,
+    });
+    expect(await h.orch.reapExpired(POLICY, 10 * HOUR + 15 * MIN)).toEqual({
+      reaped: 1,
+      warned: 0,
+      failed: 0,
+    });
+  });
+
+  it('a failed warning mark counts as failed and re-warns next sweep', async () => {
+    const h = harness();
+    const { conv } = await seedAt(h, 'WORKING', 'W4');
+    vi.spyOn(h.repos.workUnits, 'markIdleWarned').mockRejectedValueOnce(new Error('db down'));
+
+    h.clock.set(45 * MIN);
+    expect(await h.orch.reapExpired(POLICY, 45 * MIN)).toEqual({
+      reaped: 0,
+      warned: 0,
+      failed: 1,
+    });
+    // The retry re-posts once — annoying beats unwarned (m18-plan Decision 3).
+    h.clock.set(46 * MIN);
+    expect(await h.orch.reapExpired(POLICY, 46 * MIN)).toEqual({
+      reaped: 0,
+      warned: 1,
+      failed: 0,
+    });
+    const warnings = h.rendered.filter(
+      (c) => c.type === 'post_message' && c.conversationId === conv.id,
+    );
+    expect(warnings).toHaveLength(2);
+  });
+
+  it('warnings cover only the idle class — terminal collection stays silent', async () => {
+    const h = harness();
+    const { conv } = await seedAt(h, 'PR_MERGED', 'W5'); // terminal at t=0
+    expect(await h.orch.reapExpired({ ...POLICY, terminalGraceMs: HOUR }, 50 * MIN)).toEqual({
+      reaped: 0,
+      warned: 0,
+      failed: 0,
+    });
+    expect(await h.orch.reapExpired({ ...POLICY, terminalGraceMs: HOUR }, HOUR)).toEqual({
+      reaped: 1,
+      warned: 0,
+      failed: 0,
+    });
+    expect(h.rendered.filter((c) => c.conversationId === conv.id)).toEqual([]);
   });
 });

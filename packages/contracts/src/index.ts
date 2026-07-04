@@ -462,6 +462,9 @@ export const WorkUnitSchema = z.object({
   /** When the tenant last drove this session (chat event), if ever (M17).
    * Absent on pre-M17 rows; idleness falls back to `updatedAt`. */
   lastActivityAt: z.string().datetime().optional(),
+  /** When the reaper last warned this session about an idle reap (M18).
+   * Never cleared — stale iff it predates max(lastActivityAt, updatedAt). */
+  idleWarnedAt: z.string().datetime().optional(),
 });
 export type WorkUnit = z.infer<typeof WorkUnitSchema>;
 

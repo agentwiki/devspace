@@ -96,6 +96,34 @@ describe('in-memory repositories', () => {
     await expect(repos.workUnits.touch('missing')).resolves.toBeUndefined();
   });
 
+  it('markIdleWarned bumps idleWarnedAt only — nothing ever clears it (M18)', async () => {
+    let tick = 0;
+    const repos = createInMemoryRepositories(() => new Date(tick).toISOString());
+    const conv = await repos.conversations.create({
+      platform: 'slack',
+      externalChannelId: 'chan-w',
+      userId: 'u1',
+    });
+    const wu = await repos.workUnits.create({ conversationId: conv.id });
+    expect(wu.idleWarnedAt).toBeUndefined(); // never warned
+
+    tick = 7_000;
+    await repos.workUnits.markIdleWarned(wu.id);
+    const warned = await repos.workUnits.get(wu.id);
+    expect(warned?.idleWarnedAt).toBe(new Date(7_000).toISOString());
+    expect(warned?.updatedAt).toBe(wu.updatedAt); // untouched
+    expect(warned?.lastActivityAt).toBeUndefined();
+
+    // Activity postdates a warning rather than clearing it — staleness is a
+    // comparison the reaper makes, not a write.
+    tick = 9_000;
+    await repos.workUnits.touch(wu.id);
+    expect((await repos.workUnits.get(wu.id))?.idleWarnedAt).toBe(new Date(7_000).toISOString());
+
+    // Warning a missing unit is a no-op.
+    await expect(repos.workUnits.markIdleWarned('missing')).resolves.toBeUndefined();
+  });
+
   it('rejects an illegal transition', async () => {
     const repos = createInMemoryRepositories();
     const conv = await repos.conversations.create({

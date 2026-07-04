@@ -1,0 +1,1 @@
+ALTER TABLE "work_units" ADD COLUMN "idle_warned_at" timestamp with time zone;

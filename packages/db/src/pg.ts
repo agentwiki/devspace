@@ -61,6 +61,7 @@ function mapWorkUnit(r: WorkUnitRow): WorkUnit {
     createdAt: iso(r.createdAt),
     updatedAt: iso(r.updatedAt),
     lastActivityAt: r.lastActivityAt ? iso(r.lastActivityAt) : undefined,
+    idleWarnedAt: r.idleWarnedAt ? iso(r.idleWarnedAt) : undefined,
   };
 }
 
@@ -217,6 +218,12 @@ export function createPostgresRepositories(pool: Pool): Repositories {
         await db
           .update(workUnits)
           .set({ lastActivityAt: sql`now()` })
+          .where(eq(workUnits.id, id));
+      },
+      async markIdleWarned(id) {
+        await db
+          .update(workUnits)
+          .set({ idleWarnedAt: sql`now()` })
           .where(eq(workUnits.id, id));
       },
     },

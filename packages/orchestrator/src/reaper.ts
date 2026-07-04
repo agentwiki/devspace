@@ -33,6 +33,13 @@ export const TERMINAL_REAP_STATES: readonly WorkState[] = ['PR_MERGED', 'PR_CLOS
 export interface ReapPolicy {
   /** Tear down a pre-PR unit whose tenant has been silent this long. */
   idleTtlMs?: number;
+  /**
+   * Warn the thread this long before the idle TTL reaps it (M18). With this
+   * set, no idle reap ever happens unwarned: a warning posted after the
+   * tenant's last sign of life must have stood for the full window first
+   * (m18-plan Decision 1). Requires idleTtlMs and must be smaller.
+   */
+  idleWarnMs?: number;
   /** Tear down a terminal unit unchanged for this long. */
   terminalGraceMs?: number;
   /** Sweep cadence (also the election lease's renewal tick). */
@@ -49,8 +56,20 @@ const DEFAULT_REAP_INTERVAL_MS = 60_000;
  */
 export function reapPolicyFromEnv(env: Record<string, string | undefined>): ReapPolicy | undefined {
   const idleTtlMs = positiveIntFromEnv(env, 'DEVSPACE_IDLE_TTL_MS');
+  const idleWarnMs = positiveIntFromEnv(env, 'DEVSPACE_IDLE_WARN_MS');
   const terminalGraceMs = positiveIntFromEnv(env, 'DEVSPACE_TERMINAL_GRACE_MS');
   const intervalMs = positiveIntFromEnv(env, 'DEVSPACE_REAP_INTERVAL_MS');
+  if (idleWarnMs !== undefined && idleTtlMs === undefined) {
+    throw new Error(
+      'DEVSPACE_IDLE_WARN_MS is set but DEVSPACE_IDLE_TTL_MS is not — there is no TTL to warn ahead of',
+    );
+  }
+  if (idleWarnMs !== undefined && idleTtlMs !== undefined && idleWarnMs >= idleTtlMs) {
+    throw new Error(
+      `DEVSPACE_IDLE_WARN_MS (${idleWarnMs}) must be smaller than DEVSPACE_IDLE_TTL_MS ` +
+        `(${idleTtlMs}) — the warning window opens before the TTL, not around it`,
+    );
+  }
   if (idleTtlMs === undefined && terminalGraceMs === undefined) {
     if (intervalMs !== undefined) {
       throw new Error(
@@ -60,7 +79,19 @@ export function reapPolicyFromEnv(env: Record<string, string | undefined>): Reap
     }
     return undefined;
   }
-  return { idleTtlMs, terminalGraceMs, intervalMs: intervalMs ?? DEFAULT_REAP_INTERVAL_MS };
+  return {
+    idleTtlMs,
+    idleWarnMs,
+    terminalGraceMs,
+    intervalMs: intervalMs ?? DEFAULT_REAP_INTERVAL_MS,
+  };
+}
+
+/** "90s" / "45m" / "1.5h" — chat-grade precision for the warning text. */
+export function approxDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1_000))}s`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+  return `${Math.round(ms / 360_000) / 10}h`;
 }
 
 function positiveIntFromEnv(

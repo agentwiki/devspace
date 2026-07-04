@@ -80,6 +80,9 @@ services:
       # TTL (PR_OPEN exempt) and terminal units unchanged past the grace.
       # Runs on the lifecycle-reaper lease holder only. Both unset: no reaper.
       DEVSPACE_IDLE_TTL_MS: ${DEVSPACE_IDLE_TTL_MS:-}
+      # Warn the thread this long before the idle TTL reaps it (M18);
+      # requires the idle TTL and must be smaller.
+      DEVSPACE_IDLE_WARN_MS: ${DEVSPACE_IDLE_WARN_MS:-}
       DEVSPACE_TERMINAL_GRACE_MS: ${DEVSPACE_TERMINAL_GRACE_MS:-}
       DEVSPACE_REAP_INTERVAL_MS: ${DEVSPACE_REAP_INTERVAL_MS:-}
     ports:

@@ -114,6 +114,16 @@ a wrong transition. Rolling deploys keep the fleet's warm stock:
 on their hosts for siblings (or the next boot) to adopt instead of
 destroying them one controller at a time (docs/m15-plan.md).
 
+Since M16 the fleet can see actual load, not just promises: every sandbox
+host reports a live utilization sample (`GET /stats` — `docker stats` behind
+the runtime seam, per-env usage in grant units plus the host's physical
+capacity), and with `SANDBOX_STATS_INTERVAL_MS` set the orchestrator's fleet
+layer samples in the background and lets placement RANKING take
+`max(grant fractions, fresh live fractions)` — a measurably hot host is
+demoted, a stale or missing sample degrades to the pure M12 grant score, and
+admission never consults the live signal, so budgets still bound the worst
+case and no eviction story is needed (docs/m16-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

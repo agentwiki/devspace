@@ -9,11 +9,14 @@
  * the real docker/devcontainer-backed implementations.
  */
 import { randomUUID } from 'node:crypto';
+import { cpus, totalmem } from 'node:os';
 import type {
   CreateEnvironmentRequest,
   Environment,
+  EnvUsage,
   ExecRequest,
   FsEntry,
+  HostStats,
   SecretSpec,
 } from '@devspace/contracts';
 import { CreateEnvironmentRequestSchema } from '@devspace/contracts';
@@ -64,6 +67,25 @@ export interface SandboxCoreDeps {
   preview: PreviewRegistrar;
 }
 
+/**
+ * Live utilization truth (M16): a core that can report what its envs actually
+ * consume. Deliberately NOT part of `SandboxCore` — the fleet layer has no
+ * single host to sample and a fake core has nothing to measure; consumers
+ * duck-check with `hasHostStats`.
+ */
+export interface HostStatsProvider {
+  getHostStats(): Promise<HostStats>;
+}
+
+/** Type guard for the optional stats capability (M16). */
+export function hasHostStats(core: unknown): core is HostStatsProvider {
+  return (
+    typeof core === 'object' &&
+    core !== null &&
+    typeof (core as { getHostStats?: unknown }).getHostStats === 'function'
+  );
+}
+
 export interface SandboxCore {
   createEnvironment(req: CreateEnvironmentRequest): Promise<Environment>;
   getEnvironment(envId: string): Promise<Environment | null>;
@@ -109,6 +131,9 @@ export class DevcontainerSandboxCore implements SandboxCore {
   /** Durable env table (M11); absent = the documented in-memory posture. */
   private readonly stateStore?: EnvStateStore;
 
+  /** Physical capacity reported with stats samples (M16); injectable for tests. */
+  private readonly hostInfo: { cpuCount: number; memTotalMB: number };
+
   constructor(
     deps?: Partial<SandboxCoreDeps> & {
       runner?: CommandRunner;
@@ -117,6 +142,7 @@ export class DevcontainerSandboxCore implements SandboxCore {
       budgets?: HostBudgets;
       gitPath?: string;
       stateStore?: EnvStateStore;
+      hostInfo?: { cpuCount: number; memTotalMB: number };
     },
   ) {
     const runner = deps?.runner ?? nodeCommandRunner;
@@ -129,6 +155,10 @@ export class DevcontainerSandboxCore implements SandboxCore {
     this.maxEnvs = deps?.maxEnvs;
     this.budgets = deps?.budgets;
     this.stateStore = deps?.stateStore;
+    this.hostInfo = deps?.hostInfo ?? {
+      cpuCount: cpus().length,
+      memTotalMB: totalmem() / 1024 ** 2,
+    };
   }
 
   async createEnvironment(input: CreateEnvironmentRequest): Promise<Environment> {
@@ -242,6 +272,34 @@ export class DevcontainerSandboxCore implements SandboxCore {
 
   listEnvironments(): Promise<Environment[]> {
     return Promise.resolve([...this.envs.values()].map((r) => r.env));
+  }
+
+  /**
+   * Live utilization truth (M16): one runtime sample, attributed to OUR live
+   * envs by container-id prefix (`docker stats` reports short ids). Foreign
+   * containers on a shared daemon are invisible in the per-env list — the
+   * physical denominators still describe the whole machine.
+   */
+  async getHostStats(): Promise<HostStats> {
+    if (!this.runtime.stats) {
+      throw new SandboxError('EXEC_FAILED', 'this container runtime does not report stats');
+    }
+    const usages = await this.runtime.stats();
+    const envs: EnvUsage[] = [];
+    for (const record of this.envs.values()) {
+      const containerId = record.containerId;
+      if (record.env.status !== 'ready' || !containerId) continue;
+      const usage = usages.find(
+        (u) => containerId.startsWith(u.containerId) || u.containerId.startsWith(containerId),
+      );
+      if (usage) envs.push({ envId: record.env.envId, cpu: usage.cpu, memMB: usage.memMB });
+    }
+    return {
+      sampledAt: new Date().toISOString(),
+      cpuCount: this.hostInfo.cpuCount,
+      memTotalMB: this.hostInfo.memTotalMB,
+      envs,
+    };
   }
 
   /**

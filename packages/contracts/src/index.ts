@@ -193,6 +193,34 @@ export const FsEntrySchema = z.object({
 });
 export type FsEntry = z.infer<typeof FsEntrySchema>;
 
+/**
+ * Instantaneous per-env usage in GRANT UNITS (M16): measured cpu in cores and
+ * memory in MB — the exact units of `ResourceLimits` and the fleet's host
+ * budgets, so consumers compare usage to grants without unit arithmetic.
+ */
+export const EnvUsageSchema = z.object({
+  envId: EnvIdSchema,
+  cpu: z.number().nonnegative(),
+  memMB: z.number().nonnegative(),
+});
+export type EnvUsage = z.infer<typeof EnvUsageSchema>;
+
+/**
+ * One host's live utilization sample (M16, `GET /stats`). A sample of the
+ * HOST at a moment in time — deliberately not part of `Environment`, which is
+ * durable state; anything acting on this must weigh `sampledAt` staleness.
+ */
+export const HostStatsSchema = z.object({
+  sampledAt: z.string().datetime(),
+  /** Physical cpu cores on the daemon host (the live-cpu denominator). */
+  cpuCount: z.number().positive(),
+  /** Physical memory on the daemon host, in MB. */
+  memTotalMB: z.number().positive(),
+  /** Usage attributed to this host's own live envs. */
+  envs: z.array(EnvUsageSchema),
+});
+export type HostStats = z.infer<typeof HostStatsSchema>;
+
 /* -------------------------------------------------------------------------- */
 /* Agent Runner: ACP-backed sessions + normalized event stream                 */
 /* -------------------------------------------------------------------------- */

@@ -19,12 +19,14 @@ import type { Socket } from 'node:net';
 import {
   EnvironmentSchema,
   FsEntrySchema,
+  HostStatsSchema,
   type CreateEnvironmentRequest,
   type Environment,
   type ExecClientFrame,
   type ExecFrame,
   type ExecRequest,
   type FsEntry,
+  type HostStats,
   type SecretSpec,
 } from '@devspace/contracts';
 import { ExecFrameSchema } from '@devspace/contracts';
@@ -41,7 +43,7 @@ import {
   writeJsonLine,
 } from './remote-protocol.js';
 import { SandboxError } from './sandbox.js';
-import type { SandboxCore } from './sandbox.js';
+import type { HostStatsProvider, SandboxCore } from './sandbox.js';
 
 export interface RemoteSandboxCoreOptions {
   /**
@@ -62,7 +64,7 @@ interface JsonResponse {
   text: string;
 }
 
-export class RemoteSandboxCore implements SandboxCore {
+export class RemoteSandboxCore implements SandboxCore, HostStatsProvider {
   private readonly base: string;
   /** TLS connection options in mTLS mode; undefined in token mode. */
   private readonly tls?: ReturnType<typeof clientTlsOptions>;
@@ -108,6 +110,13 @@ export class RemoteSandboxCore implements SandboxCore {
     const res = await this.request('GET', '/environments');
     if (res.status !== 200) throw this.toError(res, 'EXEC_FAILED');
     return (JSON.parse(res.text) as unknown[]).map((e) => EnvironmentSchema.parse(e));
+  }
+
+  /** The host's live utilization sample (M16). NOT_FOUND = host can't report. */
+  async getHostStats(): Promise<HostStats> {
+    const res = await this.request('GET', '/stats');
+    if (res.status !== 200) throw this.toError(res, 'EXEC_FAILED');
+    return HostStatsSchema.parse(JSON.parse(res.text));
   }
 
   async destroyEnvironment(envId: string): Promise<void> {

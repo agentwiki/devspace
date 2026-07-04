@@ -9,15 +9,28 @@
  * the binding cold-miss resolver reads, and `GET /sessions`. Render commands go
  * to the gateway's `POST /render` when GATEWAY_RENDER_URL is set (retry, then
  * log-and-drop — never fail a turn on a dead gateway); to logs otherwise.
+ *
+ * M13: with the DEVSPACE_TLS_* identity set instead of the shared token
+ * (never both), the split API moves to a mutual-TLS listener on
+ * DEVSPACE_TLS_PORT (default PORT+1) serving the chat gateway only; the plain
+ * port keeps /health and the GitHub webhook ingress, whose caller cannot
+ * present a client certificate and authenticates by HMAC signature (M5).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { Pool } from 'pg';
 import type { EventBus, Repositories } from '@devspace/db';
+import {
+  internalTlsFromEnv,
+  serverTlsOptions,
+  type InternalTlsIdentity,
+} from '@devspace/sandbox-core';
 import {
   bootOrchestrator,
   handleInternalApi,
   httpRenderTransport,
   processWebhookDelivery,
+  type InternalServerAuth,
   type Orchestrator,
 } from '@devspace/orchestrator';
 
@@ -32,8 +45,11 @@ interface Config {
   reconcileIntervalMs: number;
   /** Webhook ingress is disabled (with a boot log) when unset. */
   webhookSecret?: string;
-  /** Shared bearer token; the internal split API is disabled when unset. */
+  /** Shared bearer token; mutually exclusive with internalTls (M13). */
   internalToken?: string;
+  /** Internal TLS identity (M13); the split API then serves on tlsPort. */
+  internalTls?: InternalTlsIdentity;
+  tlsPort: number;
   /** Gateway render endpoint (split mode); render logs when unset. */
   gatewayRenderUrl?: string;
 }
@@ -45,14 +61,25 @@ function loadConfig(): Config {
   if (!envelopeKey) throw new Error('SECRET_ENVELOPE_KEY is required');
   const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET || undefined;
   const internalToken = process.env.DEVSPACE_INTERNAL_TOKEN || undefined;
+  const internalTls = internalTlsFromEnv(process.env);
   const gatewayRenderUrl = process.env.GATEWAY_RENDER_URL || undefined;
+  const port = Number(process.env.ORCHESTRATOR_PORT ?? process.env.PORT ?? 4000);
+  // One auth regime per deployment (m13-plan Decision 1).
+  if (internalToken && internalTls) {
+    throw new Error(
+      'DEVSPACE_INTERNAL_TOKEN and DEVSPACE_TLS_* are mutually exclusive — one auth regime per deployment',
+    );
+  }
   // An unauthenticated control plane is worse than no split (m6-plan
-  // Decision 3): render-to-gateway without the shared token is refused.
-  if (gatewayRenderUrl && !internalToken) {
-    throw new Error('GATEWAY_RENDER_URL requires DEVSPACE_INTERNAL_TOKEN');
+  // Decision 3): render-to-gateway without internal auth is refused.
+  if (gatewayRenderUrl && !internalToken && !internalTls) {
+    throw new Error(
+      'GATEWAY_RENDER_URL requires DEVSPACE_INTERNAL_TOKEN or the DEVSPACE_TLS_* identity',
+    );
   }
   return {
-    port: Number(process.env.ORCHESTRATOR_PORT ?? process.env.PORT ?? 4000),
+    port,
+    tlsPort: Number(process.env.DEVSPACE_TLS_PORT ?? port + 1),
     databaseUrl,
     envelopeKey,
     retiredKeys: (process.env.SECRET_ENVELOPE_KEYS_RETIRED ?? '')
@@ -67,6 +94,7 @@ function loadConfig(): Config {
     ),
     webhookSecret,
     internalToken,
+    internalTls,
     gatewayRenderUrl,
   };
 }
@@ -82,15 +110,21 @@ export interface BootedService {
 export async function start(config: Config = loadConfig()): Promise<BootedService> {
   const pool = new Pool({ connectionString: config.databaseUrl });
 
+  // Split mode posts each command to the gateway (m6-plan Decision 2) with
+  // whichever internal auth regime is configured; standalone logs, unchanged.
+  const renderAuth = config.internalToken
+    ? { token: config.internalToken }
+    : config.internalTls
+      ? { tls: { ...config.internalTls, expectService: 'chat-gateway' } }
+      : undefined;
   const booted = await bootOrchestrator(pool, {
     envelopeKey: config.envelopeKey,
     retiredKeys: config.retiredKeys,
     githubApiBase: config.githubApiBase,
-    // Split mode posts each command to the gateway (m6-plan Decision 2);
-    // standalone surfaces to logs, unchanged.
+    internalTls: config.internalTls,
     render:
-      config.gatewayRenderUrl && config.internalToken
-        ? httpRenderTransport(config.gatewayRenderUrl, config.internalToken)
+      config.gatewayRenderUrl && renderAuth
+        ? httpRenderTransport(config.gatewayRenderUrl, renderAuth)
         : async (command) => {
             console.log(`[render] ${JSON.stringify(command)}`);
           },
@@ -103,13 +137,40 @@ export async function start(config: Config = loadConfig()): Promise<BootedServic
     void route(req, res, config, booted.orch, booted.repos, booted.bus);
   });
 
+  // mTLS mode (M13): the split API serves the chat gateway on its own
+  // listener; the plain port above keeps /health + webhooks only.
+  let tlsServer: HttpsServer | undefined;
+  if (config.internalTls) {
+    const auth: InternalServerAuth = { tlsAllow: ['chat-gateway'] };
+    tlsServer = createHttpsServer(serverTlsOptions(config.internalTls), (req, res) => {
+      void (async () => {
+        if (req.method === 'GET' && req.url === '/health') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ok', service: SERVICE }));
+          return;
+        }
+        if (await handleInternalApi(req, res, internalApiDeps(auth, booted.orch, booted.repos))) {
+          return;
+        }
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ code: 'NOT_FOUND', message: 'not found' }));
+      })();
+    });
+    await new Promise<void>((resolve) => tlsServer!.listen(config.tlsPort, resolve));
+    console.log(
+      `[${SERVICE}] internal split API on :${config.tlsPort} (mTLS, serving chat-gateway)`,
+    );
+  }
+
   await new Promise<void>((resolve) => server.listen(config.port, resolve));
   console.log(`[${SERVICE}] listening on :${config.port}`);
   if (!config.webhookSecret) {
     console.log(`[${SERVICE}] GITHUB_WEBHOOK_SECRET unset — webhook ingress disabled, poll only`);
   }
-  if (!config.internalToken) {
-    console.log(`[${SERVICE}] DEVSPACE_INTERNAL_TOKEN unset — internal split API disabled`);
+  if (!config.internalToken && !config.internalTls) {
+    console.log(
+      `[${SERVICE}] DEVSPACE_INTERNAL_TOKEN and DEVSPACE_TLS_* unset — internal split API disabled`,
+    );
   }
 
   return {
@@ -119,9 +180,27 @@ export async function start(config: Config = loadConfig()): Promise<BootedServic
     async close() {
       stopReconciler();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (tlsServer) await new Promise<void>((resolve) => tlsServer!.close(() => resolve()));
       await booted.close();
       await pool.end();
     },
+  };
+}
+
+/** The internal API's narrow deps, shared by the token and mTLS listeners. */
+function internalApiDeps(
+  auth: InternalServerAuth,
+  orch: Orchestrator,
+  repos: Repositories,
+): Parameters<typeof handleInternalApi>[2] {
+  return {
+    auth,
+    handleChatEvent: (event) => orch.handleChatEvent(event),
+    resolveConversationId: (platform, externalChannelId) =>
+      orch.resolveConversationId(platform, externalChannelId),
+    conversationRef: async (conversationId) =>
+      (await repos.conversations.get(conversationId))?.externalChannelId ?? null,
+    listSessions: (platform, userId) => orch.listSessions(platform, userId),
   };
 }
 
@@ -149,17 +228,14 @@ async function route(
     return;
   }
 
-  // The split's internal API (M6-A) — live only when the token is configured.
+  // The split's internal API (M6-A) — on this plain port only in token mode;
+  // in mTLS mode it lives on its own listener (M13).
   if (config.internalToken) {
-    const handled = await handleInternalApi(req, res, {
-      token: config.internalToken,
-      handleChatEvent: (event) => orch.handleChatEvent(event),
-      resolveConversationId: (platform, externalChannelId) =>
-        orch.resolveConversationId(platform, externalChannelId),
-      conversationRef: async (conversationId) =>
-        (await repos.conversations.get(conversationId))?.externalChannelId ?? null,
-      listSessions: (platform, userId) => orch.listSessions(platform, userId),
-    });
+    const handled = await handleInternalApi(
+      req,
+      res,
+      internalApiDeps({ token: config.internalToken }, orch, repos),
+    );
     if (handled) return;
   }
 

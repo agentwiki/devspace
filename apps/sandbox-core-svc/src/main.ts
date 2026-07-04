@@ -9,8 +9,14 @@
  * DEVSPACE_INTERNAL_TOKEN set, everything except /health requires the internal
  * bearer; without it, the JSON surface stays a local ops/debug tool and the
  * exec stream refuses to serve (m8-plan Decision 5).
+ *
+ * M13: with the DEVSPACE_TLS_* identity set instead (never both — one auth
+ * regime per deployment), the whole surface moves to a mutual-TLS listener on
+ * DEVSPACE_TLS_PORT (default PORT+1) serving the orchestrator only, and the
+ * plain port keeps nothing but /health for probes (m13-plan Decision 4).
  */
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import {
   DEFAULT_EGRESS_ALLOWLIST,
   DevcontainerSandboxCore,
@@ -21,14 +27,23 @@ import {
   createSandboxUpgradeHandler,
   envStateStoreFromEnv,
   hardeningFromEnv,
+  internalTlsFromEnv,
   maxEnvsFromEnv,
   nodeCommandRunner,
   previewProxyFromEnv,
+  serverTlsOptions,
 } from '@devspace/sandbox-core';
 
 const SERVICE = 'sandbox-core';
 const PORT = Number(process.env.PORT ?? 4001);
 const TOKEN = process.env.DEVSPACE_INTERNAL_TOKEN || undefined;
+const TLS = internalTlsFromEnv(process.env);
+const TLS_PORT = Number(process.env.DEVSPACE_TLS_PORT ?? PORT + 1);
+if (TOKEN && TLS) {
+  throw new Error(
+    'DEVSPACE_INTERNAL_TOKEN and DEVSPACE_TLS_* are mutually exclusive — one auth regime per deployment',
+  );
+}
 
 // M5 hardening is boot-time host policy (m5-plan Decision 1). Fail fast when
 // the configured runtime class (gVisor/Kata) is absent from the daemon.
@@ -86,20 +101,53 @@ if (stateStore) {
   );
 }
 
-const server = createServer(createSandboxRequestHandler(core, { token: TOKEN, service: SERVICE }));
-server.on(
-  'upgrade',
-  createSandboxUpgradeHandler(core, {
-    token: TOKEN,
-    onLog: (line) => console.log(`[${SERVICE}] exec: ${line}`),
-  }),
-);
+if (TLS) {
+  // mTLS mode (M13): the full surface serves the orchestrator on the TLS
+  // listener; the plain port answers probes and nothing else.
+  const tlsOpts = {
+    tls: { allow: ['orchestrator'] },
+    service: SERVICE,
+    onLog: (line: string) => console.log(`[${SERVICE}] exec: ${line}`),
+  };
+  const tlsServer = createHttpsServer(
+    serverTlsOptions(TLS),
+    createSandboxRequestHandler(core, tlsOpts),
+  );
+  tlsServer.on('upgrade', createSandboxUpgradeHandler(core, tlsOpts));
+  tlsServer.listen(TLS_PORT, () => {
+    console.log(`[${SERVICE}] internal surface on :${TLS_PORT} (mTLS, serving orchestrator)`);
+  });
 
-server.listen(PORT, () => {
-  console.log(`[${SERVICE}] listening on :${PORT}`);
-  if (!TOKEN) {
-    console.log(
-      `[${SERVICE}] DEVSPACE_INTERNAL_TOKEN unset — JSON surface open (local ops), exec stream disabled`,
-    );
-  }
-});
+  const health = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', service: SERVICE }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ code: 'NOT_FOUND', message: 'not found' }));
+  });
+  health.listen(PORT, () => {
+    console.log(`[${SERVICE}] health probe on :${PORT}`);
+  });
+} else {
+  const server = createServer(
+    createSandboxRequestHandler(core, { token: TOKEN, service: SERVICE }),
+  );
+  server.on(
+    'upgrade',
+    createSandboxUpgradeHandler(core, {
+      token: TOKEN,
+      onLog: (line) => console.log(`[${SERVICE}] exec: ${line}`),
+    }),
+  );
+
+  server.listen(PORT, () => {
+    console.log(`[${SERVICE}] listening on :${PORT}`);
+    if (!TOKEN) {
+      console.log(
+        `[${SERVICE}] DEVSPACE_INTERNAL_TOKEN unset — JSON surface open (local ops), exec stream disabled`,
+      );
+    }
+  });
+}

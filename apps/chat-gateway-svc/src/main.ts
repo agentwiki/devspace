@@ -19,9 +19,15 @@
  * the halves; the HTTP mode wraps the same seam functions the demo wires
  * directly (m6-plan Decision 4).
  */
-import { createServer, type Server } from 'node:http';
+import { createServer, type Server, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { Pool } from 'pg';
 import type { ChatPlatform } from '@devspace/contracts';
+import {
+  internalTlsFromEnv,
+  serverTlsOptions,
+  type InternalTlsIdentity,
+} from '@devspace/sandbox-core';
 import {
   ConversationBinding,
   DiscordAdapter,
@@ -37,6 +43,8 @@ import {
   httpChatEventEmitter,
   httpOrchestratorReads,
   type BootedOrchestrator,
+  type InternalClientAuth,
+  type InternalServerAuth,
 } from '@devspace/orchestrator';
 
 const SERVICE = 'chat-gateway';
@@ -51,6 +59,9 @@ interface Config {
   /** Split mode when set (m6-plan Decision 4). */
   orchestratorUrl?: string;
   internalToken?: string;
+  /** Internal TLS identity (M13); /render then serves on tlsPort over mTLS. */
+  internalTls?: InternalTlsIdentity;
+  tlsPort: number;
   /** Demo mode only: */
   databaseUrl?: string;
   envelopeKey?: string;
@@ -71,12 +82,23 @@ function loadConfig(): Config {
   }
   const orchestratorUrl = process.env.ORCHESTRATOR_URL || undefined;
   const internalToken = process.env.DEVSPACE_INTERNAL_TOKEN || undefined;
-  if (orchestratorUrl && !internalToken) {
+  const internalTls = internalTlsFromEnv(process.env);
+  const port = Number(process.env.CHAT_GATEWAY_PORT ?? process.env.PORT ?? 4002);
+  // One auth regime per deployment (m13-plan Decision 1).
+  if (internalToken && internalTls) {
+    throw new Error(
+      'DEVSPACE_INTERNAL_TOKEN and DEVSPACE_TLS_* are mutually exclusive — one auth regime per deployment',
+    );
+  }
+  if (orchestratorUrl && !internalToken && !internalTls) {
     // An unauthenticated control plane is worse than no split (Decision 3).
-    throw new Error('ORCHESTRATOR_URL requires DEVSPACE_INTERNAL_TOKEN');
+    throw new Error(
+      'ORCHESTRATOR_URL requires DEVSPACE_INTERNAL_TOKEN or the DEVSPACE_TLS_* identity',
+    );
   }
   return {
-    port: Number(process.env.CHAT_GATEWAY_PORT ?? process.env.PORT ?? 4002),
+    port,
+    tlsPort: Number(process.env.DEVSPACE_TLS_PORT ?? port + 1),
     platform,
     slackBotToken: platform === 'slack' ? required('SLACK_BOT_TOKEN') : undefined,
     slackAppToken: platform === 'slack' ? required('SLACK_APP_TOKEN') : undefined,
@@ -84,6 +106,7 @@ function loadConfig(): Config {
     discordApplicationId: platform === 'discord' ? required('DISCORD_APPLICATION_ID') : undefined,
     orchestratorUrl,
     internalToken,
+    internalTls,
     databaseUrl: orchestratorUrl ? undefined : required('DATABASE_URL'),
     envelopeKey: orchestratorUrl ? undefined : required('SECRET_ENVELOPE_KEY'),
     retiredKeys: (process.env.SECRET_ENVELOPE_KEYS_RETIRED ?? '')
@@ -122,6 +145,8 @@ function buildAdapter(
 export interface BootedGateway {
   server: Server;
   adapter: Adapter;
+  /** The mTLS /render listener (M13); present in TLS split mode only. */
+  tlsServer?: HttpsServer;
   /** Present in demo mode only. */
   booted?: BootedOrchestrator;
   pool?: Pool;
@@ -130,9 +155,11 @@ export interface BootedGateway {
 
 /** Build and start the service. Exported so a wiring smoke can drive it. */
 export async function start(config: Config = loadConfig()): Promise<BootedGateway> {
-  return config.orchestratorUrl
-    ? startSplit(config, config.orchestratorUrl, config.internalToken!)
-    : startDemo(config);
+  if (!config.orchestratorUrl) return startDemo(config);
+  const auth: InternalClientAuth = config.internalToken
+    ? { token: config.internalToken }
+    : { tls: { ...config.internalTls!, expectService: 'orchestrator' } };
+  return startSplit(config, config.orchestratorUrl, auth);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -142,10 +169,10 @@ export async function start(config: Config = loadConfig()): Promise<BootedGatewa
 async function startSplit(
   config: Config,
   orchestratorUrl: string,
-  token: string,
+  auth: InternalClientAuth,
 ): Promise<BootedGateway> {
-  const emit = httpChatEventEmitter(orchestratorUrl, token);
-  const reads = httpOrchestratorReads(orchestratorUrl, token);
+  const emit = httpChatEventEmitter(orchestratorUrl, auth);
+  const reads = httpOrchestratorReads(orchestratorUrl, auth);
 
   const binding = new ConversationBinding({
     conversation: (externalChannelId) =>
@@ -164,25 +191,54 @@ async function startSplit(
 
   await adapter.start((event) => emit(event));
 
+  const health = (res: ServerResponse): void => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({ status: 'ok', service: SERVICE, platform: config.platform, mode: 'split' }),
+    );
+  };
+  const notFound = (res: ServerResponse): void => {
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ code: 'NOT_FOUND', message: 'not found' }));
+  };
+
+  // mTLS mode (M13): /render serves the orchestrator on its own listener and
+  // the plain port keeps /health only; token mode is the single-port M6 shape.
+  let tlsServer: HttpsServer | undefined;
+  if (config.internalTls) {
+    const serverAuth: InternalServerAuth = { tlsAllow: ['orchestrator'] };
+    tlsServer = createHttpsServer(serverTlsOptions(config.internalTls), (req, res) => {
+      void (async () => {
+        if (
+          await handleRenderRequest(req, res, {
+            auth: serverAuth,
+            render: (cmd) => adapter.render(cmd),
+          })
+        ) {
+          return;
+        }
+        if (req.method === 'GET' && req.url === '/health') return health(res);
+        notFound(res);
+      })();
+    });
+    await new Promise<void>((resolve) => tlsServer!.listen(config.tlsPort, resolve));
+    console.log(`[${SERVICE}] render endpoint on :${config.tlsPort} (mTLS, serving orchestrator)`);
+  }
+
   const server = createServer((req, res) => {
     void (async () => {
-      if (await handleRenderRequest(req, res, { token, render: (cmd) => adapter.render(cmd) })) {
+      if (
+        !config.internalTls &&
+        'token' in auth &&
+        (await handleRenderRequest(req, res, {
+          auth: { token: auth.token },
+          render: (cmd) => adapter.render(cmd),
+        }))
+      ) {
         return;
       }
-      if (req.method === 'GET' && req.url === '/health') {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            status: 'ok',
-            service: SERVICE,
-            platform: config.platform,
-            mode: 'split',
-          }),
-        );
-        return;
-      }
-      res.writeHead(404, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ code: 'NOT_FOUND', message: 'not found' }));
+      if (req.method === 'GET' && req.url === '/health') return health(res);
+      notFound(res);
     })();
   });
   await new Promise<void>((resolve) => server.listen(config.port, resolve));
@@ -191,9 +247,11 @@ async function startSplit(
   return {
     server,
     adapter,
+    tlsServer,
     async close() {
       await adapter.stop(); // drains pending stream buffers
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (tlsServer) await new Promise<void>((resolve) => tlsServer!.close(() => resolve()));
     },
   };
 }

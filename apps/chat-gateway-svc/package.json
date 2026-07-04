@@ -15,11 +15,11 @@
     "@devspace/contracts": "workspace:*",
     "@devspace/chat-gateway": "workspace:*",
     "@devspace/orchestrator": "workspace:*",
+    "@devspace/sandbox-core": "workspace:*",
     "pg": "^8.13.1"
   },
   "devDependencies": {
     "@devspace/db": "workspace:*",
-    "@devspace/sandbox-core": "workspace:*",
     "@devspace/agent-runner": "workspace:*",
     "@types/pg": "^8.11.10"
   }

@@ -42,11 +42,14 @@ services:
       # transport + internal API light up; unset, render surfaces to logs.
       DEVSPACE_INTERNAL_TOKEN: ${DEVSPACE_INTERNAL_TOKEN:-}
       GATEWAY_RENDER_URL: ${DEVSPACE_INTERNAL_TOKEN:+http://chat-gateway:4002/render}
-      # Fleet mode (M8): comma-separated name=url[|capacity][|drain] entries,
-      # e.g. SANDBOX_HOSTS=local=http://sandbox-core:4001|8 — the orchestrator
-      # then places envs on remote sandbox hosts and execs ride the
-      # devspace-exec wire (requires DEVSPACE_INTERNAL_TOKEN). Unset: the
-      # zero-config in-process sandbox (M4) is unchanged.
+      # Fleet mode (M8; weighted M12): comma-separated
+      # name=url[|capacity][|cpu=<cores>][|mem=<MB>][|drain] entries, e.g.
+      # SANDBOX_HOSTS=local=http://sandbox-core:4001|8|cpu=16|mem=65536 — the
+      # orchestrator then places envs on remote sandbox hosts (least fractional
+      # utilization; a request's resource grant must fit every budget the host
+      # declares) and execs ride the devspace-exec wire (requires
+      # DEVSPACE_INTERNAL_TOKEN). Unset: the zero-config in-process sandbox
+      # (M4) is unchanged.
       SANDBOX_HOSTS: ${SANDBOX_HOSTS:-}
       # Warm pools (M9): comma-separated repoUrl[#ref]=size entries, e.g.
       # SANDBOX_WARM_POOLS=https://github.com/acme/widgets.git#main=2 — the

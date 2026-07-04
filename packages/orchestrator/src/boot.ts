@@ -163,6 +163,8 @@ export async function bootOrchestrator(
       sandboxHosts.map((h) => ({
         name: h.name,
         capacity: h.capacity,
+        cpu: h.cpu,
+        memMB: h.memMB,
         draining: h.draining,
         core: new RemoteSandboxCore(h.url, token),
       })),

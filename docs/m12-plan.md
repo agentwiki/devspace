@@ -106,7 +106,7 @@ Out (seeded to M13+, with rationale):
 ### A. Resource truth: contract echo + host accounting + persistence
 
 - `contracts`: `EnvironmentSchema` gains `resources:
-  ResourceLimitsSchema.optional()` (Decision 2). No other contract change.
+ResourceLimitsSchema.optional()` (Decision 2). No other contract change.
 - `sandbox.ts`: the parsed request's `resources` land on the `Environment`
   at creation and are preserved through ready/claim/destroy transitions;
   `persistedState` includes them; `recover()` restores them onto the

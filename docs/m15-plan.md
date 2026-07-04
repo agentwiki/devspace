@@ -44,7 +44,7 @@ In (per roadmap M15+, the "singleton reconciler election" seed):
   acquired_at, renewed_at) and `LeaseRepo.acquire(name, owner, ttlMs)` —
   one atomic INSERT … ON CONFLICT that grants the named lease iff it is
   free, expired, or already ours (re-acquire = renew). `release(name,
-  owner)` gives it up early; `get(name)` reads it for diagnostics. All
+owner)` gives it up early; `get(name)` reads it for diagnostics. All
   arbitration happens in database time, like the M14 event claim — no
   cross-host clock arithmetic.
 - **The elected reconciler.** The poll tick becomes: acquire the
@@ -136,7 +136,7 @@ Out (seeded to M16+, with rationale):
 - `LeaseRepo` on `Repositories`: `acquire(name, owner, ttlMs)` → boolean,
   `release(name, owner)` (holder-guarded delete, idempotent), `get(name)`.
   Pg: one `INSERT … ON CONFLICT (name) DO UPDATE … WHERE holder = excluded
-  OR renewed_at < now() - ttl RETURNING`, granted iff a row returns;
+OR renewed_at < now() - ttl RETURNING`, granted iff a row returns;
   re-acquire preserves `acquired_at`. In-memory mirrors the semantics.
 - Tests: unit (in-memory) — free/expired/own grants, live foreign lease
   refuses, renew preserves tenure, release is holder-guarded and
@@ -146,7 +146,7 @@ Out (seeded to M16+, with rationale):
 ### B. orchestrator + sandbox-core: the elected reconciler + handover
 
 - `election.ts` (new, orchestrator): `startElectedTask({ leases, name,
-  instanceId, intervalMs, ttlMs?, run, onLog })` → stop fn. Per tick:
+instanceId, intervalMs, ttlMs?, run, onLog })` → stop fn. Per tick:
   acquire (renew) → run when held, skip when not; logs only on
   gained/lost transitions; run failures log and never kill the loop; stop
   clears the timer and releases when holding. Injectable timers.

@@ -11,6 +11,7 @@ Expansion VI (durable host env tables): **M11.**
 Expansion VII (resource-aware placement): **M12.**
 Expansion VIII (per-service identity on the internal API): **M13.**
 Expansion IX (multi-controller coordination): **M14.**
+Expansion X (singleton reconciler election): **M15.**
 
 ## M0 — Scaffolding (done)
 
@@ -526,23 +527,61 @@ Landed:
   reconciler still polls on every controller — duplicate GitHub reads,
   accepted at N≤handful.
 
-## M15+ — Expansion X
+## M15 — Expansion X: singleton reconciler election (done)
 
-NATS bus (still unnecessary: LISTEN/NOTIFY survives N orchestrators by
-construction — every instance hears every NOTIFY, the M14 claim decides who
-acts; `EventBus` remains the seam if volume ever demands it); singleton
-reconciler election (N pollers are correct but redundant — a lease like the
-M14 event claim would elect one); turn-level failover (a controller that
-dies mid-turn loses that turn; the conversation resumes on whichever
-instance gets the next message — checkpointing is a product decision);
-live-utilization scheduling (M12/M14 weigh grants, deliberately —
-usage-based placement needs a cgroup stats pipeline and an eviction story)
-and disk-weighted placement (host disk budgets interact with image/layer
-sharing in ways a sum of grants does not model); certificate
-rotation/revocation tooling (at three certs per deployment, re-minting IS
-the revocation story — until it isn't); Discord Forum-channel session
-dashboard (presentation upgrade over `/sessions`). UI surface remains chat
-only — no self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
+The two pieces of multi-controller friction the M14 closeout left standing:
+N reconcilers polling GitHub, and rolling deploys destroying the fleet's
+shared warm stock one controller at a time. Zero contract changes; one
+additive `leases` migration, one repo interface, one sandbox-core knob.
+Design of record: docs/m15-plan.md.
+
+Landed:
+
+- **Advisory leases** — a `leases` table (name → holder, acquired_at,
+  renewed_at) and `LeaseRepo.acquire(name, owner, ttlMs)`: one atomic
+  INSERT … ON CONFLICT grants the named role iff it is free, expired, or
+  already ours (re-acquire = renew, tenure preserved), arbitrated entirely
+  in database time like the M14 event claim. `release` is holder-guarded;
+  nothing ever authorizes by the holder name — the lease deduplicates work
+  that was already safe to duplicate, and the system stays correct (merely
+  less efficient) if two processes ever both believe they hold a role.
+- **The elected reconciler** — `startElectedTask` ticks on every
+  controller, but only the `pr-reconciler` lease holder polls: the holder
+  renews each tick, a crashed holder's lease expires after the TTL (2× the
+  poll interval — no second knob to mis-tune) and any sibling's next tick
+  takes over, and a clean stop releases the role so rolling deploys fail
+  over immediately. One instance id (`DEVSPACE_INSTANCE_ID`, else per-boot
+  random) now names the controller in bus-claim diagnostics AND the lease.
+  The M14 "N duplicate pollers" waste is closed; the publishes stay
+  idempotent, so a paused holder resuming past its TTL costs one redundant
+  poll, never a wrong transition.
+- **Warm-stock handover on clean shutdown** — `SANDBOX_WARM_KEEP_ON_STOP=1`
+  makes `stop()` leave still-unclaimed warm envs alive: they stay
+  pool-marked on their hosts, so siblings adopt them on their next sweep
+  (M14) and a restarting single controller re-adopts them at the next
+  boot's `fill()` (M10). Default unchanged (destroy) — the wrapper cannot
+  sense whether this shutdown is a rolling restart or a teardown, and
+  "leak N containers on Ctrl-C" is the wrong zero-config failure mode. The
+  stop-races-provision path honors the same choice.
+
+## M16+ — Expansion XI
+
+NATS bus (still unnecessary: LISTEN/NOTIFY + the M14 claim survives N
+orchestrators by construction; `EventBus` remains the seam if volume ever
+demands it); turn-level failover (a controller that dies mid-turn loses
+that turn; the conversation resumes on whichever instance gets the next
+message — checkpointing is a product decision); live-utilization
+scheduling (M12/M14 weigh grants, deliberately — usage-based placement
+needs a cgroup stats pipeline and an eviction story) and disk-weighted
+placement (host disk budgets interact with image/layer sharing in ways a
+sum of grants does not model); certificate rotation/revocation tooling (at
+three certs per deployment, re-minting IS the revocation story — until it
+isn't); Discord Forum-channel session dashboard (presentation upgrade over
+`/sessions`); generalizing the M15 election to other roles when a genuinely
+singleton periodic task appears (nothing else wants it today: warm-pool
+top-up converges on the global ledger, the bus sweep is arbitrated per row
+by the claim). UI surface remains chat only — no self-hosted web UI (see
+docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 

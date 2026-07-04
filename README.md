@@ -4,7 +4,7 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M12 (expansion VII).** The full vertical is live end to end — sandbox
+> **Status: M13 (expansion VIII).** The full vertical is live end to end — sandbox
 > engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
 > secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
 > (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
@@ -17,10 +17,15 @@ interface — a self-hostable "Claude Code on the web."
 > orchestrator crash and claims that hand out a clone refreshed at claim time
 > (M10), a durable host env table — with `SANDBOX_STATE_DIR` set, a sandbox
 > host's table survives a restart and is recovered against what the Docker
-> daemon still confirms (M11) — and M12 makes placement resource-aware: envs
+> daemon still confirms (M11) — placement that is resource-aware: envs
 > echo their granted cpu/memory, and `SANDBOX_HOSTS` budgets
 > (`cpu=<cores>`/`mem=<MB>`) turn fleet placement into fit-checked,
-> fractional least-loaded scheduling over what was promised.
+> fractional least-loaded scheduling over what was promised (M12) — and M13
+> puts per-service identity on the internal API: with the `DEVSPACE_TLS_*`
+> identity configured (replacing the shared token, never alongside it),
+> every internal hop — split API, sandbox surface, exec upgrade — runs over
+> mutual TLS on its own listener, certificates name their service, and each
+> surface allowlists exactly the peer it serves.
 > See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing

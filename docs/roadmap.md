@@ -9,6 +9,7 @@ Expansion IV (fleet capacity truth, warm pools): **M9.**
 Expansion V (pool identity, claim-time refresh): **M10.**
 Expansion VI (durable host env tables): **M11.**
 Expansion VII (resource-aware placement): **M12.**
+Expansion VIII (per-service identity on the internal API): **M13.**
 
 ## M0 — Scaffolding (done)
 
@@ -447,20 +448,57 @@ Landed:
   each env's weight, so census/probe adoption counts it and destroy/evict
   free it exactly when they free the slot.
 
-## M13+ — Expansion VIII
+## M13 — Expansion VIII: per-service identity on the internal API (done)
+
+The deployment-identity seed carried since M8 lands: mutual TLS replaces the
+shared `DEVSPACE_INTERNAL_TOKEN` on every internal hop — one secret proving
+"I am inside the deployment" becomes a per-service certificate proving WHO is
+calling. Zero new dependencies, zero contract changes. Design of record:
+docs/m13-plan.md.
+
+Landed:
+
+- **The internal TLS identity** — `DEVSPACE_TLS_CERT`/`KEY`/`CA` (PEM paths,
+  all-or-nothing) give a service its identity: subject CN = service name
+  (`orchestrator`, `chat-gateway`, `sandbox-core`), issued by a private
+  internal CA that is the sole trust root in both directions (system roots
+  never consulted). One auth regime per deployment: configuring the token
+  and the identity together is refused loudly at every boot.
+- **Both sides verify, per service** — every internal listener requires a
+  CA-signed client certificate at the handshake and allowlists the peer's
+  service name per surface (sandbox hosts serve the orchestrator; the split
+  API serves the gateway; /render serves the orchestrator — a compromised
+  gateway cert can no longer claim an env, the replay the token permitted).
+  Clients present their identity and verify the SERVER's service name in
+  place of hostname checks — addresses are deployment detail inside a
+  single-purpose CA. The exec upgrade refuses before the 101, unchanged;
+  the M8 frame pumps ride the TLSSocket with backpressure intact.
+- **The two-listener shape** — with TLS configured the internal surface
+  moves to `DEVSPACE_TLS_PORT` (default plain port + 1) and the plain port
+  keeps only what cannot present a client certificate: `/health` probes,
+  and on the orchestrator the GitHub webhook ingress (HMAC-verified since
+  M5). The exec/secrets token gates accept transport auth; the open
+  tokenless JSON ops surface does not exist on a TLS-mode host.
+- **Minted test PKI** — TLS suites run over real loopback handshakes with a
+  throwaway CA + certs minted per run by shelling to openssl (self-skip
+  without it); no private key is checked in, and the recipe doubles as the
+  minimum-viable-PKI documentation for operators.
+
+## M14+ — Expansion IX
 
 NATS bus (meaningful when the _orchestrator_ scales out — the sandbox fleet
 already did; LISTEN/NOTIFY survives that split; `EventBus` is the seam);
-per-service identity on the internal API (mTLS — deployment-layer,
-replacing the shared token; also the milestone where multi-controller
-coordination would land — M10's pool marks and M11's per-host state dir
-assume one control plane / one host process); live-utilization scheduling
-(M12 weighs grants, deliberately — usage-based placement needs a cgroup
-stats pipeline and an eviction story) and disk-weighted placement (host
-disk budgets interact with image/layer sharing in ways a sum of grants
-does not model); Discord Forum-channel session dashboard (presentation
-upgrade over `/sessions`). UI surface remains chat only — no self-hosted
-web UI (see docs/analysis/chat-platform-ui-parity.md).
+multi-controller coordination (M10's pool marks and M11's per-host state
+dir assume one control plane / one host process — a control-plane-semantics
+change, deliberately split from M13's transport identity); live-utilization
+scheduling (M12 weighs grants, deliberately — usage-based placement needs a
+cgroup stats pipeline and an eviction story) and disk-weighted placement
+(host disk budgets interact with image/layer sharing in ways a sum of
+grants does not model); certificate rotation/revocation tooling (at three
+certs per deployment, re-minting IS the revocation story — until it isn't);
+Discord Forum-channel session dashboard (presentation upgrade over
+`/sessions`). UI surface remains chat only — no self-hosted web UI (see
+docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 

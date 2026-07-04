@@ -79,6 +79,17 @@ reservations carry their footprint so bursts cannot oversubscribe — the
 scheduler weighs what it promised, deliberately, not what containers happen
 to use (docs/m12-plan.md).
 
+Since M13 every internal hop can authenticate by service identity instead of
+the shared bearer: with the `DEVSPACE_TLS_*` identity configured (never
+alongside the token — one auth regime per deployment), the split API, the
+sandbox surface, and the exec upgrade move to per-service mTLS listeners
+(`DEVSPACE_TLS_PORT`). Certificates carry the service name as their subject
+CN, issued by a private internal CA that is the sole trust root; servers
+allowlist the peer's name per surface and clients verify the server's
+service — not its hostname — so a compromised gateway certificate can no
+longer be replayed against a sandbox host. `/health` probes and the
+HMAC-verified GitHub webhooks stay on the plain port (docs/m13-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

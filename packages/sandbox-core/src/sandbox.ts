@@ -146,6 +146,9 @@ export class DevcontainerSandboxCore implements SandboxCore {
         ports: [],
         createdAt: new Date().toISOString(),
         ...(req.poolKey ? { poolKey: req.poolKey } : {}),
+        // The grant the provisioner will enforce (`--cpus`/`--memory`) —
+        // echoed so the placement layer can weigh this env (M12).
+        resources: req.resources,
       },
       secretEnv: envSecrets(req.secrets),
       repoUrl: req.repoUrl,
@@ -328,6 +331,7 @@ export class DevcontainerSandboxCore implements SandboxCore {
             ports: [],
             createdAt: state.createdAt,
             ...(state.poolKey ? { poolKey: state.poolKey } : {}),
+            ...(state.resources ? { resources: state.resources } : {}),
           },
           containerId: state.containerId,
           networkName: state.networkName,
@@ -492,6 +496,9 @@ function persistedState(record: EnvRecord): PersistedEnvState {
     ...(record.repoUrl ? { repoUrl: record.repoUrl } : {}),
     ...(record.ref ? { ref: record.ref } : {}),
     ...(record.env.poolKey ? { poolKey: record.env.poolKey } : {}),
+    // A recovered env must weigh what it actually holds (m12-plan Decision 8):
+    // the grant was applied to the container and survives the restart with it.
+    ...(record.env.resources ? { resources: record.env.resources } : {}),
   };
 }
 

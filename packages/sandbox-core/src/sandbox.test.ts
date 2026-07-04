@@ -210,6 +210,16 @@ describe('DevcontainerSandboxCore lifecycle', () => {
     expect((await core.getEnvironment(env.envId))?.status).toBe('ready');
   });
 
+  it('echoes the resource grant — request values, or schema defaults when omitted (M12)', async () => {
+    const { core } = makeCore();
+    const defaulted = await core.createEnvironment({});
+    expect(defaulted.resources).toEqual({ cpu: 2, memMB: 4096, diskMB: 20480 });
+    const sized = await core.createEnvironment({
+      resources: { cpu: 8, memMB: 16384, diskMB: 20480 },
+    });
+    expect(sized.resources).toEqual({ cpu: 8, memMB: 16384, diskMB: 20480 });
+  });
+
   it('marks the env failed and throws PROVISION_FAILED when provisioning fails', async () => {
     const { core, provisioner } = makeCore();
     (provisioner.provision as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
@@ -373,6 +383,8 @@ describe('claimEnvironment (M10 pool identity + claim-time refresh)', () => {
     expect(claimed.poolKey).toBeUndefined();
     expect(claimed.status).toBe('ready');
     expect((await core.getEnvironment(env.envId))?.poolKey).toBeUndefined();
+    // A hand-out does not change the env's size (M12).
+    expect(claimed.resources).toEqual({ cpu: 2, memMB: 4096, diskMB: 20480 });
   });
 
   it('fetches HEAD for a default-branch pool (no ref)', async () => {
@@ -572,6 +584,7 @@ describe('durable env table (M11)', () => {
       ref: 'main',
       poolKey: 'pool-key-1',
       createdAt: env.createdAt,
+      resources: { cpu: 2, memMB: 4096, diskMB: 20480 },
     });
     expect(JSON.stringify(persisted)).not.toContain('secret-abc');
   });
@@ -718,6 +731,35 @@ describe('durable env table (M11)', () => {
     expect(destroy).toHaveBeenCalledWith('cont-zombie');
     expect(removeNetwork).toHaveBeenCalledWith('devspace-net-crashed');
     expect(store.states.size).toBe(0);
+  });
+
+  it('recover() restores the resource grant so a recovered env keeps its true weight', async () => {
+    const store = new FakeEnvStateStore();
+    const first = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const env = await first.core.createEnvironment({
+      resources: { cpu: 8, memMB: 16384, diskMB: 20480 },
+    });
+
+    const second = makeCore(new FakeContainer(), {}, { stateStore: store });
+    await second.core.recover();
+    expect((await second.core.getEnvironment(env.envId))?.resources).toEqual({
+      cpu: 8,
+      memMB: 16384,
+      diskMB: 20480,
+    });
+  });
+
+  it('recover() loads a pre-M12 state file (no resources) and the env comes back echo-less', async () => {
+    const store = new FakeEnvStateStore();
+    store.states.set('env_old', {
+      envId: 'env_old',
+      status: 'ready',
+      containerId: 'cont-old',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    const { core } = makeCore(new FakeContainer(), {}, { stateStore: store });
+    expect((await core.recover()).recovered).toEqual(['env_old']);
+    expect((await core.getEnvironment('env_old'))?.resources).toBeUndefined();
   });
 
   it('recover() is a no-op without a store and never double-adopts a live env', async () => {

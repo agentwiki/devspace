@@ -14,7 +14,7 @@ import { mkdirSync } from 'node:fs';
 import { readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { EnvStatusSchema } from '@devspace/contracts';
+import { EnvStatusSchema, ResourceLimitsSchema } from '@devspace/contracts';
 
 /**
  * The slice of an env record the host must not forget across a restart.
@@ -31,6 +31,12 @@ export const PersistedEnvStateSchema = z.object({
   ref: z.string().optional(),
   poolKey: z.string().optional(),
   createdAt: z.string().datetime(),
+  /**
+   * The resource grant the env holds (M12) — a size, not a secret; optional
+   * so pre-M12 state files load unchanged (their envs recover echo-less and
+   * upstream weighs the contract defaults).
+   */
+  resources: ResourceLimitsSchema.optional(),
 });
 export type PersistedEnvState = z.infer<typeof PersistedEnvStateSchema>;
 

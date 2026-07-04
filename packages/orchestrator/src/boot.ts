@@ -48,6 +48,7 @@ import {
 import { DefaultAgentRunner, agentRuntimeMount } from '@devspace/agent-runner';
 import { Orchestrator } from './index.js';
 import { startElectedTask } from './election.js';
+import type { ReapPolicy } from './reaper.js';
 import { parseKeyring, SecretStore } from './secrets.js';
 import { createGitHubRestClient, type HostGitExec } from './git.js';
 
@@ -148,6 +149,8 @@ export interface BootedOrchestrator {
   secrets: SecretStore;
   /** Start the PR poll reconciler (the webhook stand-in); returns its stop fn. */
   startReconciler(intervalMs: number): () => void;
+  /** Start the elected lifecycle reaper (M17); returns its stop fn. */
+  startReaper(policy: ReapPolicy): () => void;
   /** Stop what boot started (the bus). The caller closes its own pool. */
   close(): Promise<void>;
 }
@@ -325,6 +328,25 @@ export async function bootOrchestrator(
             await bus.publish({ topic: e.topic, workUnitId: e.workUnitId, payload: {} });
           }),
         onLog: (line) => console.log(`[reconcile] ${line}`),
+      });
+    },
+    startReaper(policy: ReapPolicy): () => void {
+      // The second elected role (M17, the M15 seed): every controller ticks,
+      // only the `lifecycle-reaper` lease holder sweeps. teardown is
+      // idempotent and transitions row-locked, so a paused holder resuming
+      // past its TTL costs a redundant no-op sweep, never a double destroy.
+      return startElectedTask({
+        leases: repos.leases,
+        name: 'lifecycle-reaper',
+        instanceId,
+        intervalMs: policy.intervalMs,
+        run: async () => {
+          const { reaped, failed } = await orch.reapExpired(policy);
+          if (reaped || failed) {
+            console.log(`[reap] reclaimed ${reaped} work unit(s), ${failed} failure(s)`);
+          }
+        },
+        onLog: (line) => console.log(`[reap] ${line}`),
       });
     },
     async close() {

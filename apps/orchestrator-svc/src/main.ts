@@ -30,8 +30,10 @@ import {
   handleInternalApi,
   httpRenderTransport,
   processWebhookDelivery,
+  reapPolicyFromEnv,
   type InternalServerAuth,
   type Orchestrator,
+  type ReapPolicy,
 } from '@devspace/orchestrator';
 
 const SERVICE = 'orchestrator';
@@ -43,6 +45,8 @@ interface Config {
   retiredKeys: string[];
   githubApiBase: string;
   reconcileIntervalMs: number;
+  /** Lifecycle reclamation (M17); the reaper is off when unset. */
+  reapPolicy?: ReapPolicy;
   /** Webhook ingress is disabled (with a boot log) when unset. */
   webhookSecret?: string;
   /** Shared bearer token; mutually exclusive with internalTls (M13). */
@@ -92,6 +96,7 @@ function loadConfig(): Config {
     reconcileIntervalMs: Number(
       process.env.RECONCILE_INTERVAL_MS ?? (webhookSecret ? 300_000 : 30_000),
     ),
+    reapPolicy: reapPolicyFromEnv(process.env),
     webhookSecret,
     internalToken,
     internalTls,
@@ -133,6 +138,9 @@ export async function start(config: Config = loadConfig()): Promise<BootedServic
   // Poll reconciler — since M5 the drift backstop behind webhook ingress.
   const stopReconciler = booted.startReconciler(config.reconcileIntervalMs);
 
+  // Elected lifecycle reaper (M17) — off unless a TTL knob is configured.
+  const stopReaper = config.reapPolicy ? booted.startReaper(config.reapPolicy) : undefined;
+
   const server = createServer((req, res) => {
     void route(req, res, config, booted.orch, booted.repos, booted.bus);
   });
@@ -172,12 +180,20 @@ export async function start(config: Config = loadConfig()): Promise<BootedServic
       `[${SERVICE}] DEVSPACE_INTERNAL_TOKEN and DEVSPACE_TLS_* unset — internal split API disabled`,
     );
   }
+  console.log(
+    config.reapPolicy
+      ? `[${SERVICE}] lifecycle reaper on (idleTtlMs=${config.reapPolicy.idleTtlMs ?? 'off'}, ` +
+          `terminalGraceMs=${config.reapPolicy.terminalGraceMs ?? 'off'}, ` +
+          `intervalMs=${config.reapPolicy.intervalMs})`
+      : `[${SERVICE}] DEVSPACE_IDLE_TTL_MS / DEVSPACE_TERMINAL_GRACE_MS unset — lifecycle reaper off`,
+  );
 
   return {
     server,
     bus: booted.bus,
     pool,
     async close() {
+      stopReaper?.();
       stopReconciler();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       if (tlsServer) await new Promise<void>((resolve) => tlsServer!.close(() => resolve()));

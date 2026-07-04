@@ -34,6 +34,7 @@ import type { SandboxCore } from '@devspace/sandbox-core';
 import type { AgentRunner } from '@devspace/agent-runner';
 import { agentRuntimeMount } from '@devspace/agent-runner';
 import { classifyAction, WorkUnitMachine } from './stateMachine.js';
+import { IDLE_REAP_STATES, TERMINAL_REAP_STATES, type ReapPolicy } from './reaper.js';
 import { SecretRegistry } from './secrets.js';
 import type { SecretStore } from './secrets.js';
 import { GitWrapper, prStateToEvent, type GitHubRestClient, type HostGitExec } from './git.js';
@@ -47,6 +48,7 @@ export * from './render.js';
 export * from './webhooks.js';
 export * from './internal-http.js';
 export * from './election.js';
+export * from './reaper.js';
 // boot.js imports Orchestrator from this module; the cycle is benign (the
 // class is only referenced inside bootOrchestrator's body, after module init).
 export * from './boot.js';
@@ -729,8 +731,13 @@ export class Orchestrator {
   /**
    * Tear a work unit down: destroy the env, revoke + delete secrets, and apply
    * `end` → TORN_DOWN. Idempotent — a replayed teardown is a safe no-op.
+   * `reason` lands in the audit detail (M17): `requested` for a user/operator
+   * end, `idle` / `expired` for the lifecycle reaper's two policies.
    */
-  async teardown(conversationId: string): Promise<void> {
+  async teardown(
+    conversationId: string,
+    reason: 'requested' | 'idle' | 'expired' = 'requested',
+  ): Promise<void> {
     const wu = await this.deps.repos.workUnits.getByConversation(conversationId);
     if (!wu || wu.state === 'TORN_DOWN') return;
     const conv = await this.deps.repos.conversations.get(conversationId);
@@ -770,9 +777,74 @@ export class Orchestrator {
       userId: conv?.userId,
       conversationId,
       workUnitId: wu.id,
-      detail: { envId: wu.envId ?? null },
+      detail: { envId: wu.envId ?? null, reason },
     });
     await this.advance(wu, 'end', 'TORN_DOWN');
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Lifecycle reclamation (M17) — the elected reaper's sweep                 */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * One reclamation sweep (m17-plan Decisions 3–6): pre-PR units whose tenant
+   * has been silent past `idleTtlMs` are torn down with a status notice in
+   * their thread; terminal units unchanged past `terminalGraceMs` are torn
+   * down silently (the thread already ended with its PR status — the audit
+   * row is the record). PR_OPEN is exempt: GitHub owns that lifecycle.
+   * Idleness reads max(lastActivityAt, updatedAt), so a fresh transition
+   * counts as life and pre-M17 rows degrade to updatedAt. Per-unit failures
+   * are counted and never stop the sweep; teardown's idempotency makes a
+   * double-run (an elected sibling resuming past its lease TTL) harmless.
+   */
+  async reapExpired(
+    policy: Pick<ReapPolicy, 'idleTtlMs' | 'terminalGraceMs'>,
+    nowMs: number = Date.now(),
+  ): Promise<{ reaped: number; failed: number }> {
+    let reaped = 0;
+    let failed = 0;
+
+    const sweep = async (
+      states: readonly WorkUnit['state'][],
+      expiryMs: number,
+      reason: 'idle' | 'expired',
+    ): Promise<void> => {
+      for (const state of states) {
+        for (const wu of await this.workUnits.listByState(state)) {
+          const lastAlive = Math.max(
+            Date.parse(wu.updatedAt),
+            wu.lastActivityAt ? Date.parse(wu.lastActivityAt) : 0,
+          );
+          if (nowMs - lastAlive < expiryMs) continue;
+          try {
+            if (reason === 'idle') {
+              // Announce BEFORE the env dies — through the render path that
+              // never throws, so a dead gateway cannot block reclamation.
+              await this.emit(
+                statusCommand(
+                  wu.conversationId,
+                  'TORN_DOWN',
+                  'Session reclaimed after inactivity — start a new conversation to continue.',
+                  this.registryFor(wu.conversationId),
+                ),
+              );
+            }
+            await this.teardown(wu.conversationId, reason);
+            reaped += 1;
+          } catch {
+            failed += 1; // one bad unit never stops the sweep
+          }
+        }
+      }
+    };
+
+    if (policy.idleTtlMs !== undefined) {
+      await sweep(IDLE_REAP_STATES, policy.idleTtlMs, 'idle');
+    }
+    if (policy.terminalGraceMs !== undefined) {
+      await sweep(TERMINAL_REAP_STATES, policy.terminalGraceMs, 'expired');
+    }
+    return { reaped, failed };
   }
 
   /* ---------------------------------------------------------------------- */

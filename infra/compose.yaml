@@ -76,6 +76,12 @@ services:
       # diagnostics and the reconciler lease when several orchestrators share
       # one database. Unset: a per-boot id.
       DEVSPACE_INSTANCE_ID: ${DEVSPACE_INSTANCE_ID:-}
+      # Lifecycle reclamation (M17): tear down pre-PR sessions idle past the
+      # TTL (PR_OPEN exempt) and terminal units unchanged past the grace.
+      # Runs on the lifecycle-reaper lease holder only. Both unset: no reaper.
+      DEVSPACE_IDLE_TTL_MS: ${DEVSPACE_IDLE_TTL_MS:-}
+      DEVSPACE_TERMINAL_GRACE_MS: ${DEVSPACE_TERMINAL_GRACE_MS:-}
+      DEVSPACE_REAP_INTERVAL_MS: ${DEVSPACE_REAP_INTERVAL_MS:-}
     ports:
       - '4000:4000'
 

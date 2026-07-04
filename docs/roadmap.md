@@ -8,6 +8,7 @@ Expansion III (exec over the wire, multi-host placement): **M8.**
 Expansion IV (fleet capacity truth, warm pools): **M9.**
 Expansion V (pool identity, claim-time refresh): **M10.**
 Expansion VI (durable host env tables): **M11.**
+Expansion VII (resource-aware placement): **M12.**
 
 ## M0 — Scaffolding (done)
 
@@ -416,19 +417,50 @@ Landed:
   instead of re-provisioned, containers that died with the host are
   discarded and replaced, and unmarked tenant envs are never touched.
 
-## M12+ — Expansion VII
+## M12 — Expansion VII: resource-aware placement (done)
+
+The placement seed carried since M8 lands: hosts get resource accounting,
+and fleet placement weighs it. Everything stays behind the `SandboxCore`
+seam; one optional contract field and two host-config knobs are the entire
+surface change. Design of record: docs/m12-plan.md.
+
+Landed:
+
+- **Resource truth** — every `Environment` echoes the `ResourceLimits` its
+  host applied at provisioning (the request's grant, schema defaults
+  included — exactly what `--cpus`/`--memory` enforce). The echo is
+  additive on the contract (answers from pre-M12 hosts still parse; an
+  echo-less env weighs the contract defaults, which is what its
+  provisioner actually applied), survives claim, and joins the M11
+  persisted slice so a recovered env keeps its true weight.
+- **Weighted placement** — `SANDBOX_HOSTS` entries take optional
+  `cpu=<cores>` / `mem=<MB>` budgets. Admission fit-checks each dimension
+  (an env-count slot — the M8/M9 backstop, unchanged — plus room for the
+  request's grant in every declared budget); ranking is least
+  max-fractional utilization over declared dimensions, ties in config
+  order; the refusals distinguish full / unfit / draining. Scheduling is
+  on GRANTS, deliberately: stable, known at placement time, and the budget
+  itself is the oversubscription dial.
+- **Reservations weigh their footprint** — the M8 in-flight pending count
+  carries {count, cpu, memMB}, so a concurrent burst can no more
+  oversubscribe a budget than overshoot a capacity; the route table owns
+  each env's weight, so census/probe adoption counts it and destroy/evict
+  free it exactly when they free the slot.
+
+## M13+ — Expansion VIII
 
 NATS bus (meaningful when the _orchestrator_ scales out — the sandbox fleet
 already did; LISTEN/NOTIFY survives that split; `EventBus` is the seam);
 per-service identity on the internal API (mTLS — deployment-layer,
 replacing the shared token; also the milestone where multi-controller
 coordination would land — M10's pool marks and M11's per-host state dir
-assume one control plane / one host process); resource-aware placement
-(capacity still counts envs, deliberately — cpu/mem-aware scheduling needs
-host-side resource accounting; M9 made the count TRUE, M12+ makes it
-weighted); Discord Forum-channel session dashboard (presentation upgrade
-over `/sessions`). UI surface remains chat only — no self-hosted web UI
-(see docs/analysis/chat-platform-ui-parity.md).
+assume one control plane / one host process); live-utilization scheduling
+(M12 weighs grants, deliberately — usage-based placement needs a cgroup
+stats pipeline and an eviction story) and disk-weighted placement (host
+disk budgets interact with image/layer sharing in ways a sum of grants
+does not model); Discord Forum-channel session dashboard (presentation
+upgrade over `/sessions`). UI surface remains chat only — no self-hosted
+web UI (see docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 

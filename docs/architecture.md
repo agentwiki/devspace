@@ -69,6 +69,16 @@ instead of re-homing them. Because the M9 census and M10 orphan sweep read
 warm stock is re-adopted, and a recovered env gets its secrets re-attached
 through `applySecrets` (docs/m11-plan.md).
 
+Since M12 placement is resource-aware: every env echoes the `ResourceLimits`
+its host granted at provisioning (persisted with the M11 table, so a
+recovered env keeps its true weight), and a host can declare cpu/memory
+budgets on its `SANDBOX_HOSTS` entry. Admission fit-checks the request's
+grant against every declared budget (the env-count capacity stays the
+backstop), ranking is least max-fractional utilization, and in-flight
+reservations carry their footprint so bursts cannot oversubscribe — the
+scheduler weighs what it promised, deliberately, not what containers happen
+to use (docs/m12-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

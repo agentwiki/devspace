@@ -12,6 +12,7 @@
  */
 import { execFile } from 'node:child_process';
 import type { RenderCommand } from '@devspace/contracts';
+import { CreateEnvironmentRequestSchema } from '@devspace/contracts';
 import {
   createPgEventBus,
   createPostgresRepositories,
@@ -24,17 +25,20 @@ import {
   MultiHostSandboxCore,
   PreviewProxy,
   RemoteSandboxCore,
+  WarmPoolSandboxCore,
   assertRuntimeAvailable,
   hardeningFromEnv,
   nodeCommandRunner,
   previewProxyFromEnv,
   sandboxHostsFromEnv,
+  warmPoolsFromEnv,
   type PreviewProxyOptions,
   type SandboxCore,
   type SandboxHardening,
   type SandboxHostConfig,
+  type WarmPoolConfig,
 } from '@devspace/sandbox-core';
-import { DefaultAgentRunner } from '@devspace/agent-runner';
+import { DefaultAgentRunner, agentRuntimeMount } from '@devspace/agent-runner';
 import { Orchestrator } from './index.js';
 import { parseKeyring, SecretStore } from './secrets.js';
 import { createGitHubRestClient, type HostGitExec } from './git.js';
@@ -98,6 +102,14 @@ export interface OrchestratorBootConfig {
   sandboxHosts?: SandboxHostConfig[];
   /** Bearer for the sandbox hosts (defaults to DEVSPACE_INTERNAL_TOKEN). */
   internalToken?: string;
+  /**
+   * Warm pools (M9, m9-plan Decision 8). Defaults to
+   * `warmPoolsFromEnv(process.env)` (SANDBOX_WARM_POOLS=repoUrl[#ref]=size,…).
+   * When set, the sandbox — local or fleet — is wrapped in a
+   * WarmPoolSandboxCore whose templates carry the SAME agent-runtime mount
+   * the orchestrator provisions with, so a matching create claims a warm env.
+   */
+  warmPools?: WarmPoolConfig[];
 }
 
 export interface BootedOrchestrator {
@@ -172,6 +184,27 @@ export async function bootOrchestrator(
     }
     sandbox = new DevcontainerSandboxCore({ hardening, preview });
   }
+  // Warm pools (M9) compose OVER whatever sandbox this boot built. Templates
+  // are built with the same mounts the orchestrator provisions with — claim
+  // matching is exact, so any drift only ever means a cold create.
+  const warmPools = config.warmPools ?? warmPoolsFromEnv(process.env);
+  let warm: WarmPoolSandboxCore | undefined;
+  if (warmPools?.length) {
+    warm = new WarmPoolSandboxCore(
+      sandbox,
+      warmPools.map((p) => ({
+        size: p.size,
+        template: CreateEnvironmentRequestSchema.parse({
+          repoUrl: p.repoUrl,
+          ref: p.ref,
+          mounts: [agentRuntimeMount()],
+        }),
+      })),
+      { onLog: (line) => console.log(`[orchestrator] warm-pool: ${line}`) },
+    );
+    sandbox = warm;
+    void warm.fill(); // background; never rejects — failures log and retry
+  }
   const agents = new DefaultAgentRunner({
     exec: sandbox,
     // llmKeyRef is a secret record id resolved through the envelope store.
@@ -213,6 +246,9 @@ export async function bootOrchestrator(
       return () => clearInterval(timer);
     },
     async close() {
+      // Unclaimed warm envs die with the control plane (clean-shutdown path;
+      // a crash leaks them until ops reclaims — see m9-plan risks).
+      await warm?.stop();
       await bus.stop();
       await preview?.stop();
     },

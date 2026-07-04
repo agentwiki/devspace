@@ -48,6 +48,11 @@ services:
       # devspace-exec wire (requires DEVSPACE_INTERNAL_TOKEN). Unset: the
       # zero-config in-process sandbox (M4) is unchanged.
       SANDBOX_HOSTS: ${SANDBOX_HOSTS:-}
+      # Warm pools (M9): comma-separated repoUrl[#ref]=size entries, e.g.
+      # SANDBOX_WARM_POOLS=https://github.com/acme/widgets.git#main=2 — the
+      # orchestrator pre-provisions matching envs and a session on that repo
+      # claims one in milliseconds. Unset: every create is a cold provision.
+      SANDBOX_WARM_POOLS: ${SANDBOX_WARM_POOLS:-}
     ports:
       - '4000:4000'
 
@@ -64,6 +69,9 @@ services:
       # it below; PREVIEW_BASE_URL is what users reach (TLS in front).
       PREVIEW_PROXY_PORT: ${PREVIEW_PROXY_PORT:-}
       PREVIEW_BASE_URL: ${PREVIEW_BASE_URL:-}
+      # Host-side capacity backstop (M9): cap live envs at this host no
+      # matter what the placement layer believes. Unset: uncapped (pre-M9).
+      SANDBOX_MAX_ENVS: ${SANDBOX_MAX_ENVS:-}
     ports:
       - '4001:4001'
 

@@ -13,6 +13,7 @@ Expansion VIII (per-service identity on the internal API): **M13.**
 Expansion IX (multi-controller coordination): **M14.**
 Expansion X (singleton reconciler election): **M15.**
 Expansion XI (live utilization truth + usage-aware ranking): **M16.**
+Expansion XII (work-unit lifecycle reclamation): **M17.**
 
 ## M0 — Scaffolding (done)
 
@@ -600,7 +601,46 @@ Landed:
   moment idle envs wake, and then something must be evicted — the half of
   the seed that stays unpaid (M17+).
 
-## M17+ — Expansion XII
+## M17 — Expansion XII: work-unit lifecycle reclamation (done)
+
+`Orchestrator.teardown()` — implemented and hardened since M3, called by
+nothing in production — gets its caller: work units track tenant activity,
+and an elected reaper tears down what is idle past a TTL and what is
+terminal past a grace period. The "generalize the M15 election when a
+genuinely singleton periodic task appears" seed cashes in. Off by default;
+zero new mechanisms. Design of record: docs/m17-plan.md.
+
+Landed:
+
+- **Activity truth** — `lastActivityAt` on work units (additive column +
+  optional contract field), written only by the new `WorkUnitRepo.touch`
+  (`updatedAt` stays owned by `transition`), stamped by the three
+  tenant-driven chat events (`message.posted`, `action.invoked`,
+  `secret.submitted`) best-effort — bookkeeping never fails the event it
+  rode in on. The idle clock reads `max(lastActivityAt, updatedAt)`, so a
+  fresh transition counts as life and pre-M17 rows (null column) degrade
+  to the old `updatedAt` semantics.
+- **The elected lifecycle reaper** — `reapExpired` sweeps by state: pre-PR
+  units (CREATED…PRE_PR) silent past `DEVSPACE_IDLE_TTL_MS` are torn down
+  with a status notice posted BEFORE the env dies (through the render path
+  that never throws); terminal units (PR_MERGED/PR_CLOSED/FAILED)
+  unchanged past `DEVSPACE_TERMINAL_GRACE_MS` are collected silently — the
+  thread already ended with its PR status, and the audit row (now carrying
+  `reason: requested|idle|expired`) is the record. PR_OPEN is deliberately
+  exempt: GitHub owns that lifecycle — teardown would delete the token the
+  poll reconciler needs and skip the unit past its own merge. Per-unit
+  failures count and never stop the sweep; conversation, work-unit, and
+  audit rows all survive reclamation (`view-pr` still answers).
+- **The second elected role** — `startReaper` runs the sweep under a
+  `lifecycle-reaper` lease via the same `startElectedTask` loop as the
+  reconciler: every controller ticks, one sweeps, crash failover within 2×
+  the interval, immediate handover on clean shutdown. Advisory as ever —
+  teardown is idempotent and transitions row-locked, so a paused holder
+  resuming past its TTL costs a redundant no-op sweep, never a double
+  destroy. Wired in orchestrator-svc and the in-process demo; both TTL
+  knobs unset = no reaper, byte-for-byte pre-M17.
+
+## M18+ — Expansion XIII
 
 NATS bus (still unnecessary: LISTEN/NOTIFY + the M14 claim survives N
 orchestrators by construction; `EventBus` remains the seam if volume ever
@@ -611,15 +651,14 @@ eviction (the unpaid half of M16: scheduling on measured usage needs an
 eviction story — ranking got the win without the cost) and disk-weighted
 placement (host disk budgets interact with image/layer sharing in ways
 neither grants nor `docker stats` — which reports no disk at all — model);
+PR_OPEN env reclamation (a PR under review deliberately keeps its env and
+secrets — M17 Decision 4; reclaiming just the env needs a partial-destroy
+path and a re-provision story if it earns its own milestone) and idle
+warnings before reclamation (chat UX over the same activity truth);
 certificate rotation/revocation tooling (at three certs per deployment,
 re-minting IS the revocation story — until it isn't); Discord
-Forum-channel session dashboard (presentation upgrade over `/sessions`);
-generalizing the M15 election to other roles when a genuinely singleton
-periodic task appears (nothing else wants it today: warm-pool top-up
-converges on the global ledger, the bus sweep is arbitrated per row by the
-claim — and the M16 sampler deliberately runs on EVERY controller: each
-one's ranking needs the cache, and N cheap reads beat electing a
-publisher). UI surface remains chat only — no self-hosted web UI (see
+Forum-channel session dashboard (presentation upgrade over `/sessions`).
+UI surface remains chat only — no self-hosted web UI (see
 docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)

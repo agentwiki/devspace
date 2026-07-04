@@ -42,9 +42,11 @@ import {
   handleRenderRequest,
   httpChatEventEmitter,
   httpOrchestratorReads,
+  reapPolicyFromEnv,
   type BootedOrchestrator,
   type InternalClientAuth,
   type InternalServerAuth,
+  type ReapPolicy,
 } from '@devspace/orchestrator';
 
 const SERVICE = 'chat-gateway';
@@ -68,6 +70,8 @@ interface Config {
   retiredKeys: string[];
   githubApiBase: string;
   reconcileIntervalMs: number;
+  /** Lifecycle reclamation (M17); the reaper is off when unset. Demo mode only. */
+  reapPolicy?: ReapPolicy;
 }
 
 function loadConfig(): Config {
@@ -115,6 +119,7 @@ function loadConfig(): Config {
       .filter(Boolean),
     githubApiBase: process.env.GITHUB_API_BASE ?? 'https://api.github.com',
     reconcileIntervalMs: Number(process.env.RECONCILE_INTERVAL_MS ?? 30_000),
+    reapPolicy: orchestratorUrl ? undefined : reapPolicyFromEnv(process.env),
   };
 }
 
@@ -292,6 +297,8 @@ async function startDemo(config: Config): Promise<BootedGateway> {
   });
   holder.booted = booted;
   const stopReconciler = booted.startReconciler(config.reconcileIntervalMs);
+  // Elected lifecycle reaper (M17) — the demo boots the same control plane.
+  const stopReaper = config.reapPolicy ? booted.startReaper(config.reapPolicy) : undefined;
 
   // The platform transport connects only now — after migrations and assembly.
   await adapter.start((event) => booted.orch.handleChatEvent(event));
@@ -314,6 +321,7 @@ async function startDemo(config: Config): Promise<BootedGateway> {
     booted,
     pool,
     async close() {
+      stopReaper?.();
       stopReconciler();
       await adapter.stop(); // drains pending stream buffers
       await new Promise<void>((resolve) => server.close(() => resolve()));

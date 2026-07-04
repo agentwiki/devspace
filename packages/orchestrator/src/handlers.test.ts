@@ -234,6 +234,60 @@ async function seed(
   return { conv, wu };
 }
 
+describe('activity truth (M17)', () => {
+  it('tenant-driven chat events stamp lastActivityAt on the work unit', async () => {
+    let tick = 0;
+    const repos = createInMemoryRepositories(() => new Date(tick).toISOString());
+    const h = harness({ repos });
+    const { conv, wu } = await seed(repos, h.store, 'WORKING');
+    expect((await repos.workUnits.get(wu.id))?.lastActivityAt).toBeUndefined();
+
+    tick = 10_000;
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'do the thing',
+    });
+    expect((await repos.workUnits.get(wu.id))?.lastActivityAt).toBe(new Date(10_000).toISOString());
+
+    tick = 20_000;
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'view-pr',
+    });
+    expect((await repos.workUnits.get(wu.id))?.lastActivityAt).toBe(new Date(20_000).toISOString());
+
+    tick = 30_000;
+    await h.orch.handleChatEvent({
+      type: 'secret.submitted',
+      conversationId: conv.id,
+      userId: 'u1',
+      name: 'LLM_KEY',
+      value: 'sk-rotated',
+    });
+    expect((await repos.workUnits.get(wu.id))?.lastActivityAt).toBe(new Date(30_000).toISOString());
+  });
+
+  it('a failed touch never fails the event it rode in on', async () => {
+    const repos = createInMemoryRepositories();
+    const h = harness({ repos });
+    const { conv } = await seed(repos, h.store, 'WORKING');
+    vi.spyOn(repos.workUnits, 'touch').mockRejectedValue(new Error('db hiccup'));
+    await expect(
+      h.orch.handleChatEvent({
+        type: 'message.posted',
+        conversationId: conv.id,
+        userId: 'u1',
+        text: 'still works',
+      }),
+    ).resolves.toBeUndefined();
+    expect(h.rendered.length).toBeGreaterThan(0);
+  });
+});
+
 describe('message.posted', () => {
   it('starts a session on the first message and streams agent events', async () => {
     const h = harness();

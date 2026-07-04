@@ -30,7 +30,7 @@ UI 표면 결정은 [`chat-platform-ui-parity.md`](./chat-platform-ui-parity.md)
 | diff 뷰 + 라인 코멘트                                     | ❌ GitHub PR 위임                 |
 | 세션 공유/아카이브/삭제                                   | ❌                                |
 | 대화 트랜스크립트 영속/복원                               | ❌ message 테이블 없음            |
-| 유휴 회수(GC)                                             | ❌                                |
+| 유휴 회수(GC)                                             | ✅ M17 elected reaper             |
 | 웹↔CLI 핸드오프 (--remote/teleport)                       | ❌                                |
 | 루틴/트리거 (schedule/API/GitHub event)                   | ❌                                |
 

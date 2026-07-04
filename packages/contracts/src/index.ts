@@ -459,6 +459,9 @@ export const WorkUnitSchema = z.object({
   prUrl: z.string().url().optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
+  /** When the tenant last drove this session (chat event), if ever (M17).
+   * Absent on pre-M17 rows; idleness falls back to `updatedAt`. */
+  lastActivityAt: z.string().datetime().optional(),
 });
 export type WorkUnit = z.infer<typeof WorkUnitSchema>;
 

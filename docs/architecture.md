@@ -124,6 +124,19 @@ demoted, a stale or missing sample degrades to the pure M12 grant score, and
 admission never consults the live signal, so budgets still bound the worst
 case and no eviction story is needed (docs/m16-plan.md).
 
+Since M17 sessions have an end the platform enforces: work units carry
+`lastActivityAt` (written only by the tenant-driven chat events — FSM
+transitions keep owning `updatedAt`), and an elected reaper — the second
+`startElectedTask` role, under the `lifecycle-reaper` lease — gives the
+long-uncalled `teardown()` its production caller: pre-PR units idle past
+`DEVSPACE_IDLE_TTL_MS` are torn down with a notice in their thread, terminal
+units unchanged past `DEVSPACE_TERMINAL_GRACE_MS` are collected silently,
+and PR_OPEN is exempt (GitHub owns that lifecycle; the webhook/poll advances
+it to a terminal state the grace then collects). The audit `teardown` row
+carries the reason (`requested|idle|expired`); conversation, work-unit, and
+audit rows survive reclamation. Both knobs unset = no reaper
+(docs/m17-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

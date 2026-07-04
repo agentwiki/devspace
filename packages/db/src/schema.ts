@@ -37,6 +37,10 @@ export const workUnits = pgTable(
     prUrl: text('pr_url'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+    // Last tenant-driven chat event (M17). Nullable: pre-M17 rows never
+    // touched; the idle clock falls back to updatedAt. Written only by
+    // WorkUnitRepo.touch — transitions keep owning updatedAt.
+    lastActivityAt: timestamp('last_activity_at', { withTimezone: true }),
   },
   (t) => [
     index('work_units_conversation_idx').on(t.conversationId),

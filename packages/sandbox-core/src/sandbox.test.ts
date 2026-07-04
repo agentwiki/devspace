@@ -254,6 +254,51 @@ describe('DevcontainerSandboxCore lifecycle', () => {
   });
 });
 
+describe('applySecrets (M9 late-bound secrets)', () => {
+  it('merges env-target secrets into the per-exec injection map', async () => {
+    const { core, container } = makeCore();
+    const env = await core.createEnvironment({});
+    await core.applySecrets(env.envId, [{ name: 'GH_TOKEN', value: 'late-abc', target: 'env' }]);
+    const stream = await core.exec(env.envId, { cmd: ['cat', '--', '/x'], tty: false });
+    for await (const _ of stream.frames) void _;
+    expect(container.lastEnv).toMatchObject({ GH_TOKEN: 'late-abc' });
+  });
+
+  it('writes file-target secrets 0600', async () => {
+    const { core, container } = makeCore();
+    const env = await core.createEnvironment({});
+    await core.applySecrets(env.envId, [
+      { name: 'npmrc', value: 'tok=xyz', target: 'file', path: '/root/.npmrc' },
+    ]);
+    expect(container.files.get('/root/.npmrc')?.toString()).toBe('tok=xyz');
+    expect(container.modes.get('/root/.npmrc')).toBe(0o600);
+  });
+
+  it('rejects a pathless file secret before applying ANYTHING', async () => {
+    const { core, container } = makeCore();
+    const env = await core.createEnvironment({});
+    await expect(
+      core.applySecrets(env.envId, [
+        { name: 'OK_ENV', value: 'v', target: 'env' },
+        { name: 'broken', value: 'v', target: 'file' },
+      ]),
+    ).rejects.toMatchObject({ code: 'EXEC_FAILED', message: expect.stringContaining('path') });
+    // The valid env secret was NOT half-applied.
+    const stream = await core.exec(env.envId, { cmd: ['cat', '--', '/x'], tty: false });
+    for await (const _ of stream.frames) void _;
+    expect(container.lastEnv).not.toHaveProperty('OK_ENV');
+  });
+
+  it('refuses on a not-ready env', async () => {
+    const { core } = makeCore();
+    const env = await core.createEnvironment({});
+    await core.destroyEnvironment(env.envId);
+    await expect(
+      core.applySecrets(env.envId, [{ name: 'X', value: 'v', target: 'env' }]),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+});
+
 describe('capacity truth (M9)', () => {
   it('lists every environment the core knows, live or not', async () => {
     const { core, provisioner } = makeCore();

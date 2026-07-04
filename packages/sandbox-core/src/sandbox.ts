@@ -60,6 +60,8 @@ export interface SandboxCore {
   getEnvironment(envId: string): Promise<Environment | null>;
   /** Every environment this core knows (M9 — the census/ops read). */
   listEnvironments(): Promise<Environment[]>;
+  /** Attach secrets to a LIVE environment (M9 — the warm-claim seam). */
+  applySecrets(envId: string, secrets: SecretSpec[]): Promise<void>;
   destroyEnvironment(envId: string): Promise<void>;
   exec(envId: string, req: ExecRequest): Promise<ExecStream>;
   fsRead(envId: string, path: string): Promise<Uint8Array>;
@@ -140,6 +142,26 @@ export class DevcontainerSandboxCore implements SandboxCore {
 
   listEnvironments(): Promise<Environment[]> {
     return Promise.resolve([...this.envs.values()].map((r) => r.env));
+  }
+
+  /**
+   * Late-bound secrets (M9, m9-plan Decision 4), preserving the M1 discipline:
+   * env-target values merge into the per-exec injection map (never baked into
+   * the container config), file-target values land 0600 via the exec-based fs
+   * path. File paths are validated BEFORE anything applies, so a bad spec
+   * cannot leave the env half-secreted.
+   */
+  async applySecrets(envId: string, secrets: SecretSpec[]): Promise<void> {
+    const record = this.requireReady(envId);
+    for (const secret of secrets) {
+      if (secret.target === 'file' && !secret.path) {
+        throw new SandboxError('EXEC_FAILED', `file secret ${secret.name} is missing a path`);
+      }
+    }
+    for (const secret of secrets) {
+      if (secret.target === 'env') record.secretEnv[secret.name] = secret.value;
+    }
+    await this.writeFileSecrets(envId, secrets);
   }
 
   async destroyEnvironment(envId: string): Promise<void> {

@@ -49,6 +49,9 @@ function fakeHost(name: string): SandboxCore & {
     async listEnvironments() {
       return [...envs.values()];
     },
+    async applySecrets(envId, secrets) {
+      calls.push(`applySecrets:${envId}:${secrets.map((s) => s.name).join('+')}`);
+    },
     async destroyEnvironment(envId) {
       if (!envs.delete(envId)) throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
     },
@@ -203,9 +206,14 @@ describe('MultiHostSandboxCore routing', () => {
     await multi.fsWrite(envA, '/y', new Uint8Array());
     await multi.fsList(envB, '/z');
     await multi.forwardPort(envA, 3000);
+    await multi.applySecrets(envA, [{ name: 'GH', value: 'v', target: 'env' }]);
 
     expect(b.calls).toEqual([`fsRead:${envB}:/x`, `fsList:${envB}:/z`]);
-    expect(a.calls).toEqual([`fsWrite:${envA}:/y`, `forwardPort:${envA}:3000`]);
+    expect(a.calls).toEqual([
+      `fsWrite:${envA}:/y`,
+      `forwardPort:${envA}:3000`,
+      `applySecrets:${envA}:GH`,
+    ]);
     expect(multi.hostOf(envA)).toBe('a');
     expect(multi.hostOf(envB)).toBe('b');
   });

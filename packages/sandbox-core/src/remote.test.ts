@@ -36,6 +36,7 @@ function fakeCore(overrides: Partial<SandboxCore> = {}): SandboxCore {
     async listEnvironments() {
       return [readyEnv('env_listed')];
     },
+    async applySecrets() {},
     async destroyEnvironment() {},
     async exec() {
       return createScriptedExecStream([{ kind: 'exit', code: 0 }]);
@@ -167,6 +168,35 @@ describe('remote JSON control surface', () => {
 
     expect(await client.fsList('e', '/')).toEqual([{ name: 'a.txt', type: 'file', size: 3 }]);
     expect((await client.forwardPort('e', 3000)).proxyUrl).toBe('http://preview/t/tok/');
+  });
+
+  it('round-trips applySecrets (the M9 warm-claim seam)', async () => {
+    const applied: Array<{ envId: string; names: string[] }> = [];
+    const { client } = await startLoopback(
+      fakeCore({
+        async applySecrets(envId, secrets) {
+          applied.push({ envId, names: secrets.map((s) => s.name) });
+        },
+      }),
+    );
+    await client.applySecrets('env_w', [
+      { name: 'GH', value: 'v1', target: 'env' },
+      { name: 'npmrc', value: 'v2', target: 'file', path: '/root/.npmrc' },
+    ]);
+    expect(applied).toEqual([{ envId: 'env_w', names: ['GH', 'npmrc'] }]);
+  });
+
+  it('refuses applySecrets tokenless — secret plaintext never rides the open surface', async () => {
+    const { url } = await startLoopback(fakeCore(), { token: undefined });
+    const res = await fetch(`${url}/environments/e/secrets`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ secrets: [{ name: 'X', value: 'v', target: 'env' }] }),
+    });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { message: string }).message).toContain(
+      'DEVSPACE_INTERNAL_TOKEN',
+    );
   });
 
   it('maps remote SandboxError codes back onto SandboxError', async () => {

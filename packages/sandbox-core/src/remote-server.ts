@@ -15,6 +15,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { constants as osConstants } from 'node:os';
 import {
+  ApplySecretsRequestSchema,
   CreateEnvironmentRequestSchema,
   ExecClientFrameSchema,
   ExecRequestSchema,
@@ -137,6 +138,20 @@ async function handle(
         const execReq = ExecRequestSchema.parse(await readJson(req));
         const { code, stdout, stderr } = await captureExec(await core.exec(envId, execReq));
         return sendJson(res, 200, { code, stdout: toBase64(stdout), stderr: toBase64(stderr) });
+      }
+      if (method === 'POST' && segments[2] === 'secrets') {
+        // Secret plaintext, so the same line as exec (Decision 5): never
+        // served on the open tokenless surface.
+        if (!token) {
+          return sendJson(res, 503, {
+            code: 'INTERNAL',
+            message: 'applySecrets requires DEVSPACE_INTERNAL_TOKEN',
+          });
+        }
+        const { secrets } = ApplySecretsRequestSchema.parse(await readJson(req));
+        await core.applySecrets(envId, secrets);
+        res.writeHead(204).end();
+        return;
       }
       if (method === 'POST' && segments[2] === 'fs' && segments[3] === 'read') {
         const { path } = FsReadRequestSchema.parse(await readJson(req));

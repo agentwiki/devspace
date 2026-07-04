@@ -12,6 +12,7 @@ import type {
   Environment,
   ExecRequest,
   FsEntry,
+  SecretSpec,
 } from '@devspace/contracts';
 import type { ExecStream } from './exec.js';
 import { SandboxError } from './sandbox.js';
@@ -144,6 +145,10 @@ export class MultiHostSandboxCore implements SandboxCore {
       if (err instanceof SandboxError && err.code === 'NOT_FOUND') this.routes.delete(envId);
       throw err;
     }
+  }
+
+  async applySecrets(envId: string, secrets: SecretSpec[]): Promise<void> {
+    return (await this.requireHost(envId)).core.applySecrets(envId, secrets);
   }
 
   async exec(envId: string, req: ExecRequest): Promise<ExecStream> {

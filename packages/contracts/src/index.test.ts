@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   AgentEventSchema,
+  ApplySecretsRequestSchema,
   ChatEventSchema,
   CreateEnvironmentRequestSchema,
   ExecFrameSchema,
@@ -18,6 +19,15 @@ describe('contract round-trips', () => {
     expect(parsed.resources.cpu).toBe(2);
     expect(parsed.mounts).toEqual([]);
     expect(parsed.secrets).toEqual([]);
+  });
+
+  it('accepts apply-secrets requests but never an empty one', () => {
+    expect(() =>
+      ApplySecretsRequestSchema.parse({
+        secrets: [{ name: 'GH_TOKEN', value: 'v', target: 'env' }],
+      }),
+    ).not.toThrow();
+    expect(() => ApplySecretsRequestSchema.parse({ secrets: [] })).toThrow();
   });
 
   it('round-trips an exec frame through JSON', () => {

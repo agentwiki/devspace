@@ -4,19 +4,19 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M9 (expansion IV).** The full vertical is live end to end — sandbox
+> **Status: M10 (expansion V).** The full vertical is live end to end — sandbox
 > engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
 > secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
 > (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
 > M5), the real two-service deployment, ports preview proxy, Discord adapter
 > and second agent backend (M6), preview WebSocket upgrades and Discord UI
 > parity (M7), multi-host foundations — the exec stream between machines with
-> backpressure preserved, fleet placement (M8) — and M9 makes the fleet's
-> capacity true (host-side `SANDBOX_MAX_ENVS` caps + a boot-time census) and
-> answers cold-start: configured warm pools (`SANDBOX_WARM_POOLS=`)
-> pre-provision environments that a matching session claims in milliseconds,
-> with the tenant's secrets late-bound at claim.
-> See [`docs/roadmap.md`](docs/roadmap.md).
+> backpressure preserved, fleet placement (M8) — capacity truth + warm pools
+> (`SANDBOX_MAX_ENVS`, a boot-time census, `SANDBOX_WARM_POOLS=` pools a
+> matching session claims in milliseconds — M9), and M10 makes the warm stock
+> durable and fresh: pool-marked envs survive an orchestrator crash and are
+> re-adopted at the next boot, and every claim hands out a clone refreshed at
+> claim time. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing
 

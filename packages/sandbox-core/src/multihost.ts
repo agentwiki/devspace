@@ -151,6 +151,10 @@ export class MultiHostSandboxCore implements SandboxCore {
     return (await this.requireHost(envId)).core.applySecrets(envId, secrets);
   }
 
+  async claimEnvironment(envId: string): Promise<Environment> {
+    return (await this.requireHost(envId)).core.claimEnvironment(envId);
+  }
+
   async exec(envId: string, req: ExecRequest): Promise<ExecStream> {
     return (await this.requireHost(envId)).core.exec(envId, req);
   }

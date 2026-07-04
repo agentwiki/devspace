@@ -37,6 +37,9 @@ function fakeCore(overrides: Partial<SandboxCore> = {}): SandboxCore {
       return [readyEnv('env_listed')];
     },
     async applySecrets() {},
+    async claimEnvironment(envId) {
+      return readyEnv(envId);
+    },
     async destroyEnvironment() {},
     async exec() {
       return createScriptedExecStream([{ kind: 'exit', code: 0 }]);
@@ -184,6 +187,33 @@ describe('remote JSON control surface', () => {
       { name: 'npmrc', value: 'v2', target: 'file', path: '/root/.npmrc' },
     ]);
     expect(applied).toEqual([{ envId: 'env_w', names: ['GH', 'npmrc'] }]);
+  });
+
+  it('round-trips claimEnvironment (the M10 pool hand-out)', async () => {
+    const claims: string[] = [];
+    const { client } = await startLoopback(
+      fakeCore({
+        async claimEnvironment(envId) {
+          claims.push(envId);
+          return readyEnv(envId); // poolKey already cleared by the host
+        },
+      }),
+    );
+    const env = await client.claimEnvironment('env_warm');
+    expect(claims).toEqual(['env_warm']);
+    expect(env.envId).toBe('env_warm');
+    expect(env.poolKey).toBeUndefined();
+
+    // Host-side refusals cross the wire with their codes intact.
+    const { client: refusing } = await startLoopback(
+      fakeCore({
+        async claimEnvironment() {
+          throw new SandboxError('CONFLICT', 'environment env_t is not pool-owned');
+        },
+      }),
+    );
+    const err = await refusing.claimEnvironment('env_t').catch((e: unknown) => e);
+    expect((err as SandboxError).code).toBe('CONFLICT');
   });
 
   it('refuses applySecrets tokenless — secret plaintext never rides the open surface', async () => {

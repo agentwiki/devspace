@@ -94,6 +94,11 @@ export class RemoteSandboxCore implements SandboxCore {
     await this.json(`/environments/${encodeURIComponent(envId)}/secrets`, { secrets });
   }
 
+  async claimEnvironment(envId: string): Promise<Environment> {
+    const body = await this.json(`/environments/${encodeURIComponent(envId)}/claim`, {});
+    return EnvironmentSchema.parse(body);
+  }
+
   /** Full-duplex exec over the devspace-exec upgrade. */
   async exec(envId: string, req: ExecRequest): Promise<ExecStream> {
     const socket = await this.upgrade(envId);

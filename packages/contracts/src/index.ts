@@ -92,6 +92,12 @@ export const CreateEnvironmentRequestSchema = z.object({
   resources: ResourceLimitsSchema.default({}),
   mounts: z.array(MountSpecSchema).default([]),
   secrets: z.array(SecretSpecSchema).default([]),
+  /**
+   * Pool identity (M10): set only by the warm-pool layer when filling — the
+   * host records which envs are unclaimed warm stock, so a restarted control
+   * plane can re-adopt them. Cleared by `claimEnvironment` at hand-out.
+   */
+  poolKey: z.string().min(1).optional(),
 });
 export type CreateEnvironmentRequest = z.infer<typeof CreateEnvironmentRequestSchema>;
 
@@ -111,6 +117,8 @@ export const EnvironmentSchema = z.object({
   containerId: z.string().optional(),
   ports: z.array(PortMappingSchema).default([]),
   createdAt: z.string().datetime(),
+  /** Present while the env is unclaimed warm-pool stock (M10). */
+  poolKey: z.string().optional(),
 });
 export type Environment = z.infer<typeof EnvironmentSchema>;
 

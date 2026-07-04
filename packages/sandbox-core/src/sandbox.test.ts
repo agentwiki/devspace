@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ExecRequest } from '@devspace/contracts';
+import type { CommandRunner } from './cli.js';
 import { toBase64 } from './exec.js';
 import type { ExecStream } from './exec.js';
 import type { ContainerRuntime } from './runtime.js';
@@ -146,14 +147,34 @@ function makeCore(
       ...provisionResult,
     })),
   };
+  // Host-side git for the claim-time refresh: records every invocation.
+  const gitCalls: Array<{ cmd: string; args: string[]; cwd?: string }> = [];
+  const run = vi.fn(async (cmd: string, args: readonly string[], options?: { cwd?: string }) => {
+    gitCalls.push({ cmd, args: [...args], cwd: options?.cwd });
+    return { code: 0, stdout: '', stderr: '' };
+  });
+  const runner: CommandRunner = {
+    run,
+    stream: () => {
+      throw new Error('stream is not used by the sandbox core');
+    },
+  };
   return {
-    core: new DevcontainerSandboxCore({ runtime, provisioner, preview, maxEnvs: opts.maxEnvs }),
+    core: new DevcontainerSandboxCore({
+      runtime,
+      provisioner,
+      preview,
+      runner,
+      maxEnvs: opts.maxEnvs,
+    }),
     container,
     destroy,
     removeNetwork,
     provisioner,
     preview,
     containerIp,
+    gitCalls,
+    run,
   };
 }
 
@@ -301,6 +322,83 @@ describe('applySecrets (M9 late-bound secrets)', () => {
     await expect(
       core.applySecrets(env.envId, [{ name: 'X', value: 'v', target: 'env' }]),
     ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+});
+
+describe('claimEnvironment (M10 pool identity + claim-time refresh)', () => {
+  const POOLED = {
+    repoUrl: 'https://github.com/acme/widgets.git',
+    ref: 'main',
+    poolKey: 'pool-key-1',
+  };
+
+  it('echoes poolKey onto the environment', async () => {
+    const { core } = makeCore();
+    const env = await core.createEnvironment(POOLED);
+    expect(env.poolKey).toBe('pool-key-1');
+    expect((await core.getEnvironment(env.envId))?.poolKey).toBe('pool-key-1');
+    expect((await core.listEnvironments())[0]?.poolKey).toBe('pool-key-1');
+  });
+
+  it('refreshes the host clone (exact argv, in the workspace) and clears the mark', async () => {
+    const { core, gitCalls } = makeCore();
+    const env = await core.createEnvironment(POOLED);
+    const claimed = await core.claimEnvironment(env.envId);
+    expect(gitCalls).toEqual([
+      { cmd: 'git', args: ['fetch', '--depth', '1', 'origin', 'main'], cwd: '/ws' },
+      { cmd: 'git', args: ['reset', '--hard', 'FETCH_HEAD'], cwd: '/ws' },
+    ]);
+    expect(claimed.poolKey).toBeUndefined();
+    expect(claimed.status).toBe('ready');
+    expect((await core.getEnvironment(env.envId))?.poolKey).toBeUndefined();
+  });
+
+  it('fetches HEAD for a default-branch pool (no ref)', async () => {
+    const { core, gitCalls } = makeCore();
+    const env = await core.createEnvironment({ ...POOLED, ref: undefined });
+    await core.claimEnvironment(env.envId);
+    expect(gitCalls[0]?.args).toEqual(['fetch', '--depth', '1', 'origin', 'HEAD']);
+  });
+
+  it('skips git entirely for a scratch env (nothing to refresh)', async () => {
+    const { core, gitCalls } = makeCore();
+    const env = await core.createEnvironment({ poolKey: 'scratch-pool' });
+    const claimed = await core.claimEnvironment(env.envId);
+    expect(gitCalls).toEqual([]);
+    expect(claimed.poolKey).toBeUndefined();
+  });
+
+  it('refuses to claim a non-pool-owned env — the mark is the capability', async () => {
+    const { core, gitCalls } = makeCore();
+    const env = await core.createEnvironment({ repoUrl: POOLED.repoUrl });
+    await expect(core.claimEnvironment(env.envId)).rejects.toMatchObject({
+      code: 'CONFLICT',
+      message: expect.stringContaining('not pool-owned'),
+    });
+    // The tenant's workspace was never touched.
+    expect(gitCalls).toEqual([]);
+  });
+
+  it('NOT_FOUND for an unknown env; CONFLICT for a destroyed one', async () => {
+    const { core } = makeCore();
+    await expect(core.claimEnvironment('env_ghost')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    const env = await core.createEnvironment(POOLED);
+    await core.destroyEnvironment(env.envId);
+    await expect(core.claimEnvironment(env.envId)).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('a refresh failure is EXEC_FAILED and leaves the env pool-owned and intact', async () => {
+    const { core, run } = makeCore();
+    const env = await core.createEnvironment(POOLED);
+    run.mockResolvedValueOnce({ code: 128, stdout: '', stderr: 'could not resolve host' });
+    await expect(core.claimEnvironment(env.envId)).rejects.toMatchObject({
+      code: 'EXEC_FAILED',
+      message: expect.stringContaining('claim refresh'),
+    });
+    // Still marked: a later claim (remote back up) succeeds.
+    expect((await core.getEnvironment(env.envId))?.poolKey).toBe('pool-key-1');
+    const claimed = await core.claimEnvironment(env.envId);
+    expect(claimed.poolKey).toBeUndefined();
   });
 });
 

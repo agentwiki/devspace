@@ -52,6 +52,14 @@ function fakeHost(name: string): SandboxCore & {
     async applySecrets(envId, secrets) {
       calls.push(`applySecrets:${envId}:${secrets.map((s) => s.name).join('+')}`);
     },
+    async claimEnvironment(envId) {
+      calls.push(`claim:${envId}`);
+      const env = envs.get(envId);
+      if (!env) throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
+      const { poolKey: _poolKey, ...claimed } = env;
+      envs.set(envId, claimed);
+      return claimed;
+    },
     async destroyEnvironment(envId) {
       if (!envs.delete(envId)) throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
     },
@@ -207,12 +215,14 @@ describe('MultiHostSandboxCore routing', () => {
     await multi.fsList(envB, '/z');
     await multi.forwardPort(envA, 3000);
     await multi.applySecrets(envA, [{ name: 'GH', value: 'v', target: 'env' }]);
+    await multi.claimEnvironment(envA);
 
     expect(b.calls).toEqual([`fsRead:${envB}:/x`, `fsList:${envB}:/z`]);
     expect(a.calls).toEqual([
       `fsWrite:${envA}:/y`,
       `forwardPort:${envA}:3000`,
       `applySecrets:${envA}:GH`,
+      `claim:${envA}`,
     ]);
     expect(multi.hostOf(envA)).toBe('a');
     expect(multi.hostOf(envB)).toBe('b');

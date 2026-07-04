@@ -17,12 +17,16 @@ import type {
   SecretSpec,
 } from '@devspace/contracts';
 import { CreateEnvironmentRequestSchema } from '@devspace/contracts';
-import { nodeCommandRunner } from './cli.js';
+import { nodeCommandRunner, runOrThrow } from './cli.js';
 import type { CommandRunner } from './cli.js';
 import { captureExec } from './exec.js';
 import type { ExecStream } from './exec.js';
 import type { SandboxHardening } from './hardening.js';
-import { DevcontainerProvisioner } from './provision.js';
+import {
+  DevcontainerProvisioner,
+  GIT_REFRESH_RESET_ARGS,
+  buildGitRefreshArgs,
+} from './provision.js';
 import type { Provisioner } from './provision.js';
 import { DockerRuntime } from './runtime.js';
 import type { ContainerRuntime } from './runtime.js';
@@ -46,6 +50,10 @@ interface EnvRecord {
   networkName?: string;
   /** Resolved env-target secrets, injected into every exec (never logged). */
   secretEnv: Record<string, string>;
+  /** Host-side workspace + clone source, kept for claim-time refresh (M10). */
+  workspaceFolder?: string;
+  repoUrl?: string;
+  ref?: string;
 }
 
 export interface SandboxCoreDeps {
@@ -62,6 +70,13 @@ export interface SandboxCore {
   listEnvironments(): Promise<Environment[]>;
   /** Attach secrets to a LIVE environment (M9 — the warm-claim seam). */
   applySecrets(envId: string, secrets: SecretSpec[]): Promise<void>;
+  /**
+   * Hand a pool-owned env to a tenant (M10): the owning host freshens the
+   * workspace clone and clears the pool mark. CONFLICT unless the env is
+   * ready AND carries a poolKey — the mark is the capability (m10-plan
+   * Decision 3); a refresh failure is EXEC_FAILED and the caller destroys.
+   */
+  claimEnvironment(envId: string): Promise<Environment>;
   destroyEnvironment(envId: string): Promise<void>;
   exec(envId: string, req: ExecRequest): Promise<ExecStream>;
   fsRead(envId: string, path: string): Promise<Uint8Array>;
@@ -75,6 +90,9 @@ export class DevcontainerSandboxCore implements SandboxCore {
   private readonly provisioner: Provisioner;
   private readonly preview?: PreviewRegistrar;
   private readonly envs = new Map<string, EnvRecord>();
+  /** Host-side git for the claim-time refresh (M10) — never in-container. */
+  private readonly runner: CommandRunner;
+  private readonly git: string;
 
   /** Host-side cap on live envs (M9, m9-plan Decision 3); undefined = uncapped. */
   private readonly maxEnvs?: number;
@@ -84,9 +102,12 @@ export class DevcontainerSandboxCore implements SandboxCore {
       runner?: CommandRunner;
       hardening?: SandboxHardening;
       maxEnvs?: number;
+      gitPath?: string;
     },
   ) {
     const runner = deps?.runner ?? nodeCommandRunner;
+    this.runner = runner;
+    this.git = deps?.gitPath ?? 'git';
     this.runtime = deps?.runtime ?? new DockerRuntime(runner);
     this.provisioner =
       deps?.provisioner ?? new DevcontainerProvisioner(runner, { hardening: deps?.hardening });
@@ -113,15 +134,27 @@ export class DevcontainerSandboxCore implements SandboxCore {
     }
     const envId = `env_${randomUUID()}`;
     const record: EnvRecord = {
-      env: { envId, status: 'provisioning', ports: [], createdAt: new Date().toISOString() },
+      env: {
+        envId,
+        status: 'provisioning',
+        ports: [],
+        createdAt: new Date().toISOString(),
+        ...(req.poolKey ? { poolKey: req.poolKey } : {}),
+      },
       secretEnv: envSecrets(req.secrets),
+      repoUrl: req.repoUrl,
+      ref: req.ref,
     };
     this.envs.set(envId, record);
 
     try {
-      const { containerId, networkName } = await this.provisioner.provision(envId, req);
+      const { containerId, networkName, workspaceFolder } = await this.provisioner.provision(
+        envId,
+        req,
+      );
       record.containerId = containerId;
       record.networkName = networkName;
+      record.workspaceFolder = workspaceFolder;
       record.env = { ...record.env, status: 'ready', containerId };
       // File-target secrets land inside the container only after it is ready,
       // so nothing sensitive ever touches the workspace on disk.
@@ -162,6 +195,36 @@ export class DevcontainerSandboxCore implements SandboxCore {
       if (secret.target === 'env') record.secretEnv[secret.name] = secret.value;
     }
     await this.writeFileSecrets(envId, secrets);
+  }
+
+  /**
+   * Claim-time refresh + unmark, in one host operation (M10, m10-plan
+   * Decision 2): freshen the workspace clone with the same host-side git
+   * (and credentials) the fill-time clone used, then clear the pool mark.
+   * The mark is the capability — an env without one refuses with CONFLICT,
+   * so a buggy pool can never hard-reset a tenant's workspace.
+   */
+  async claimEnvironment(envId: string): Promise<Environment> {
+    const record = this.requireReady(envId);
+    if (!record.env.poolKey) {
+      throw new SandboxError('CONFLICT', `environment ${envId} is not pool-owned`);
+    }
+    if (record.repoUrl && record.workspaceFolder) {
+      try {
+        const cwd = record.workspaceFolder;
+        await runOrThrow(this.runner, this.git, buildGitRefreshArgs(record.ref), { cwd });
+        await runOrThrow(this.runner, this.git, [...GIT_REFRESH_RESET_ARGS], { cwd });
+      } catch (err) {
+        // Still pool-owned and intact — the claimer destroys and goes cold.
+        throw new SandboxError(
+          'EXEC_FAILED',
+          `claim refresh of ${envId} failed: ${errMessage(err)}`,
+        );
+      }
+    }
+    const { poolKey: _poolKey, ...claimed } = record.env;
+    record.env = claimed;
+    return record.env;
   }
 
   async destroyEnvironment(envId: string): Promise<void> {

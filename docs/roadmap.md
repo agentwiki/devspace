@@ -6,6 +6,7 @@ Expansion I (split, preview proxy, chat completion, 2nd agent): **M6.**
 Expansion II (preview WS upgrade, Discord UI parity): **M7.**
 Expansion III (exec over the wire, multi-host placement): **M8.**
 Expansion IV (fleet capacity truth, warm pools): **M9.**
+Expansion V (pool identity, claim-time refresh): **M10.**
 
 ## M0 — Scaffolding (done)
 
@@ -348,20 +349,53 @@ Landed:
   env. `SANDBOX_WARM_POOLS=repoUrl[#ref]=size,…`; `close()` destroys
   still-unclaimed warm envs.
 
-## M10+ — Expansion V
+## M10 — Expansion V: pool identity + claim-time refresh (done)
+
+The two m9-plan seeds that compose at exactly one point — the claim. A warm
+env is now marked pool-owned where it lives, and the clone a tenant receives
+is freshened at hand-out. Everything stays behind the `SandboxCore` seam;
+one contract field (`poolKey`) and one interface method (`claimEnvironment`)
+are the entire surface change. Design of record: docs/m10-plan.md.
+
+Landed:
+
+- **Pool identity** — every warm fill is stamped with its pool's canonical
+  template key: `poolKey` rides `CreateEnvironmentRequest` onto the HOST's
+  env table and is echoed on `Environment`, so the host — not orchestrator
+  memory — records what is unclaimed warm stock. The mark is bookkeeping,
+  not shape: `canonicalRequestKey` strips it alongside secrets, and a
+  template arriving pre-marked is refused at construction.
+- **Claim as a host operation** — `SandboxCore.claimEnvironment(envId)`
+  (new `POST /environments/:id/claim`; open surface — no secret plaintext
+  crosses) hands a marked env to a tenant in one atomic step: freshen the
+  workspace clone (`git fetch --depth 1 origin <ref|HEAD>` + hard reset,
+  the same host-side git and credentials the fill-time clone used), then
+  clear the mark. The mark is the capability — an unmarked env refuses
+  with CONFLICT, so a buggy pool can never hard-reset a tenant workspace;
+  a refresh failure leaves the env intact and the claimer destroys it and
+  falls through cold (latency, never staleness).
+- **Orphan re-adoption** — `fill()` sweeps `listEnvironments()` before
+  topping up: ready envs carrying one of OUR pool keys are re-adopted FIFO
+  up to size (a crashed control plane's warm stock is reclaimed — the
+  m9-plan leak, closed), excess beyond a shrunk size is destroyed, and
+  foreign marks / unmarked tenant envs are never touched. Tolerant like
+  the census: a listing failure logs and the top-up still runs.
+
+## M11+ — Expansion VI
 
 NATS bus (meaningful when the _orchestrator_ scales out — the sandbox fleet
 already did; LISTEN/NOTIFY survives that split; `EventBus` is the seam);
 per-service identity on the internal API (mTLS — deployment-layer,
-replacing the shared token); resource-aware placement (capacity still
-counts envs, deliberately — cpu/mem-aware scheduling needs host-side
-resource accounting; M9 made the count TRUE, M10+ makes it weighted); pool
-identity + claim-time refresh (a warm env is not labeled pool-owned on its
-host, so a crashed orchestrator leaks unclaimed warm envs until ops
-reclaims them, and its clone is as old as fill time — see docs/m9-plan.md
-risks); Discord Forum-channel session dashboard (presentation upgrade over
-`/sessions`). UI surface remains chat only — no self-hosted web UI (see
-docs/analysis/chat-platform-ui-parity.md).
+replacing the shared token; also the milestone where multi-controller
+coordination would land — M10's pool marks assume one control plane);
+resource-aware placement (capacity still counts envs, deliberately —
+cpu/mem-aware scheduling needs host-side resource accounting; M9 made the
+count TRUE, M11+ makes it weighted); durable host env tables (a
+sandbox-core-svc restart forgets its in-memory env table — pool marks
+included; the containers, labeled `devspace.envId` since M1, become an ops
+concern); Discord Forum-channel session dashboard (presentation upgrade
+over `/sessions`). UI surface remains chat only — no self-hosted web UI
+(see docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 
@@ -372,7 +406,9 @@ docs/analysis/chat-platform-ui-parity.md).
 3. PAT leakage → short-lived OAuth; read-only in-container; push/PR via wrapper; redact output.
 4. cold-start latency → prebuilt images + warm pool + cached agent-runtime volume (<15s warm);
    answered in M9 (claim-from-pool provisioning behind the SandboxCore seam — a matching
-   session claims a pre-provisioned env in milliseconds).
+   session claims a pre-provisioned env in milliseconds) and hardened in M10 (warm stock
+   survives an orchestrator crash via host-side pool marks; claims hand out a clone
+   freshened at claim time, not fill time).
 5. runaway agent loops → per-turn budgets; auto-abort.
 6. codex-acp version drift → pin in image; isolate behind AgentBackend.
 7. FSM vs GitHub drift → webhooks as source of truth; gh poll reconciliation.

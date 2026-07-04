@@ -14,6 +14,13 @@
  * re-adopts marked envs after an orchestrator restart instead of leaking
  * them, and the claim hands out a clone freshened at claim time, not one as
  * old as fill time (m10-plan).
+ *
+ * Since M14 the host's table is the ONLY ledger and this wrapper's lists are
+ * hints, so N controllers can share one fleet's stock (m14-plan Decisions
+ * 4–5): a lost claim race (CONFLICT/NOT_FOUND — a sibling got there first)
+ * drops the env and moves on, never destroys; a local miss re-sweeps the
+ * host for sibling-filled stock before going cold; and top-up gates on the
+ * GLOBAL marked count, so controllers converge on `size`, not N×size.
  */
 import type {
   CreateEnvironmentRequest,
@@ -24,6 +31,7 @@ import type {
 } from '@devspace/contracts';
 import { CreateEnvironmentRequestSchema } from '@devspace/contracts';
 import type { ExecStream } from './exec.js';
+import { SandboxError } from './sandbox.js';
 import type { SandboxCore } from './sandbox.js';
 
 /** One configured pool: a full template request (secrets empty) + target size. */
@@ -113,15 +121,28 @@ export class WarmPoolSandboxCore implements SandboxCore {
     const parsed = CreateEnvironmentRequestSchema.parse(req);
     const pool = this.pools.get(canonicalRequestKey(parsed));
     if (pool) {
-      while (pool.ready.length > 0) {
-        const envId = pool.ready.shift()!;
+      const tried = new Set<string>();
+      let swept = false;
+      for (;;) {
+        const envId = pool.ready.shift();
+        if (envId === undefined) {
+          // Local list exhausted. Once per request, ask the ledger: a sibling
+          // controller may hold warm stock this instance never tracked
+          // (m14-plan Decision 5). Anything already tried stays excluded.
+          if (swept) break;
+          swept = true;
+          await this.adoptFromHost(pool, tried);
+          if (pool.ready.length === 0) break;
+          continue;
+        }
+        tried.add(envId);
         const claimed = await this.claim(envId, parsed.secrets);
         if (claimed) {
           this.kick(pool);
           return claimed;
         }
       }
-      // Empty (or every warm env was dead): go cold, but start refilling now.
+      // Empty (or every warm env was dead/lost): go cold, but refill now.
       this.kick(pool);
     }
     return this.inner.createEnvironment(parsed);
@@ -185,9 +206,13 @@ export class WarmPoolSandboxCore implements SandboxCore {
   /**
    * Verify → refresh + unmark on the owning host → apply-secrets → hand out;
    * anything less destroys (m9-plan Decision 6, extended by m10-plan
-   * Decision 2). Returns null when this warm env cannot be used — the caller
-   * tries the next one or falls through cold. An env with a stale clone or
-   * half-applied secrets never reaches a tenant and never returns to the pool.
+   * Decision 2) — UNLESS the claim was lost to a sibling controller
+   * (m14-plan Decision 4): CONFLICT means the mark is gone (the env may be a
+   * TENANT's now) and NOT_FOUND means a sibling destroyed/trimmed it, so
+   * both drop without touching the env. Returns null when this warm env
+   * cannot be used — the caller tries the next one or falls through cold.
+   * An env with a stale clone or half-applied secrets never reaches a
+   * tenant and never returns to the pool.
    */
   private async claim(envId: string, secrets: SecretSpec[]): Promise<Environment | null> {
     let env: Environment | null;
@@ -201,6 +226,11 @@ export class WarmPoolSandboxCore implements SandboxCore {
       this.onLog(`claim: warm env ${envId} vanished (${env?.status ?? 'gone'}); dropping`);
       return null;
     }
+    if (!env.poolKey) {
+      // Already unmarked: a sibling claimed it between our tracking and now.
+      this.onLog(`claim: lost ${envId} to a sibling controller (already claimed); dropping`);
+      return null;
+    }
     // The host freshens the clone and clears the pool mark in one operation;
     // a failure (dead remote, wiped workspace) costs a cold create, never a
     // stale hand-out.
@@ -208,6 +238,13 @@ export class WarmPoolSandboxCore implements SandboxCore {
     try {
       claimed = await this.inner.claimEnvironment(envId);
     } catch (err) {
+      if (err instanceof SandboxError && (err.code === 'CONFLICT' || err.code === 'NOT_FOUND')) {
+        // Lost the race, not a broken env: the mark was the capability and a
+        // sibling took it (or trimmed the env). Destroying here could kill a
+        // tenant's live workspace — drop and move on.
+        this.onLog(`claim: lost ${envId} to a sibling controller (${err.code}); dropping`);
+        return null;
+      }
       this.onLog(`claim: refresh of ${envId} failed: ${message(err)}; destroying`);
       await this.inner.destroyEnvironment(envId).catch(() => {});
       return null;
@@ -259,6 +296,47 @@ export class WarmPoolSandboxCore implements SandboxCore {
     }
   }
 
+  /**
+   * Adopt marked ready envs from the host's table into the local list —
+   * the claim-miss path to sibling-filled stock (M14). Tolerant: a listing
+   * failure logs and the caller goes cold.
+   */
+  private async adoptFromHost(pool: Pool, exclude: Set<string>): Promise<void> {
+    let envs: Environment[];
+    try {
+      envs = await this.inner.listEnvironments();
+    } catch (err) {
+      this.onLog(`sibling-stock sweep failed (going cold): ${message(err)}`);
+      return;
+    }
+    for (const env of envs) {
+      if (env.status !== 'ready' || env.poolKey !== pool.key) continue;
+      if (exclude.has(env.envId) || pool.ready.includes(env.envId)) continue;
+      pool.ready.push(env.envId);
+    }
+  }
+
+  /**
+   * GLOBAL warm stock for a pool — the host's table is the ledger (m14-plan
+   * Decision 5). Adopts untracked marked envs as it counts, so sibling fills
+   * become claimable here; falls back to the local count when listing fails
+   * (an unreachable fleet must degrade to single-controller behavior, never
+   * block fills).
+   */
+  private async stock(pool: Pool): Promise<number> {
+    let envs: Environment[];
+    try {
+      envs = await this.inner.listEnvironments();
+    } catch {
+      return pool.ready.length;
+    }
+    const marked = envs.filter((e) => e.status === 'ready' && e.poolKey === pool.key);
+    for (const env of marked) {
+      if (!pool.ready.includes(env.envId)) pool.ready.push(env.envId);
+    }
+    return marked.length;
+  }
+
   /** Fire-and-forget top-up; topUp itself never rejects. */
   private kick(pool: Pool): void {
     void this.topUp(pool);
@@ -271,13 +349,17 @@ export class WarmPoolSandboxCore implements SandboxCore {
    * stops; the next claim (or fill()) retries. Single-flight: a concurrent
    * call joins the in-flight fill instead of starting a second one, so
    * awaiting fill() is deterministic even when a claim already kicked.
+   * Gated on the GLOBAL stock (M14): N controllers filling the same pool
+   * converge on `size` warm envs, not N×size. Two of them can still both
+   * read `size-1` and both provision — the overshoot is bounded by the
+   * controller count and the boot-time sweep trims it.
    */
   private topUp(pool: Pool): Promise<void> {
     if (pool.filling) return pool.filling;
     if (this.stopped) return Promise.resolve();
     pool.filling = (async (): Promise<void> => {
       try {
-        while (!this.stopped && pool.ready.length < pool.size) {
+        while (!this.stopped && (await this.stock(pool)) < pool.size) {
           // Stamped with the pool's key (M10): the host's env table — not this
           // process's memory — records what is unclaimed warm stock.
           const env = await this.inner.createEnvironment({

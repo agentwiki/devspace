@@ -69,6 +69,11 @@ export const events = pgTable(
     payload: jsonb('payload').notNull(),
     emittedAt: timestamp('emitted_at', { withTimezone: true }).defaultNow().notNull(),
     consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    // Claim lease (M14): which controller instance is processing this row.
+    // Diagnostics + race arbitration only — the TTL, not the name, decides
+    // reclaimability (m14-plan Decision 3).
+    claimedBy: text('claimed_by'),
+    claimedAt: timestamp('claimed_at', { withTimezone: true }),
   },
   (t) => [index('events_topic_idx').on(t.topic), index('events_work_unit_idx').on(t.workUnitId)],
 );

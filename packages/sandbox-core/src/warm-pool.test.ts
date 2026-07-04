@@ -375,6 +375,110 @@ describe('orphan re-adoption (M10 — the restart path)', () => {
   });
 });
 
+describe('multi-controller coordination (M14) — the host is the ledger', () => {
+  it('two controllers converge on size, not 2×size', async () => {
+    const inner = fakeInner();
+    const a = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 2 }]);
+    const b = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 2 }]);
+    await a.fill();
+    await b.fill();
+    // b adopted a's marked stock off the host's table instead of refilling.
+    expect(inner.created).toBe(2);
+    expect(b.warmCount(TEMPLATE)).toBe(2);
+  });
+
+  it('a controller that never filled claims sibling stock warm on a local miss', async () => {
+    const inner = fakeInner();
+    const a = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }]);
+    await a.fill(); // env_1, marked by a
+    const b = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }]);
+
+    const env = await b.createEnvironment(tenantRequest());
+    expect(env.envId).toBe('env_1'); // warm hand-out, not a cold create
+    expect(env.poolKey).toBeUndefined();
+    await b.fill(); // join the kicked background refill
+    expect(inner.created).toBe(2); // env_1 + b's refill (never a cold tenant env)
+  });
+
+  it('losing the claim race NEVER destroys the winner’s (now tenant) env', async () => {
+    const inner = fakeInner();
+    const a = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }]);
+    const b = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }]);
+    await a.fill();
+    await b.fill(); // both track env_1 — the shared-stock shape
+
+    const winner = await a.createEnvironment(tenantRequest());
+    expect(winner.envId).toBe('env_1');
+    const loser = await b.createEnvironment(tenantRequest());
+    // The loser saw the mark gone, dropped, and went cold — the M14 safety
+    // property: pre-M14 this destroyed the winner's live tenant workspace.
+    expect(loser.envId).not.toBe('env_1');
+    expect(inner.destroyed).not.toContain('env_1');
+    expect(inner.envs.has('env_1')).toBe(true);
+  });
+
+  it('CONFLICT from claimEnvironment (race lost between verify and claim) drops, never destroys', async () => {
+    const inner = fakeInner();
+    const innerClaim = inner.claimEnvironment.bind(inner);
+    inner.claimEnvironment = async (envId: string) => {
+      if (envId === 'env_1') throw new SandboxError('CONFLICT', 'not pool-owned');
+      return innerClaim(envId);
+    };
+    const logs: string[] = [];
+    const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }], {
+      onLog: (line) => logs.push(line),
+    });
+    await pool.fill();
+
+    const env = await pool.createEnvironment(tenantRequest());
+    expect(env.envId).not.toBe('env_1');
+    expect(inner.destroyed).not.toContain('env_1');
+    expect(logs.join('\n')).toContain('lost env_1 to a sibling controller (CONFLICT)');
+  });
+
+  it('NOT_FOUND from claimEnvironment (sibling trimmed it) drops, never destroys', async () => {
+    const inner = fakeInner();
+    inner.claimEnvironment = async (envId: string) => {
+      throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
+    };
+    const logs: string[] = [];
+    const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }], {
+      onLog: (line) => logs.push(line),
+    });
+    await pool.fill();
+
+    const env = await pool.createEnvironment(tenantRequest());
+    expect(env.envId).not.toBe('env_1');
+    expect(inner.destroyed).toEqual([]);
+    expect(logs.join('\n')).toContain('lost env_1 to a sibling controller (NOT_FOUND)');
+  });
+
+  it('top-up gates on the global count while claims drain concurrently', async () => {
+    const inner = fakeInner();
+    const a = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 2 }]);
+    await a.fill(); // env_1, env_2
+    // A sibling claims one env directly off the host (a controller this
+    // instance has never met): global stock is now 1.
+    await inner.claimEnvironment('env_1');
+
+    await a.fill();
+    // The refill saw 1/2 globally and provisioned exactly one more.
+    expect(inner.created).toBe(3);
+    expect(inner.envs.get('env_3')?.poolKey).toBe(canonicalRequestKey(TEMPLATE));
+  });
+
+  it('a listing failure degrades top-up to local counts, never blocks fills', async () => {
+    const inner = fakeInner();
+    inner.listEnvironments = async () => {
+      throw new SandboxError('EXEC_FAILED', 'host b unreachable');
+    };
+    const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 2 }]);
+    await pool.fill();
+    expect(pool.warmCount(TEMPLATE)).toBe(2); // single-controller behavior
+    expect(inner.created).toBe(2);
+  });
+});
+
 describe('parseWarmPools', () => {
   it('parses repoUrl, optional ref, and size', () => {
     expect(

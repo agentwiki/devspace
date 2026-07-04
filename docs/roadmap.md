@@ -10,6 +10,7 @@ Expansion V (pool identity, claim-time refresh): **M10.**
 Expansion VI (durable host env tables): **M11.**
 Expansion VII (resource-aware placement): **M12.**
 Expansion VIII (per-service identity on the internal API): **M13.**
+Expansion IX (multi-controller coordination): **M14.**
 
 ## M0 — Scaffolding (done)
 
@@ -484,21 +485,64 @@ Landed:
   without it); no private key is checked in, and the recipe doubles as the
   minimum-viable-PKI documentation for operators.
 
-## M14+ — Expansion IX
+## M14 — Expansion IX: multi-controller coordination (done)
 
-NATS bus (meaningful when the _orchestrator_ scales out — the sandbox fleet
-already did; LISTEN/NOTIFY survives that split; `EventBus` is the seam);
-multi-controller coordination (M10's pool marks and M11's per-host state
-dir assume one control plane / one host process — a control-plane-semantics
-change, deliberately split from M13's transport identity); live-utilization
-scheduling (M12 weighs grants, deliberately — usage-based placement needs a
-cgroup stats pipeline and an eviction story) and disk-weighted placement
-(host disk budgets interact with image/layer sharing in ways a sum of
-grants does not model); certificate rotation/revocation tooling (at three
-certs per deployment, re-minting IS the revocation story — until it isn't);
-Discord Forum-channel session dashboard (presentation upgrade over
-`/sessions`). UI surface remains chat only — no self-hosted web UI (see
-docs/analysis/chat-platform-ui-parity.md).
+The control-plane half of the seed M13 deliberately split: N orchestrators
+over one Postgres and one sandbox fleet becomes a supported shape. Zero
+contract changes; one additive `events` migration, two host knobs, and
+warm-pool semantics that treat the host as the ledger it already was.
+Design of record: docs/m14-plan.md.
+
+Landed:
+
+- **Singleton event consumption** — bus rows are claim-leased: every
+  instance still hears every NOTIFY, but one atomic UPDATE
+  (`claimed_by`/`claimed_at`, `consumed_at IS NULL`, prior lease older
+  than the TTL) decides which controller runs the handlers. Losers skip
+  silently; a claimer that crashes mid-handler is covered by the lease
+  TTL — the existing recovery sweep re-claims and re-runs, so delivery
+  stays at-least-once and handlers stay idempotent, while the steady
+  state is exactly one controller per event. `DEVSPACE_INSTANCE_ID`
+  names instances in claim diagnostics; nothing authorizes by it.
+- **Sibling-safe warm pools** — the host's env table is the ONLY pool
+  ledger and the wrapper's lists are hints: a lost claim race
+  (CONFLICT/NOT_FOUND — a sibling got there first) drops the env and
+  moves on, never destroys (pre-M14 that path could destroy the winner's
+  live TENANT workspace — the one genuine safety bug); a local miss
+  re-sweeps the host once per request, so a controller that never filled
+  claims sibling stock warm; top-up gates on the GLOBAL marked count, so
+  N controllers converge on `size`, not N×size. Listing failures degrade
+  to single-controller behavior — an unreachable fleet never blocks fills.
+- **Host-side resource budgets** — `SANDBOX_CPU_BUDGET` /
+  `SANDBOX_MEM_BUDGET` refuse admission when the summed live grants (M12
+  resource truth, durable across restarts since M11) plus the request's
+  grant overflow either declared dimension: the `SANDBOX_MAX_ENVS`
+  counterpart for the M12 budgets, enforced where the truth lives — no
+  number of mis-counting controllers can jointly oversubscribe a host.
+- **What needed no work, documented**: chat events land on ONE controller
+  (the operator's load balancer picks), FSM transitions have been
+  multi-writer-safe (`SELECT … FOR UPDATE`) since M3, and webhook/poll
+  publishes ride idempotent topics into the now-singleton consumer. The
+  reconciler still polls on every controller — duplicate GitHub reads,
+  accepted at N≤handful.
+
+## M15+ — Expansion X
+
+NATS bus (still unnecessary: LISTEN/NOTIFY survives N orchestrators by
+construction — every instance hears every NOTIFY, the M14 claim decides who
+acts; `EventBus` remains the seam if volume ever demands it); singleton
+reconciler election (N pollers are correct but redundant — a lease like the
+M14 event claim would elect one); turn-level failover (a controller that
+dies mid-turn loses that turn; the conversation resumes on whichever
+instance gets the next message — checkpointing is a product decision);
+live-utilization scheduling (M12/M14 weigh grants, deliberately —
+usage-based placement needs a cgroup stats pipeline and an eviction story)
+and disk-weighted placement (host disk budgets interact with image/layer
+sharing in ways a sum of grants does not model); certificate
+rotation/revocation tooling (at three certs per deployment, re-minting IS
+the revocation story — until it isn't); Discord Forum-channel session
+dashboard (presentation upgrade over `/sessions`). UI surface remains chat
+only — no self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 

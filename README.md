@@ -25,7 +25,12 @@ interface — a self-hostable "Claude Code on the web."
 > identity configured (replacing the shared token, never alongside it),
 > every internal hop — split API, sandbox surface, exec upgrade — runs over
 > mutual TLS on its own listener, certificates name their service, and each
-> surface allowlists exactly the peer it serves.
+> surface allowlists exactly the peer it serves. M14 lets the control plane
+> itself scale out: bus rows are claim-leased so N orchestrators over one
+> database each consume every event exactly once in steady state, warm
+> pools share the fleet's stock through the host's own ledger (a lost claim
+> race drops, never destroys), and `SANDBOX_CPU_BUDGET`/`SANDBOX_MEM_BUDGET`
+> give the M12 grant budgets a host-side backstop.
 > See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing

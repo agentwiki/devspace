@@ -42,6 +42,10 @@ export interface EventRecord {
   emittedAt: string;
   /** Stamped when a bus subscriber has processed the row (at-least-once). */
   consumedAt?: string;
+  /** Which controller instance holds (or last held) the claim lease (M14). */
+  claimedBy?: string;
+  /** When the lease was taken; older than the TTL = reclaimable. */
+  claimedAt?: string;
 }
 
 export interface ConversationRepo {
@@ -83,6 +87,13 @@ export interface EventRepo {
   list(topic?: string): Promise<EventRecord[]>;
   /** Rows appended but not yet processed by a bus subscriber. */
   listUnconsumed(): Promise<EventRecord[]>;
+  /**
+   * Take the claim lease on an unconsumed row (M14, m14-plan Decision 2):
+   * atomically stamp `claimedBy`/`claimedAt` and return the row — or null
+   * when the row is consumed, missing, or held by a lease younger than
+   * `ttlMs`. One winner per lease window across any number of processes.
+   */
+  claim(id: string, owner: string, ttlMs: number): Promise<EventRecord | null>;
   /** Mark a row processed. Idempotent. */
   markConsumed(id: string): Promise<void>;
 }
@@ -234,6 +245,18 @@ export function createInMemoryRepositories(
       },
       async listUnconsumed() {
         return events.filter((e) => e.consumedAt === undefined);
+      },
+      async claim(eid, owner, ttlMs) {
+        const rec = events.find((e) => e.id === eid);
+        if (!rec || rec.consumedAt !== undefined) return null;
+        const ts = now();
+        // Same arbitration as Pg: a live lease (younger than the TTL) loses.
+        if (rec.claimedAt !== undefined && !(Date.parse(rec.claimedAt) < Date.parse(ts) - ttlMs)) {
+          return null;
+        }
+        rec.claimedBy = owner;
+        rec.claimedAt = ts;
+        return rec;
       },
       async markConsumed(eid) {
         const rec = events.find((e) => e.id === eid);

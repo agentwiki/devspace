@@ -147,6 +147,38 @@ describe('in-memory repositories', () => {
     expect(await repos.events.listUnconsumed()).toHaveLength(0);
     await expect(repos.events.markConsumed('missing')).resolves.toBeUndefined();
   });
+
+  it('claim leases a row to exactly one owner per TTL window (M14)', async () => {
+    const repos = createInMemoryRepositories();
+    const e = await repos.events.append({ topic: 't', payload: {} });
+
+    const won = await repos.events.claim(e.id, 'ctrl-a', 60_000);
+    expect(won).toMatchObject({ id: e.id, claimedBy: 'ctrl-a' });
+    expect(won?.claimedAt).toBeTruthy();
+    // The sibling races the same row inside the lease window and loses.
+    expect(await repos.events.claim(e.id, 'ctrl-b', 60_000)).toBeNull();
+    // Missing rows never claim.
+    expect(await repos.events.claim('missing', 'ctrl-b', 60_000)).toBeNull();
+  });
+
+  it('claim: a stale lease is reclaimable; a consumed row never is (M14)', async () => {
+    let tick = 0;
+    const repos = createInMemoryRepositories(() => new Date(tick).toISOString());
+    const e = await repos.events.append({ topic: 't', payload: {} });
+
+    expect(await repos.events.claim(e.id, 'crashed', 60_000)).toBeTruthy();
+    // Inside the TTL the lease holds…
+    tick = 59_000;
+    expect(await repos.events.claim(e.id, 'ctrl-b', 60_000)).toBeNull();
+    // …past it, the row is presumed orphaned and re-claimable.
+    tick = 61_000;
+    const reclaimed = await repos.events.claim(e.id, 'ctrl-b', 60_000);
+    expect(reclaimed?.claimedBy).toBe('ctrl-b');
+
+    await repos.events.markConsumed(e.id);
+    tick = 10_000_000;
+    expect(await repos.events.claim(e.id, 'ctrl-c', 60_000)).toBeNull();
+  });
 });
 
 describe('in-memory event bus', () => {

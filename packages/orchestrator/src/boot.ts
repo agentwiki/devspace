@@ -341,9 +341,12 @@ export async function bootOrchestrator(
         instanceId,
         intervalMs: policy.intervalMs,
         run: async () => {
-          const { reaped, failed } = await orch.reapExpired(policy);
-          if (reaped || failed) {
-            console.log(`[reap] reclaimed ${reaped} work unit(s), ${failed} failure(s)`);
+          const { reaped, warned, released, failed } = await orch.reapExpired(policy);
+          if (reaped || warned || released || failed) {
+            console.log(
+              `[reap] reclaimed ${reaped} work unit(s), warned ${warned}, ` +
+                `released ${released} env(s), ${failed} failure(s)`,
+            );
           }
         },
         onLog: (line) => console.log(`[reap] ${line}`),

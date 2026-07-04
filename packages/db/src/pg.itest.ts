@@ -156,6 +156,48 @@ suite('postgres repositories', () => {
     await expect(repos.workUnits.touch('missing')).resolves.toBeUndefined();
   });
 
+  it('markIdleWarned stamps idleWarnedAt and nothing else (M18)', async () => {
+    const repos = createPostgresRepositories(pool);
+    const conv = await repos.conversations.create({
+      platform: 'slack',
+      externalChannelId: 'C-warned',
+      userId: 'u1',
+    });
+    const wu = await repos.workUnits.create({ conversationId: conv.id });
+    expect(wu.idleWarnedAt).toBeUndefined(); // nullable column: unwarned rows read as absent
+
+    await repos.workUnits.markIdleWarned(wu.id);
+    const warned = await repos.workUnits.get(wu.id);
+    expect(warned?.idleWarnedAt).toBeTruthy();
+    expect(warned?.updatedAt).toBe(wu.updatedAt);
+    expect(warned?.lastActivityAt).toBeUndefined();
+    // Missing ids are a no-op, matching the in-memory contract.
+    await expect(repos.workUnits.markIdleWarned('missing')).resolves.toBeUndefined();
+  });
+
+  it('releaseEnv nulls envId + agentSessionId and nothing else (M18)', async () => {
+    const repos = createPostgresRepositories(pool);
+    const conv = await repos.conversations.create({
+      platform: 'slack',
+      externalChannelId: 'C-release',
+      userId: 'u1',
+    });
+    const wu = await repos.workUnits.create({
+      conversationId: conv.id,
+      envId: 'env_9',
+      agentSessionId: 'as_9',
+    });
+
+    await repos.workUnits.releaseEnv(wu.id);
+    const after = await repos.workUnits.get(wu.id);
+    expect(after?.envId).toBeUndefined();
+    expect(after?.agentSessionId).toBeUndefined();
+    expect(after?.state).toBe(wu.state);
+    expect(after?.updatedAt).toBe(wu.updatedAt);
+    // Missing ids are a no-op, matching the in-memory contract.
+    await expect(repos.workUnits.releaseEnv('missing')).resolves.toBeUndefined();
+  });
+
   it('rejects a genuinely illegal transition', async () => {
     const repos = createPostgresRepositories(pool);
     const conv = await repos.conversations.create({

@@ -30,11 +30,16 @@ import {
 } from '@devspace/contracts';
 import type { EventRecord, Repositories, WorkUnitRepo } from '@devspace/db';
 import { IllegalTransitionError } from '@devspace/db';
-import type { SandboxCore } from '@devspace/sandbox-core';
+import { SandboxError, type SandboxCore } from '@devspace/sandbox-core';
 import type { AgentRunner } from '@devspace/agent-runner';
 import { agentRuntimeMount } from '@devspace/agent-runner';
 import { classifyAction, WorkUnitMachine } from './stateMachine.js';
-import { IDLE_REAP_STATES, TERMINAL_REAP_STATES, type ReapPolicy } from './reaper.js';
+import {
+  approxDuration,
+  IDLE_REAP_STATES,
+  TERMINAL_REAP_STATES,
+  type ReapPolicy,
+} from './reaper.js';
 import { SecretRegistry } from './secrets.js';
 import type { SecretStore } from './secrets.js';
 import { GitWrapper, prStateToEvent, type GitHubRestClient, type HostGitExec } from './git.js';
@@ -796,55 +801,150 @@ export class Orchestrator {
    * counts as life and pre-M17 rows degrade to updatedAt. Per-unit failures
    * are counted and never stop the sweep; teardown's idempotency makes a
    * double-run (an elected sibling resuming past its lease TTL) harmless.
+   *
+   * With `idleWarnMs` set (M18), the idle phase warns before it reaps and no
+   * idle reap ever happens unwarned: the reap fires only once a warning
+   * posted after the tenant's last sign of life has stood for the full
+   * window — a unit discovered already past the TTL (fresh election, knob
+   * just tightened) is warned first and reaped `idleWarnMs` later, never on
+   * the spot (m18-plan Decision 1). A warning is stale iff it predates the
+   * idle clock's last-alive instant, so tenant activity invalidates it
+   * without anything ever clearing the column (Decision 2).
+   *
+   * With `prOpenEnvTtlMs` set (M18), PR_OPEN units idle past the TTL lose
+   * their ENVIRONMENT only — the partial-destroy path the M17 exemption
+   * priced (m18-plan Decisions 4–6): destroy tolerating only NOT_FOUND
+   * (`envId` is the control plane's sole pointer to the container — a
+   * swallowed transient failure would leak it with no retry), then clear
+   * `envId` + `agentSessionId`, audit `env.released`, and post one notice
+   * AFTER the fact. The unit keeps its state, secrets, and PR fields, so
+   * the reconciler, webhook, merge/close announcement, and terminal grace
+   * all proceed unchanged.
    */
   async reapExpired(
-    policy: Pick<ReapPolicy, 'idleTtlMs' | 'terminalGraceMs'>,
+    policy: Pick<ReapPolicy, 'idleTtlMs' | 'idleWarnMs' | 'terminalGraceMs' | 'prOpenEnvTtlMs'>,
     nowMs: number = Date.now(),
-  ): Promise<{ reaped: number; failed: number }> {
+  ): Promise<{ reaped: number; warned: number; released: number; failed: number }> {
     let reaped = 0;
+    let warned = 0;
+    let released = 0;
     let failed = 0;
 
-    const sweep = async (
-      states: readonly WorkUnit['state'][],
-      expiryMs: number,
-      reason: 'idle' | 'expired',
-    ): Promise<void> => {
-      for (const state of states) {
+    // The idle clock (M17): a fresh transition counts as life; pre-M17 rows
+    // (null lastActivityAt) degrade to updatedAt.
+    const lastAliveMs = (wu: WorkUnit): number =>
+      Math.max(Date.parse(wu.updatedAt), wu.lastActivityAt ? Date.parse(wu.lastActivityAt) : 0);
+
+    const reapIdle = async (wu: WorkUnit): Promise<void> => {
+      // Announce BEFORE the env dies — through the render path that never
+      // throws, so a dead gateway cannot block reclamation.
+      await this.emit(
+        statusCommand(
+          wu.conversationId,
+          'TORN_DOWN',
+          'Session reclaimed after inactivity — start a new conversation to continue.',
+          this.registryFor(wu.conversationId),
+        ),
+      );
+      await this.teardown(wu.conversationId, 'idle');
+    };
+
+    if (policy.idleTtlMs !== undefined) {
+      const ttl = policy.idleTtlMs;
+      const warnMs = policy.idleWarnMs;
+      for (const state of IDLE_REAP_STATES) {
         for (const wu of await this.workUnits.listByState(state)) {
-          const lastAlive = Math.max(
-            Date.parse(wu.updatedAt),
-            wu.lastActivityAt ? Date.parse(wu.lastActivityAt) : 0,
-          );
-          if (nowMs - lastAlive < expiryMs) continue;
+          const alive = lastAliveMs(wu);
+          const idleMs = nowMs - alive;
           try {
-            if (reason === 'idle') {
-              // Announce BEFORE the env dies — through the render path that
-              // never throws, so a dead gateway cannot block reclamation.
+            if (warnMs === undefined) {
+              if (idleMs < ttl) continue;
+              await reapIdle(wu);
+              reaped += 1;
+              continue;
+            }
+            const warnedAtMs = wu.idleWarnedAt ? Date.parse(wu.idleWarnedAt) : undefined;
+            const warnedThisPeriod = warnedAtMs !== undefined && warnedAtMs > alive;
+            if (idleMs >= ttl && warnedThisPeriod && nowMs - warnedAtMs >= warnMs) {
+              await reapIdle(wu);
+              reaped += 1;
+            } else if (idleMs >= ttl - warnMs && !warnedThisPeriod) {
+              // Post first, mark second (m18-plan Decision 3): a failed post
+              // retries next sweep unmarked; a failed mark re-warns once.
               await this.emit(
-                statusCommand(
+                messageCommand(
                   wu.conversationId,
-                  'TORN_DOWN',
-                  'Session reclaimed after inactivity — start a new conversation to continue.',
+                  `This session has been idle and will be reclaimed in about ` +
+                    `${approxDuration(warnMs)} — send a message to keep it.`,
                   this.registryFor(wu.conversationId),
                 ),
               );
+              await this.workUnits.markIdleWarned(wu.id);
+              warned += 1;
             }
-            await this.teardown(wu.conversationId, reason);
-            reaped += 1;
           } catch {
             failed += 1; // one bad unit never stops the sweep
           }
         }
       }
-    };
+    }
 
-    if (policy.idleTtlMs !== undefined) {
-      await sweep(IDLE_REAP_STATES, policy.idleTtlMs, 'idle');
+    if (policy.prOpenEnvTtlMs !== undefined) {
+      const ttl = policy.prOpenEnvTtlMs;
+      for (const wu of await this.workUnits.listByState('PR_OPEN')) {
+        if (!wu.envId) continue; // already released (or never provisioned)
+        if (nowMs - lastAliveMs(wu) < ttl) continue;
+        try {
+          // Destroy strictly, tolerating only "already gone" (m18-plan
+          // Decision 4): unlike teardown's best-effort swallow, a released
+          // unit lives on and its envId is the only pointer the control
+          // plane holds — clearing it past a swallowed transient failure
+          // would leak the container with no retry.
+          try {
+            await this.deps.sandbox.destroyEnvironment(wu.envId);
+          } catch (err) {
+            if (!(err instanceof SandboxError && err.code === 'NOT_FOUND')) throw err;
+          }
+          await this.workUnits.releaseEnv(wu.id);
+          const conv = await this.deps.repos.conversations.get(wu.conversationId);
+          await this.audit('env.released', {
+            userId: conv?.userId,
+            conversationId: wu.conversationId,
+            workUnitId: wu.id,
+            detail: { envId: wu.envId, reason: 'idle' },
+          });
+          // The notice states an accomplished fact, AFTER the release — a
+          // destroy retried next sweep must not re-announce.
+          await this.emit(
+            messageCommand(
+              wu.conversationId,
+              'Environment released while the PR is under review — merge/close updates ' +
+                'continue; start a new conversation for further changes.',
+              this.registryFor(wu.conversationId),
+            ),
+          );
+          released += 1;
+        } catch {
+          failed += 1; // envId intact — the next sweep retries the destroy
+        }
+      }
     }
+
     if (policy.terminalGraceMs !== undefined) {
-      await sweep(TERMINAL_REAP_STATES, policy.terminalGraceMs, 'expired');
+      const grace = policy.terminalGraceMs;
+      for (const state of TERMINAL_REAP_STATES) {
+        for (const wu of await this.workUnits.listByState(state)) {
+          if (nowMs - lastAliveMs(wu) < grace) continue;
+          try {
+            await this.teardown(wu.conversationId, 'expired');
+            reaped += 1;
+          } catch {
+            failed += 1;
+          }
+        }
+      }
     }
-    return { reaped, failed };
+    return { reaped, warned, released, failed };
   }
 
   /* ---------------------------------------------------------------------- */

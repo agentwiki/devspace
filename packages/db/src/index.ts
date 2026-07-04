@@ -77,6 +77,20 @@ export interface WorkUnitRepo {
    * lifecycle reaper measures idleness against max(lastActivityAt, updatedAt).
    */
   touch(id: string): Promise<void>;
+  /**
+   * Record an idle-reap warning (M18): bump `idleWarnedAt` and nothing else.
+   * Never cleared by anything — a warning is stale iff it predates
+   * max(lastActivityAt, updatedAt). A missing id is a no-op.
+   */
+  markIdleWarned(id: string): Promise<void>;
+  /**
+   * Release a unit's environment (M18): null `envId` and `agentSessionId`,
+   * touch nothing else — the partial-destroy bookkeeping for a PR_OPEN unit
+   * whose container is reclaimed while the unit lives on. Not a transition
+   * (state must not move) and not reachable through `transition`'s patch
+   * (which skips undefined). A missing id is a no-op.
+   */
+  releaseEnv(id: string): Promise<void>;
 }
 
 export interface SecretRepo {
@@ -244,6 +258,14 @@ export function createInMemoryRepositories(
       async touch(wid) {
         const wu = workUnits.get(wid);
         if (wu) workUnits.set(wid, { ...wu, lastActivityAt: now() });
+      },
+      async markIdleWarned(wid) {
+        const wu = workUnits.get(wid);
+        if (wu) workUnits.set(wid, { ...wu, idleWarnedAt: now() });
+      },
+      async releaseEnv(wid) {
+        const wu = workUnits.get(wid);
+        if (wu) workUnits.set(wid, { ...wu, envId: undefined, agentSessionId: undefined });
       },
     },
     secrets: {

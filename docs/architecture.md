@@ -137,6 +137,18 @@ carries the reason (`requested|idle|expired`); conversation, work-unit, and
 audit rows survive reclamation. Both knobs unset = no reaper
 (docs/m17-plan.md).
 
+Since M18 reclamation has manners and the PR_OPEN exemption has a price
+tag: `DEVSPACE_IDLE_WARN_MS` makes the reaper warn a full window before an
+idle reap — `idle_warned_at` is written once per idle period (never
+cleared; staleness is a comparison against the idle clock) and no idle
+reap ever happens unwarned, even for a unit discovered already past the
+TTL. `DEVSPACE_PR_OPEN_ENV_TTL_MS` releases the ENVIRONMENT of a PR_OPEN
+unit idle in review — destroy tolerating only NOT_FOUND (any other failure
+keeps `envId` and retries), then `releaseEnv` nulls `envId` +
+`agentSessionId`, audited as `env.released` and announced after the fact —
+while the unit, its secrets, and the merge/close flow survive intact
+(docs/m18-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

@@ -24,3 +24,4 @@ export * from './remote-protocol.js';
 export * from './remote-server.js';
 export * from './remote-client.js';
 export * from './multihost.js';
+export * from './warm-pool.js';

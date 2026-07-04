@@ -5,6 +5,7 @@ Release-blocking hardening for real multi-tenant use: **M5.**
 Expansion I (split, preview proxy, chat completion, 2nd agent): **M6.**
 Expansion II (preview WS upgrade, Discord UI parity): **M7.**
 Expansion III (exec over the wire, multi-host placement): **M8.**
+Expansion IV (fleet capacity truth, warm pools): **M9.**
 
 ## M0 — Scaffolding (done)
 
@@ -311,18 +312,56 @@ Landed:
   where the daemons live; unset, the zero-config in-process boot is
   byte-for-byte unchanged.
 
-## M9+ — Expansion IV
+## M9 — Expansion IV: fleet capacity truth + warm pools (done)
 
-NATS bus (now meaningful when the _orchestrator_ scales out — M8's fleet is
-sandbox hosts; LISTEN/NOTIFY already survives that split; `EventBus` is the
-seam); per-service identity on the internal API (mTLS — deployment-layer,
-replacing the shared token); warm pools / cold-start work (top-risk #4 —
-placement now exists to hang it on); resource-aware scheduling + host-side
-capacity enforcement (capacity counts envs today, deliberately, and an
-orchestrator restart zeroes counted load until lazy re-adoption — see
-docs/m8-plan.md risks); Discord Forum-channel session dashboard
-(presentation upgrade over `/sessions`). UI surface remains chat only — no
-self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
+The two M8+ seeds that were ready once placement existed to hang them on:
+the capacity gaps m8-plan documented as risks, and warm pools (top-risk #4).
+Everything hides behind the `SandboxCore` seam — the orchestrator FSM,
+agent-runner, and both chat adapters are untouched. Design of record:
+docs/m9-plan.md.
+
+Landed:
+
+- **Capacity truth** — the env table becomes readable
+  (`SandboxCore.listEnvironments()`, `GET /environments`);
+  `SANDBOX_MAX_ENVS` gives each sandbox host a live-env cap of its own (the
+  backstop the M8 client-side count explicitly lacked); and
+  `MultiHostSandboxCore.adoptFleet()` runs a boot-time census — an
+  orchestrator restart re-learns live envs BEFORE the first placement
+  instead of zeroing counted load until lazy re-adoption (the m8-plan risk,
+  closed at both ends). A down host warns and is covered by cold-miss
+  rediscovery; it never blocks boot.
+- **Late-bound secrets** — `applySecrets(envId, secrets)` attaches a
+  tenant's secrets to a LIVE env, preserving the M1 discipline (env-target
+  values merge into per-exec injection, file-target land 0600, paths
+  validated before anything applies). Contract shape
+  (`ApplySecretsRequest`); the remote route is token-gated like exec —
+  secret plaintext never rides the open tokenless surface.
+- **Warm pools** — `WarmPoolSandboxCore` wraps ANY inner core (local,
+  remote, or fleet — composition, not a mode). Pools pre-provision in the
+  background (single-flight per pool, failures log and retry on the next
+  claim); a `createEnvironment` that exactly matches a pool template
+  (canonical key, secrets stripped) claims a warm env: verify →
+  applySecrets → hand out, anything less destroys rather than handing out
+  (or re-pooling) a half-secreted env. Misses always fall through cold, so
+  template drift can only ever mean a cold create — never a wrong-shaped
+  env. `SANDBOX_WARM_POOLS=repoUrl[#ref]=size,…`; `close()` destroys
+  still-unclaimed warm envs.
+
+## M10+ — Expansion V
+
+NATS bus (meaningful when the _orchestrator_ scales out — the sandbox fleet
+already did; LISTEN/NOTIFY survives that split; `EventBus` is the seam);
+per-service identity on the internal API (mTLS — deployment-layer,
+replacing the shared token); resource-aware placement (capacity still
+counts envs, deliberately — cpu/mem-aware scheduling needs host-side
+resource accounting; M9 made the count TRUE, M10+ makes it weighted); pool
+identity + claim-time refresh (a warm env is not labeled pool-owned on its
+host, so a crashed orchestrator leaks unclaimed warm envs until ops
+reclaims them, and its clone is as old as fill time — see docs/m9-plan.md
+risks); Discord Forum-channel session dashboard (presentation upgrade over
+`/sessions`). UI surface remains chat only — no self-hosted web UI (see
+docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 
@@ -331,7 +370,9 @@ self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
    loopback-proven; gRPC turned out unnecessary).
 2. container escape → gVisor from M5; never ship plain-Docker multi-tenant.
 3. PAT leakage → short-lived OAuth; read-only in-container; push/PR via wrapper; redact output.
-4. cold-start latency → prebuilt images + warm pool + cached agent-runtime volume (<15s warm).
+4. cold-start latency → prebuilt images + warm pool + cached agent-runtime volume (<15s warm);
+   answered in M9 (claim-from-pool provisioning behind the SandboxCore seam — a matching
+   session claims a pre-provisioned env in milliseconds).
 5. runaway agent loops → per-turn budgets; auto-abort.
 6. codex-acp version drift → pin in image; isolate behind AgentBackend.
 7. FSM vs GitHub drift → webhooks as source of truth; gh poll reconciliation.

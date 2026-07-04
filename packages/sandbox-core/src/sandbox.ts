@@ -58,6 +58,10 @@ export interface SandboxCoreDeps {
 export interface SandboxCore {
   createEnvironment(req: CreateEnvironmentRequest): Promise<Environment>;
   getEnvironment(envId: string): Promise<Environment | null>;
+  /** Every environment this core knows (M9 — the census/ops read). */
+  listEnvironments(): Promise<Environment[]>;
+  /** Attach secrets to a LIVE environment (M9 — the warm-claim seam). */
+  applySecrets(envId: string, secrets: SecretSpec[]): Promise<void>;
   destroyEnvironment(envId: string): Promise<void>;
   exec(envId: string, req: ExecRequest): Promise<ExecStream>;
   fsRead(envId: string, path: string): Promise<Uint8Array>;
@@ -72,20 +76,41 @@ export class DevcontainerSandboxCore implements SandboxCore {
   private readonly preview?: PreviewRegistrar;
   private readonly envs = new Map<string, EnvRecord>();
 
+  /** Host-side cap on live envs (M9, m9-plan Decision 3); undefined = uncapped. */
+  private readonly maxEnvs?: number;
+
   constructor(
-    deps?: Partial<SandboxCoreDeps> & { runner?: CommandRunner; hardening?: SandboxHardening },
+    deps?: Partial<SandboxCoreDeps> & {
+      runner?: CommandRunner;
+      hardening?: SandboxHardening;
+      maxEnvs?: number;
+    },
   ) {
     const runner = deps?.runner ?? nodeCommandRunner;
     this.runtime = deps?.runtime ?? new DockerRuntime(runner);
     this.provisioner =
       deps?.provisioner ?? new DevcontainerProvisioner(runner, { hardening: deps?.hardening });
     this.preview = deps?.preview;
+    this.maxEnvs = deps?.maxEnvs;
   }
 
   async createEnvironment(input: CreateEnvironmentRequest): Promise<Environment> {
     // Re-validate to apply schema defaults (resources/mounts/secrets) even if a
     // caller hands us a partially-populated object.
     const req = CreateEnvironmentRequestSchema.parse(input);
+    // The host-side backstop for a mis-counting (freshly restarted) placement
+    // layer: live envs, not records — stopped/failed history never blocks.
+    if (this.maxEnvs !== undefined) {
+      const live = [...this.envs.values()].filter(
+        (r) => r.env.status === 'provisioning' || r.env.status === 'ready',
+      ).length;
+      if (live >= this.maxEnvs) {
+        throw new SandboxError(
+          'PROVISION_FAILED',
+          `host at capacity (${live}/${this.maxEnvs} live environments)`,
+        );
+      }
+    }
     const envId = `env_${randomUUID()}`;
     const record: EnvRecord = {
       env: { envId, status: 'provisioning', ports: [], createdAt: new Date().toISOString() },
@@ -113,6 +138,30 @@ export class DevcontainerSandboxCore implements SandboxCore {
 
   getEnvironment(envId: string): Promise<Environment | null> {
     return Promise.resolve(this.envs.get(envId)?.env ?? null);
+  }
+
+  listEnvironments(): Promise<Environment[]> {
+    return Promise.resolve([...this.envs.values()].map((r) => r.env));
+  }
+
+  /**
+   * Late-bound secrets (M9, m9-plan Decision 4), preserving the M1 discipline:
+   * env-target values merge into the per-exec injection map (never baked into
+   * the container config), file-target values land 0600 via the exec-based fs
+   * path. File paths are validated BEFORE anything applies, so a bad spec
+   * cannot leave the env half-secreted.
+   */
+  async applySecrets(envId: string, secrets: SecretSpec[]): Promise<void> {
+    const record = this.requireReady(envId);
+    for (const secret of secrets) {
+      if (secret.target === 'file' && !secret.path) {
+        throw new SandboxError('EXEC_FAILED', `file secret ${secret.name} is missing a path`);
+      }
+    }
+    for (const secret of secrets) {
+      if (secret.target === 'env') record.secretEnv[secret.name] = secret.value;
+    }
+    await this.writeFileSecrets(envId, secrets);
   }
 
   async destroyEnvironment(envId: string): Promise<void> {
@@ -245,6 +294,20 @@ export class DevcontainerSandboxCore implements SandboxCore {
       await this.fsWrite(envId, secret.path, new TextEncoder().encode(secret.value), 0o600);
     }
   }
+}
+
+/**
+ * Host-side env cap from the environment (`SANDBOX_MAX_ENVS`); undefined when
+ * unset. Config errors throw — a typo'd cap must fail at boot, not silently
+ * run uncapped (the hardening fail-fast precedent).
+ */
+export function maxEnvsFromEnv(env: Record<string, string | undefined>): number | undefined {
+  const raw = env.SANDBOX_MAX_ENVS?.trim();
+  if (!raw) return undefined;
+  if (!/^\d+$/.test(raw) || Number(raw) < 1) {
+    throw new Error(`SANDBOX_MAX_ENVS must be a positive integer, got "${raw}"`);
+  }
+  return Number(raw);
 }
 
 /** Collect env-target secrets into a plain map for exec injection. */

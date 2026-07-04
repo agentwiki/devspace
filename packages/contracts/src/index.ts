@@ -151,6 +151,18 @@ export const ExecClientFrameSchema = z.discriminatedUnion('kind', [
 ]);
 export type ExecClientFrame = z.infer<typeof ExecClientFrameSchema>;
 
+/**
+ * Late-bound secret injection (M9): attach secrets to a LIVE environment —
+ * a warm-pooled env is provisioned before its tenant is known, so the claim
+ * applies the tenant's secrets after the fact. Crosses the service boundary
+ * (`POST /environments/:id/secrets`), hence contract; the route is
+ * token-gated like exec — secret plaintext never rides unauthenticated.
+ */
+export const ApplySecretsRequestSchema = z.object({
+  secrets: z.array(SecretSpecSchema).min(1),
+});
+export type ApplySecretsRequest = z.infer<typeof ApplySecretsRequestSchema>;
+
 export const FsReadRequestSchema = z.object({ path: z.string() });
 export const FsWriteRequestSchema = z.object({
   path: z.string(),

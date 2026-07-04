@@ -20,6 +20,7 @@ import {
   createSandboxRequestHandler,
   createSandboxUpgradeHandler,
   hardeningFromEnv,
+  maxEnvsFromEnv,
   nodeCommandRunner,
   previewProxyFromEnv,
 } from '@devspace/sandbox-core';
@@ -65,7 +66,12 @@ if (previewOptions) {
   console.log(`[${SERVICE}] preview proxy on :${started.port} (${started.baseUrl})`);
 }
 
-const core = new DevcontainerSandboxCore({ hardening, preview });
+// Host-side capacity backstop (M9): SANDBOX_MAX_ENVS caps live envs at THIS
+// host regardless of what the placement layer believes (m9-plan Decision 3).
+const maxEnvs = maxEnvsFromEnv(process.env);
+if (maxEnvs !== undefined) console.log(`[${SERVICE}] capacity cap: ${maxEnvs} live env(s)`);
+
+const core = new DevcontainerSandboxCore({ hardening, preview, maxEnvs });
 
 const server = createServer(createSandboxRequestHandler(core, { token: TOKEN, service: SERVICE }));
 server.on(

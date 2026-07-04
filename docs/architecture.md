@@ -42,6 +42,16 @@ behind the unchanged `SandboxCore` interface — fleet mode is a config flip
 (`SANDBOX_HOSTS`), and unset, everything stays in-process as in M4
 (docs/m8-plan.md).
 
+Since M9 that capacity is true rather than assumed: each host enforces its
+own live-env cap (`SANDBOX_MAX_ENVS`), and a boot-time census
+(`adoptFleet()` over the new `listEnvironments()` read) re-learns live envs
+before the first placement. On top of the same seam, `WarmPoolSandboxCore`
+pre-provisions configured pools (`SANDBOX_WARM_POOLS`) and serves an
+exactly-matching create by claiming a warm env and late-binding the
+tenant's secrets (`applySecrets` — token-gated on the wire like exec), so
+the demo-critical cold-start path collapses from minutes to milliseconds
+(docs/m9-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

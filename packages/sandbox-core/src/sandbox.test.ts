@@ -4,7 +4,12 @@ import { toBase64 } from './exec.js';
 import type { ExecStream } from './exec.js';
 import type { ContainerRuntime } from './runtime.js';
 import type { Provisioner, ProvisionResult } from './provision.js';
-import { DevcontainerSandboxCore, SandboxError, parseFindOutput } from './sandbox.js';
+import {
+  DevcontainerSandboxCore,
+  SandboxError,
+  maxEnvsFromEnv,
+  parseFindOutput,
+} from './sandbox.js';
 
 /**
  * An in-memory fake container: `exec` runs a tiny hand-written interpreter over
@@ -107,7 +112,11 @@ function scriptStream(
   };
 }
 
-function makeCore(container = new FakeContainer(), provisionResult: Partial<ProvisionResult> = {}) {
+function makeCore(
+  container = new FakeContainer(),
+  provisionResult: Partial<ProvisionResult> = {},
+  opts: { maxEnvs?: number } = {},
+) {
   const destroy = vi.fn(async () => {});
   const removeNetwork = vi.fn(async () => {});
   const containerIp = vi.fn(async () => '172.29.0.2');
@@ -138,7 +147,7 @@ function makeCore(container = new FakeContainer(), provisionResult: Partial<Prov
     })),
   };
   return {
-    core: new DevcontainerSandboxCore({ runtime, provisioner, preview }),
+    core: new DevcontainerSandboxCore({ runtime, provisioner, preview, maxEnvs: opts.maxEnvs }),
     container,
     destroy,
     removeNetwork,
@@ -247,6 +256,95 @@ describe('DevcontainerSandboxCore lifecycle', () => {
     const { core } = makeCore();
     const env = await core.createEnvironment({});
     await expect(core.fsRead(env.envId, '/missing')).rejects.toMatchObject({ code: 'EXEC_FAILED' });
+  });
+});
+
+describe('applySecrets (M9 late-bound secrets)', () => {
+  it('merges env-target secrets into the per-exec injection map', async () => {
+    const { core, container } = makeCore();
+    const env = await core.createEnvironment({});
+    await core.applySecrets(env.envId, [{ name: 'GH_TOKEN', value: 'late-abc', target: 'env' }]);
+    const stream = await core.exec(env.envId, { cmd: ['cat', '--', '/x'], tty: false });
+    for await (const _ of stream.frames) void _;
+    expect(container.lastEnv).toMatchObject({ GH_TOKEN: 'late-abc' });
+  });
+
+  it('writes file-target secrets 0600', async () => {
+    const { core, container } = makeCore();
+    const env = await core.createEnvironment({});
+    await core.applySecrets(env.envId, [
+      { name: 'npmrc', value: 'tok=xyz', target: 'file', path: '/root/.npmrc' },
+    ]);
+    expect(container.files.get('/root/.npmrc')?.toString()).toBe('tok=xyz');
+    expect(container.modes.get('/root/.npmrc')).toBe(0o600);
+  });
+
+  it('rejects a pathless file secret before applying ANYTHING', async () => {
+    const { core, container } = makeCore();
+    const env = await core.createEnvironment({});
+    await expect(
+      core.applySecrets(env.envId, [
+        { name: 'OK_ENV', value: 'v', target: 'env' },
+        { name: 'broken', value: 'v', target: 'file' },
+      ]),
+    ).rejects.toMatchObject({ code: 'EXEC_FAILED', message: expect.stringContaining('path') });
+    // The valid env secret was NOT half-applied.
+    const stream = await core.exec(env.envId, { cmd: ['cat', '--', '/x'], tty: false });
+    for await (const _ of stream.frames) void _;
+    expect(container.lastEnv).not.toHaveProperty('OK_ENV');
+  });
+
+  it('refuses on a not-ready env', async () => {
+    const { core } = makeCore();
+    const env = await core.createEnvironment({});
+    await core.destroyEnvironment(env.envId);
+    await expect(
+      core.applySecrets(env.envId, [{ name: 'X', value: 'v', target: 'env' }]),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+});
+
+describe('capacity truth (M9)', () => {
+  it('lists every environment the core knows, live or not', async () => {
+    const { core, provisioner } = makeCore();
+    const a = await core.createEnvironment({});
+    const b = await core.createEnvironment({});
+    await core.destroyEnvironment(b.envId);
+    (provisioner.provision as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'));
+    await core.createEnvironment({}).catch(() => {});
+
+    const listed = await core.listEnvironments();
+    expect(listed).toHaveLength(3);
+    expect(listed.map((e) => e.status).sort()).toEqual(['failed', 'ready', 'stopped']);
+    expect(listed.map((e) => e.envId)).toContain(a.envId);
+  });
+
+  it('refuses createEnvironment at the live-env cap, naming the numbers', async () => {
+    const { core } = makeCore(new FakeContainer(), {}, { maxEnvs: 2 });
+    await core.createEnvironment({});
+    await core.createEnvironment({});
+    await expect(core.createEnvironment({})).rejects.toMatchObject({
+      code: 'PROVISION_FAILED',
+      message: expect.stringContaining('at capacity (2/2'),
+    });
+  });
+
+  it('frees a slot on destroy and ignores dead records', async () => {
+    const { core, provisioner } = makeCore(new FakeContainer(), {}, { maxEnvs: 1 });
+    const env = await core.createEnvironment({});
+    await core.destroyEnvironment(env.envId); // stopped: no longer live
+    (provisioner.provision as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'));
+    await core.createEnvironment({}).catch(() => {}); // failed: never live
+    await expect(core.createEnvironment({})).resolves.toMatchObject({ status: 'ready' });
+  });
+
+  it('maxEnvsFromEnv parses, rejects garbage, and is undefined when unset', () => {
+    expect(maxEnvsFromEnv({})).toBeUndefined();
+    expect(maxEnvsFromEnv({ SANDBOX_MAX_ENVS: ' ' })).toBeUndefined();
+    expect(maxEnvsFromEnv({ SANDBOX_MAX_ENVS: '8' })).toBe(8);
+    for (const raw of ['0', '-1', 'many', '2.5']) {
+      expect(() => maxEnvsFromEnv({ SANDBOX_MAX_ENVS: raw })).toThrow('positive integer');
+    }
   });
 });
 

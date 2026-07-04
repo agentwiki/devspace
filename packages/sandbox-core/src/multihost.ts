@@ -12,6 +12,7 @@ import type {
   Environment,
   ExecRequest,
   FsEntry,
+  SecretSpec,
 } from '@devspace/contracts';
 import type { ExecStream } from './exec.js';
 import { SandboxError } from './sandbox.js';
@@ -66,6 +67,27 @@ export class MultiHostSandboxCore implements SandboxCore {
     return this.routes.get(envId);
   }
 
+  /**
+   * Boot-time fleet census (M9, m9-plan Decisions 1–2): adopt every live env
+   * on every reachable host so a restart never zeroes counted load until lazy
+   * re-adoption. A down host is reported, not fatal — cold-miss rediscovery
+   * still covers whatever it holds once it returns.
+   */
+  async adoptFleet(): Promise<{ adopted: number; failures: { host: string; error: string }[] }> {
+    let adopted = 0;
+    const failures: { host: string; error: string }[] = [];
+    for (const host of this.hosts) {
+      try {
+        for (const env of await host.core.listEnvironments()) {
+          if (this.adopt(env, host.name)) adopted++;
+        }
+      } catch (err) {
+        failures.push({ host: host.name, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    return { adopted, failures };
+  }
+
   async createEnvironment(req: CreateEnvironmentRequest): Promise<Environment> {
     const host = this.place();
     this.pending.set(host.name, (this.pending.get(host.name) ?? 0) + 1);
@@ -97,6 +119,22 @@ export class MultiHostSandboxCore implements SandboxCore {
     return host.core.getEnvironment(envId);
   }
 
+  /**
+   * The whole fleet's env table. Strict on purpose: a down host surfaces as
+   * an error, never as an empty list — "everything is fine" must not be a
+   * lie. Live envs are adopted into the routing table as they are read.
+   */
+  async listEnvironments(): Promise<Environment[]> {
+    const all: Environment[] = [];
+    for (const host of this.hosts) {
+      for (const env of await host.core.listEnvironments()) {
+        this.adopt(env, host.name);
+        all.push(env);
+      }
+    }
+    return all;
+  }
+
   async destroyEnvironment(envId: string): Promise<void> {
     const host = await this.requireHost(envId);
     try {
@@ -107,6 +145,10 @@ export class MultiHostSandboxCore implements SandboxCore {
       if (err instanceof SandboxError && err.code === 'NOT_FOUND') this.routes.delete(envId);
       throw err;
     }
+  }
+
+  async applySecrets(envId: string, secrets: SecretSpec[]): Promise<void> {
+    return (await this.requireHost(envId)).core.applySecrets(envId, secrets);
   }
 
   async exec(envId: string, req: ExecRequest): Promise<ExecStream> {
@@ -133,6 +175,19 @@ export class MultiHostSandboxCore implements SandboxCore {
   }
 
   /* ------------------------------------------------------------------------ */
+
+  /**
+   * Route a listed env to its host if it should occupy a placement slot.
+   * Only live envs count — a stopped/failed record must not eat capacity —
+   * and an existing route wins (ids are host-generated, so a conflict cannot
+   * arise from this codebase; first-hit-sticky keeps behavior deterministic).
+   */
+  private adopt(env: Environment, hostName: string): boolean {
+    if (env.status !== 'provisioning' && env.status !== 'ready') return false;
+    if (this.routes.has(env.envId)) return false;
+    this.routes.set(env.envId, hostName);
+    return true;
+  }
 
   /** Least-loaded placement over non-draining hosts with free capacity. */
   private place(): SandboxHost {

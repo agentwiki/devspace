@@ -46,6 +46,12 @@ function fakeHost(name: string): SandboxCore & {
     async getEnvironment(envId) {
       return envs.get(envId) ?? null;
     },
+    async listEnvironments() {
+      return [...envs.values()];
+    },
+    async applySecrets(envId, secrets) {
+      calls.push(`applySecrets:${envId}:${secrets.map((s) => s.name).join('+')}`);
+    },
     async destroyEnvironment(envId) {
       if (!envs.delete(envId)) throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
     },
@@ -200,9 +206,14 @@ describe('MultiHostSandboxCore routing', () => {
     await multi.fsWrite(envA, '/y', new Uint8Array());
     await multi.fsList(envB, '/z');
     await multi.forwardPort(envA, 3000);
+    await multi.applySecrets(envA, [{ name: 'GH', value: 'v', target: 'env' }]);
 
     expect(b.calls).toEqual([`fsRead:${envB}:/x`, `fsList:${envB}:/z`]);
-    expect(a.calls).toEqual([`fsWrite:${envA}:/y`, `forwardPort:${envA}:3000`]);
+    expect(a.calls).toEqual([
+      `fsWrite:${envA}:/y`,
+      `forwardPort:${envA}:3000`,
+      `applySecrets:${envA}:GH`,
+    ]);
     expect(multi.hostOf(envA)).toBe('a');
     expect(multi.hostOf(envB)).toBe('b');
   });
@@ -294,6 +305,91 @@ describe('MultiHostSandboxCore routing', () => {
     expect(multi.hostOf(env)).toBeUndefined();
     // The slot is free again.
     await multi.createEnvironment(CREATE);
+  });
+});
+
+describe('MultiHostSandboxCore census (M9)', () => {
+  it('adopts every live env across the fleet at once', async () => {
+    const a = fakeHost('a');
+    const b = fakeHost('b');
+    const onA = (await a.createEnvironment(CREATE)).envId;
+    const onB1 = (await b.createEnvironment(CREATE)).envId;
+    const onB2 = (await b.createEnvironment(CREATE)).envId;
+
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: a, capacity: 2 },
+      { name: 'b', core: b, capacity: 2 },
+    ]);
+    const census = await multi.adoptFleet();
+    expect(census).toEqual({ adopted: 3, failures: [] });
+    expect(multi.hostOf(onA)).toBe('a');
+    expect(multi.hostOf(onB1)).toBe('b');
+    expect(multi.hostOf(onB2)).toBe('b');
+
+    // Adopted load steers placement immediately: a has the only free slots.
+    expect((await multi.createEnvironment(CREATE)).envId).toContain('_a_');
+    const err = await multi.createEnvironment(CREATE).catch((e: unknown) => e);
+    expect((err as SandboxError).code).toBe('PROVISION_FAILED');
+  });
+
+  it('skips dead records and is idempotent', async () => {
+    const a = fakeHost('a');
+    const live = (await a.createEnvironment(CREATE)).envId;
+    const dead = (await a.createEnvironment(CREATE)).envId;
+    a.envs.set(dead, { ...a.envs.get(dead)!, status: 'stopped' });
+
+    const multi = new MultiHostSandboxCore([{ name: 'a', core: a, capacity: 8 }]);
+    expect(await multi.adoptFleet()).toEqual({ adopted: 1, failures: [] });
+    expect(multi.hostOf(live)).toBe('a');
+    expect(multi.hostOf(dead)).toBeUndefined();
+    // Re-running adopts nothing new.
+    expect((await multi.adoptFleet()).adopted).toBe(0);
+  });
+
+  it('reports an unreachable host without failing the census', async () => {
+    const down: SandboxCore = {
+      ...fakeHost('down'),
+      async listEnvironments() {
+        throw new SandboxError('EXEC_FAILED', 'connection refused');
+      },
+    };
+    const b = fakeHost('b');
+    const survivor = (await b.createEnvironment(CREATE)).envId;
+    const multi = new MultiHostSandboxCore([
+      { name: 'down', core: down, capacity: 1 },
+      { name: 'b', core: b, capacity: 1 },
+    ]);
+    const census = await multi.adoptFleet();
+    expect(census.adopted).toBe(1);
+    expect(census.failures).toEqual([{ host: 'down', error: 'connection refused' }]);
+    expect(multi.hostOf(survivor)).toBe('b');
+  });
+
+  it('listEnvironments aggregates the fleet strictly and adopts as it reads', async () => {
+    const a = fakeHost('a');
+    const b = fakeHost('b');
+    const onA = (await a.createEnvironment(CREATE)).envId;
+    await b.createEnvironment(CREATE);
+    const multi = new MultiHostSandboxCore([
+      { name: 'a', core: a, capacity: 8 },
+      { name: 'b', core: b, capacity: 8 },
+    ]);
+    const all = await multi.listEnvironments();
+    expect(all.map((e) => e.envId)).toHaveLength(2);
+    expect(multi.hostOf(onA)).toBe('a');
+
+    // Strict: a down host is an error, never an empty answer.
+    const down: SandboxCore = {
+      ...fakeHost('down'),
+      async listEnvironments() {
+        throw new SandboxError('EXEC_FAILED', 'connection refused');
+      },
+    };
+    const strict = new MultiHostSandboxCore([
+      { name: 'a', core: a, capacity: 8 },
+      { name: 'down', core: down, capacity: 8 },
+    ]);
+    await expect(strict.listEnvironments()).rejects.toMatchObject({ code: 'EXEC_FAILED' });
   });
 });
 

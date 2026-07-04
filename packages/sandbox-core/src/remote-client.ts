@@ -25,6 +25,7 @@ import {
   type ExecFrame,
   type ExecRequest,
   type FsEntry,
+  type SecretSpec,
 } from '@devspace/contracts';
 import { ExecFrameSchema } from '@devspace/contracts';
 import { encodeStdin, fromBase64, toBase64 } from './exec.js';
@@ -78,9 +79,19 @@ export class RemoteSandboxCore implements SandboxCore {
     return EnvironmentSchema.parse(JSON.parse(res.text));
   }
 
+  async listEnvironments(): Promise<Environment[]> {
+    const res = await this.request('GET', '/environments');
+    if (res.status !== 200) throw this.toError(res, 'EXEC_FAILED');
+    return (JSON.parse(res.text) as unknown[]).map((e) => EnvironmentSchema.parse(e));
+  }
+
   async destroyEnvironment(envId: string): Promise<void> {
     const res = await this.request('DELETE', `/environments/${encodeURIComponent(envId)}`);
     if (res.status !== 204) throw this.toError(res, 'EXEC_FAILED');
+  }
+
+  async applySecrets(envId: string, secrets: SecretSpec[]): Promise<void> {
+    await this.json(`/environments/${encodeURIComponent(envId)}/secrets`, { secrets });
   }
 
   /** Full-duplex exec over the devspace-exec upgrade. */

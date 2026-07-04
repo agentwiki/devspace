@@ -166,7 +166,9 @@ export async function bootOrchestrator(
       console.log(`[orchestrator] fleet census adopted ${census.adopted} live env(s)`);
     }
     for (const failure of census.failures) {
-      console.error(`[orchestrator] fleet census: host ${failure.host} unreachable: ${failure.error}`);
+      console.error(
+        `[orchestrator] fleet census: host ${failure.host} unreachable: ${failure.error}`,
+      );
     }
     sandbox = fleet;
   } else {

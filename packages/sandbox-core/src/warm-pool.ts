@@ -8,7 +8,13 @@
  * to the cold path unchanged, so a stale template can only ever mean "pool
  * never hits", never "agent runs in the wrong container" (Decision 5).
  */
-import type { CreateEnvironmentRequest, Environment, ExecRequest, FsEntry, SecretSpec } from '@devspace/contracts';
+import type {
+  CreateEnvironmentRequest,
+  Environment,
+  ExecRequest,
+  FsEntry,
+  SecretSpec,
+} from '@devspace/contracts';
 import { CreateEnvironmentRequestSchema } from '@devspace/contracts';
 import type { ExecStream } from './exec.js';
 import type { SandboxCore } from './sandbox.js';
@@ -145,8 +151,10 @@ export class WarmPoolSandboxCore implements SandboxCore {
 
   /** Warm envs currently claimable for a template (introspection/tests). */
   warmCount(template: CreateEnvironmentRequest): number {
-    return this.pools.get(canonicalRequestKey(CreateEnvironmentRequestSchema.parse(template)))
-      ?.ready.length ?? 0;
+    return (
+      this.pools.get(canonicalRequestKey(CreateEnvironmentRequestSchema.parse(template)))?.ready
+        .length ?? 0
+    );
   }
 
   /* ------------------------------------------------------------------------ */
@@ -269,7 +277,9 @@ export function parseWarmPools(raw: string): WarmPoolConfig[] {
     }
     // http(s) only — the same shape RepoChoice/CreateEnvironmentRequest take.
     if (!/^https?:\/\//.test(repoUrl)) {
-      throw new Error(`SANDBOX_WARM_POOLS entry "${entry}" needs an http(s) repo url, got "${repoUrl}"`);
+      throw new Error(
+        `SANDBOX_WARM_POOLS entry "${entry}" needs an http(s) repo url, got "${repoUrl}"`,
+      );
     }
     pools.push({ repoUrl, ref, size: Number(size) });
   }

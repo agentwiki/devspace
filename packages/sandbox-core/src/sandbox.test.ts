@@ -4,7 +4,12 @@ import { toBase64 } from './exec.js';
 import type { ExecStream } from './exec.js';
 import type { ContainerRuntime } from './runtime.js';
 import type { Provisioner, ProvisionResult } from './provision.js';
-import { DevcontainerSandboxCore, SandboxError, maxEnvsFromEnv, parseFindOutput } from './sandbox.js';
+import {
+  DevcontainerSandboxCore,
+  SandboxError,
+  maxEnvsFromEnv,
+  parseFindOutput,
+} from './sandbox.js';
 
 /**
  * An in-memory fake container: `exec` runs a tiny hand-written interpreter over

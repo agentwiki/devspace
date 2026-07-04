@@ -272,8 +272,8 @@ describe('parseWarmPools', () => {
   it('warmPoolsFromEnv is undefined without SANDBOX_WARM_POOLS', () => {
     expect(warmPoolsFromEnv({})).toBeUndefined();
     expect(warmPoolsFromEnv({ SANDBOX_WARM_POOLS: ' ' })).toBeUndefined();
-    expect(
-      warmPoolsFromEnv({ SANDBOX_WARM_POOLS: 'https://github.com/a/b.git=1' }),
-    ).toHaveLength(1);
+    expect(warmPoolsFromEnv({ SANDBOX_WARM_POOLS: 'https://github.com/a/b.git=1' })).toHaveLength(
+      1,
+    );
   });
 });

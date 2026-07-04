@@ -188,7 +188,8 @@ export async function bootOrchestrator(
   }
   // Warm pools (M9) compose OVER whatever sandbox this boot built. Templates
   // are built with the same mounts the orchestrator provisions with — claim
-  // matching is exact, so any drift only ever means a cold create.
+  // matching is exact, so any drift only ever means a cold create. fill()
+  // first re-adopts pool-marked envs a crashed predecessor left behind (M10).
   const warmPools = config.warmPools ?? warmPoolsFromEnv(process.env);
   let warm: WarmPoolSandboxCore | undefined;
   if (warmPools?.length) {
@@ -249,7 +250,7 @@ export async function bootOrchestrator(
     },
     async close() {
       // Unclaimed warm envs die with the control plane (clean-shutdown path;
-      // a crash leaks them until ops reclaims — see m9-plan risks).
+      // after a crash the next boot's fill() re-adopts them by pool mark, M10).
       await warm?.stop();
       await bus.stop();
       await preview?.stop();

@@ -143,6 +143,41 @@ describe('WarmPoolSandboxCore', () => {
     expect(inner.secretsApplied).toEqual([]);
   });
 
+  it('stamps every fill with the pool key and hands out the unmarked, refreshed env', async () => {
+    const inner = fakeInner();
+    const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }]);
+    await pool.fill();
+    // The HOST's env table records the warm stock, not orchestrator memory.
+    expect(inner.envs.get('env_1')?.poolKey).toBe(canonicalRequestKey(TEMPLATE));
+
+    const env = await pool.createEnvironment(tenantRequest());
+    // claimEnvironment ran on the owning host (refresh + unmark)…
+    expect(inner.claimed).toEqual(['env_1']);
+    // …and the tenant receives the CLAIMED env: no pool mark left anywhere.
+    expect(env.poolKey).toBeUndefined();
+    expect(inner.envs.get('env_1')?.poolKey).toBeUndefined();
+  });
+
+  it('destroys a warm env whose claim (refresh) fails and falls back cold', async () => {
+    const inner = fakeInner();
+    const innerClaim = inner.claimEnvironment.bind(inner);
+    inner.claimEnvironment = async (envId: string) => {
+      if (envId === 'env_1') throw new SandboxError('EXEC_FAILED', 'fetch: could not resolve');
+      return innerClaim(envId);
+    };
+    const logs: string[] = [];
+    const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }], {
+      onLog: (line) => logs.push(line),
+    });
+    await pool.fill(); // warms env_1
+
+    const env = await pool.createEnvironment(tenantRequest());
+    // env_1 was destroyed, never handed out stale; the tenant got a cold env.
+    expect(inner.destroyed).toContain('env_1');
+    expect(env.envId).not.toBe('env_1');
+    expect(logs.join('\n')).toContain('refresh of env_1 failed');
+  });
+
   it('matching is canonical: key order and stripped secrets never matter', () => {
     const shuffled = JSON.parse(
       JSON.stringify({
@@ -155,6 +190,10 @@ describe('WarmPoolSandboxCore', () => {
     ) as CreateEnvironmentRequest;
     expect(canonicalRequestKey(shuffled)).toBe(canonicalRequestKey(TEMPLATE));
     expect(canonicalRequestKey({ ...TEMPLATE, ref: 'develop' })).not.toBe(
+      canonicalRequestKey(TEMPLATE),
+    );
+    // The pool mark is bookkeeping, not shape (m10-plan Decision 1).
+    expect(canonicalRequestKey({ ...TEMPLATE, poolKey: 'anything' })).toBe(
       canonicalRequestKey(TEMPLATE),
     );
   });
@@ -253,6 +292,12 @@ describe('WarmPoolSandboxCore', () => {
     expect(
       () =>
         new WarmPoolSandboxCore(inner, [
+          { template: { ...TEMPLATE, poolKey: 'pre-marked' }, size: 1 },
+        ]),
+    ).toThrow('must not carry poolKey');
+    expect(
+      () =>
+        new WarmPoolSandboxCore(inner, [
           { template: TEMPLATE, size: 1 },
           { template: TEMPLATE, size: 2 },
         ]),
@@ -260,6 +305,73 @@ describe('WarmPoolSandboxCore', () => {
     expect(() => new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 0 }])).toThrow(
       'positive integer',
     );
+  });
+});
+
+describe('orphan re-adoption (M10 — the restart path)', () => {
+  it('re-adopts pool-marked ready envs instead of provisioning new ones', async () => {
+    const inner = fakeInner();
+    const first = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 2 }]);
+    await first.fill(); // env_1, env_2 warmed and marked
+    expect(inner.created).toBe(2);
+
+    // The control plane crashed: a NEW wrapper over the same fleet re-learns
+    // its warm stock from the host's env table instead of leaking it.
+    const restarted = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 2 }]);
+    await restarted.fill();
+    expect(inner.created).toBe(2); // nothing new provisioned
+    expect(restarted.warmCount(TEMPLATE)).toBe(2);
+
+    // Re-adopted stock is fully claimable.
+    const env = await restarted.createEnvironment(tenantRequest());
+    expect(['env_1', 'env_2']).toContain(env.envId);
+    expect(env.poolKey).toBeUndefined();
+  });
+
+  it('destroys excess beyond a shrunk pool size — the leak closes, not re-homes', async () => {
+    const inner = fakeInner();
+    const first = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 3 }]);
+    await first.fill();
+
+    const restarted = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }]);
+    await restarted.fill();
+    expect(restarted.warmCount(TEMPLATE)).toBe(1);
+    expect(inner.destroyed).toHaveLength(2);
+    expect(inner.envs.size).toBe(1);
+  });
+
+  it('never touches foreign marks or unmarked tenant envs', async () => {
+    const inner = fakeInner();
+    // A tenant env (no mark) and an env owned by some OTHER pool/config.
+    const tenant = await inner.createEnvironment(tenantRequest());
+    const foreign = await inner.createEnvironment({
+      ...TEMPLATE,
+      ref: 'develop',
+      poolKey: 'other',
+    });
+
+    const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }]);
+    await pool.fill();
+    // Neither was adopted (a fresh env was provisioned) and neither was destroyed.
+    expect(pool.warmCount(TEMPLATE)).toBe(1);
+    expect(inner.created).toBe(3);
+    expect(inner.envs.has(tenant.envId)).toBe(true);
+    expect(inner.envs.get(foreign.envId)?.poolKey).toBe('other');
+    expect(inner.destroyed).toEqual([]);
+  });
+
+  it('a sweep failure logs and the top-up still runs', async () => {
+    const inner = fakeInner();
+    inner.listEnvironments = async () => {
+      throw new SandboxError('EXEC_FAILED', 'host b unreachable');
+    };
+    const logs: string[] = [];
+    const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }], {
+      onLog: (line) => logs.push(line),
+    });
+    await pool.fill();
+    expect(logs.join('\n')).toContain('orphan sweep failed');
+    expect(pool.warmCount(TEMPLATE)).toBe(1);
   });
 });
 

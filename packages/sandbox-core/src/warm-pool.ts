@@ -3,10 +3,17 @@
  * `WarmPoolSandboxCore` wraps ANY inner `SandboxCore` (local, remote, or
  * multi-host — composition, not a mode): configured pools are pre-provisioned
  * in the background, and a `createEnvironment` whose request exactly matches a
- * pool's template claims a warm env — verify, apply the request's secrets,
- * hand out — in milliseconds instead of minutes. Anything else falls through
- * to the cold path unchanged, so a stale template can only ever mean "pool
- * never hits", never "agent runs in the wrong container" (Decision 5).
+ * pool's template claims a warm env — verify, refresh + unmark on the owning
+ * host, apply the request's secrets, hand out — in milliseconds instead of
+ * minutes. Anything else falls through to the cold path unchanged, so a stale
+ * template can only ever mean "pool never hits", never "agent runs in the
+ * wrong container" (m9-plan Decision 5).
+ *
+ * Since M10 every fill is stamped with the pool's canonical key (`poolKey`),
+ * so the HOST's env table records what is unclaimed warm stock: `fill()`
+ * re-adopts marked envs after an orchestrator restart instead of leaking
+ * them, and the claim hands out a clone freshened at claim time, not one as
+ * old as fill time (m10-plan).
  */
 import type {
   CreateEnvironmentRequest,
@@ -67,14 +74,26 @@ export class WarmPoolSandboxCore implements SandboxCore {
         // carrying secrets is a config error, not something to half-honor.
         throw new Error('warm pool templates must not carry secrets');
       }
+      if (template.poolKey !== undefined) {
+        // The wrapper owns the mark (m10-plan Decision 7); a pre-marked
+        // template is a config error, not something to second-guess.
+        throw new Error('warm pool templates must not carry poolKey');
+      }
       const key = canonicalRequestKey(template);
       if (this.pools.has(key)) throw new Error('duplicate warm pool template');
       this.pools.set(key, { key, template, size: spec.size, ready: [] });
     }
   }
 
-  /** Top up every pool to its size. Never rejects — failures log (Decision 7). */
+  /**
+   * Re-adopt orphaned warm stock, then top every pool up to its size. Never
+   * rejects — failures log (m9-plan Decision 7). The orphan sweep runs here
+   * and not on the per-claim kicks: `fill()` is the boot-time entry, which is
+   * exactly when a restarted control plane must reclaim what its predecessor
+   * warmed (m10-plan Decision 6).
+   */
   async fill(): Promise<void> {
+    await this.adoptOrphans();
     await Promise.all([...this.pools.values()].map((pool) => this.topUp(pool)));
   }
 
@@ -164,10 +183,11 @@ export class WarmPoolSandboxCore implements SandboxCore {
   /* ------------------------------------------------------------------------ */
 
   /**
-   * Verify → apply-secrets → hand out; anything less destroys (Decision 6).
-   * Returns null when this warm env cannot be used — the caller tries the
-   * next one or falls through cold. An env with half-applied secrets never
-   * reaches a tenant and never returns to the pool.
+   * Verify → refresh + unmark on the owning host → apply-secrets → hand out;
+   * anything less destroys (m9-plan Decision 6, extended by m10-plan
+   * Decision 2). Returns null when this warm env cannot be used — the caller
+   * tries the next one or falls through cold. An env with a stale clone or
+   * half-applied secrets never reaches a tenant and never returns to the pool.
    */
   private async claim(envId: string, secrets: SecretSpec[]): Promise<Environment | null> {
     let env: Environment | null;
@@ -181,6 +201,17 @@ export class WarmPoolSandboxCore implements SandboxCore {
       this.onLog(`claim: warm env ${envId} vanished (${env?.status ?? 'gone'}); dropping`);
       return null;
     }
+    // The host freshens the clone and clears the pool mark in one operation;
+    // a failure (dead remote, wiped workspace) costs a cold create, never a
+    // stale hand-out.
+    let claimed: Environment;
+    try {
+      claimed = await this.inner.claimEnvironment(envId);
+    } catch (err) {
+      this.onLog(`claim: refresh of ${envId} failed: ${message(err)}; destroying`);
+      await this.inner.destroyEnvironment(envId).catch(() => {});
+      return null;
+    }
     if (secrets.length > 0) {
       try {
         await this.inner.applySecrets(envId, secrets);
@@ -190,7 +221,42 @@ export class WarmPoolSandboxCore implements SandboxCore {
         return null;
       }
     }
-    return env;
+    return claimed;
+  }
+
+  /**
+   * The restart path (m10-plan Decision 6): ready envs carrying one of OUR
+   * pool keys and not already tracked are re-adopted FIFO up to pool size;
+   * anything beyond size (a shrunk config) is destroyed — re-adoption must
+   * close the leak, not re-home it. Foreign marks and unmarked tenant envs
+   * are never touched. Tolerant like the census: a listing failure logs and
+   * the top-up still runs.
+   */
+  private async adoptOrphans(): Promise<void> {
+    if (this.stopped) return;
+    let envs: Environment[];
+    try {
+      envs = await this.inner.listEnvironments();
+    } catch (err) {
+      this.onLog(`orphan sweep failed (top-up continues): ${message(err)}`);
+      return;
+    }
+    for (const env of envs) {
+      if (env.status !== 'ready' || !env.poolKey) continue;
+      const pool = this.pools.get(env.poolKey);
+      if (!pool || pool.ready.includes(env.envId)) continue;
+      if (pool.ready.length < pool.size) {
+        pool.ready.push(env.envId);
+        this.onLog(
+          `re-adopted ${env.envId} (${pool.ready.length}/${pool.size} for ${pool.template.repoUrl ?? 'scratch'})`,
+        );
+      } else {
+        this.onLog(`destroying excess warm env ${env.envId}`);
+        await this.inner
+          .destroyEnvironment(env.envId)
+          .catch((err: unknown) => this.onLog(`destroy ${env.envId} failed: ${message(err)}`));
+      }
+    }
   }
 
   /** Fire-and-forget top-up; topUp itself never rejects. */
@@ -212,7 +278,12 @@ export class WarmPoolSandboxCore implements SandboxCore {
     pool.filling = (async (): Promise<void> => {
       try {
         while (!this.stopped && pool.ready.length < pool.size) {
-          const env = await this.inner.createEnvironment(pool.template);
+          // Stamped with the pool's key (M10): the host's env table — not this
+          // process's memory — records what is unclaimed warm stock.
+          const env = await this.inner.createEnvironment({
+            ...pool.template,
+            poolKey: pool.key,
+          });
           if (this.stopped) {
             // stop() raced the provision: this env is unclaimed and untracked.
             await this.inner.destroyEnvironment(env.envId).catch(() => {});
@@ -234,13 +305,18 @@ export class WarmPoolSandboxCore implements SandboxCore {
 }
 
 /**
- * Canonical identity of a request MINUS its secrets (Decision 5): schema-
- * normalized, keys sorted recursively, so matching is exact on everything
- * that shapes the env (repo, ref, resources, mounts, overrides) and blind to
- * who the tenant is.
+ * Canonical identity of a request MINUS its secrets and pool mark (m9-plan
+ * Decision 5, m10-plan Decision 1): schema-normalized, keys sorted
+ * recursively, so matching is exact on everything that shapes the env (repo,
+ * ref, resources, mounts, overrides) and blind to bookkeeping — who the
+ * tenant is, which pool provisioned it.
  */
 export function canonicalRequestKey(req: CreateEnvironmentRequest): string {
-  const { secrets: _secrets, ...rest } = CreateEnvironmentRequestSchema.parse(req);
+  const {
+    secrets: _secrets,
+    poolKey: _poolKey,
+    ...rest
+  } = CreateEnvironmentRequestSchema.parse(req);
   return stableStringify(rest);
 }
 

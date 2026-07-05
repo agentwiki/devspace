@@ -146,6 +146,10 @@ function hangingStream(): ExecStream {
   const done = new Promise<number>((r) => (resolveDone = r));
   async function* gen() {
     while (!killed) await new Promise((r) => setTimeout(r, 2));
+    // Nothing is ever yielded — the "process" produces no output before the
+    // kill; the yield below only convinces the type of the generator.
+    if (killed) return;
+    yield { kind: 'exit' as const, code: -1 };
   }
   return {
     writeStdin: () => true,

@@ -84,10 +84,41 @@ export interface SlackAdapterOptions {
   warn?: (message: string) => void;
 }
 
-/** Parse "/devspace <repoUrl|owner/repo> [ref]" text into a RepoChoice. */
+/**
+ * Parse "/devspace <repoUrl|owner/repo> [ref] [net=none|net=host1,host2]"
+ * text into a RepoChoice. `net=` (M22) narrows the session env's egress:
+ * `none` for no egress, a comma list for exactly those hosts (each must be
+ * covered by the host allowlist — provisioning refuses otherwise). An empty
+ * `net=` value makes the whole choice empty rather than dropping the token:
+ * a typo must cost a retype, never a wider-than-asked env (m22-plan
+ * Decision 8).
+ */
 export function parseRepoChoice(text: string): RepoChoice {
   const tokens = text.trim().split(/\s+/).filter(Boolean);
-  const first = tokens[0];
+  const positional: string[] = [];
+  let net: string | undefined;
+  for (const token of tokens) {
+    if (/^net=/i.test(token)) {
+      net = token.slice(4);
+      continue;
+    }
+    positional.push(token);
+  }
+
+  let networkAccess: RepoChoice['networkAccess'];
+  let allowedHosts: string[] | undefined;
+  if (net !== undefined) {
+    if (net.toLowerCase() === 'none') {
+      networkAccess = 'none';
+    } else {
+      const hosts = net.split(',').map(normalizeHostToken).filter(Boolean);
+      if (hosts.length === 0) return { empty: true };
+      networkAccess = 'custom';
+      allowedHosts = hosts;
+    }
+  }
+
+  const first = positional[0];
   if (!first) return { empty: true };
   // Slack auto-links URLs: "<https://…>" or "<https://…|label>".
   let repoUrl = first.replace(/^<([^|>]+)(\|[^>]*)?>$/, '$1');
@@ -97,7 +128,21 @@ export function parseRepoChoice(text: string): RepoChoice {
   } catch {
     return { empty: true };
   }
-  return { repoUrl, ref: tokens[1], empty: false };
+  return {
+    repoUrl,
+    ref: positional[1],
+    empty: false,
+    ...(networkAccess !== undefined ? { networkAccess } : {}),
+    ...(allowedHosts !== undefined ? { allowedHosts } : {}),
+  };
+}
+
+/** One `net=` host entry: unwrap Slack's auto-link, strip scheme/path. */
+function normalizeHostToken(raw: string): string {
+  let host = raw.trim();
+  const link = /^<([^|>]+)\|([^>]*)>$/.exec(host) ?? /^<([^|>]+)>$/.exec(host);
+  if (link) host = (link[2] ?? link[1])!;
+  return host.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/[/?#].*$/, '');
 }
 
 /** Strip leading/inline bot mentions from an app_mention text. */

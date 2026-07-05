@@ -79,9 +79,19 @@ suite('postgres repositories', () => {
 
     const wu = await repos.workUnits.create({ conversationId: conv.id });
     expect(wu.state).toBe('CREATED');
-    const ready = await repos.workUnits.transition(wu.id, 'repoChoice', { repoUrl: 'https://x/r' });
+    expect(wu.networkAccess).toBeUndefined(); // pre-choice / pre-M22 shape
+    const ready = await repos.workUnits.transition(wu.id, 'repoChoice', {
+      repoUrl: 'https://x/r',
+      // The egress policy persists with the choice (M22) — resume reads it.
+      networkAccess: 'custom',
+      allowedHosts: ['github.com', '*.githubusercontent.com'],
+    });
     expect(ready.state).toBe('PROVISIONING');
     expect(ready.repoUrl).toBe('https://x/r');
+    expect(await repos.workUnits.get(wu.id)).toMatchObject({
+      networkAccess: 'custom',
+      allowedHosts: ['github.com', '*.githubusercontent.com'],
+    });
 
     const sec = await repos.secrets.put({
       userId: 'u1',

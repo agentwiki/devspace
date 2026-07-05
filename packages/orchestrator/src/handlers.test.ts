@@ -176,6 +176,43 @@ describe('conversation.created', () => {
     expect(await h.repos.workUnits.listByState('FAILED')).toHaveLength(1);
   });
 
+  it('passes the egress narrowing to the sandbox and persists it on the unit (M22)', async () => {
+    const h = harness();
+    await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C-net',
+      userId: 'u1',
+      repoChoice: {
+        repoUrl: 'https://github.com/a/b.git',
+        empty: false,
+        networkAccess: 'custom',
+        allowedHosts: ['github.com'],
+      },
+    });
+    expect(h.sandbox.createEnvironment).toHaveBeenCalledWith(
+      expect.objectContaining({ networkAccess: 'custom', allowedHosts: ['github.com'] }),
+    );
+    // Persisted on the row — the M19 resume re-provision reads it back.
+    const [wu] = await h.repos.workUnits.listByState('READY');
+    expect(wu).toMatchObject({ networkAccess: 'custom', allowedHosts: ['github.com'] });
+  });
+
+  it('a policy-less choice sends a policy-less request (pre-M22 shape)', async () => {
+    const h = harness();
+    await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C-nonet',
+      userId: 'u1',
+      repoChoice: { repoUrl: 'https://github.com/a/b.git', empty: false },
+    });
+    const req = (h.sandbox.createEnvironment as ReturnType<typeof vi.fn>).mock
+      .calls[0]![0] as Record<string, unknown>;
+    expect('networkAccess' in req).toBe(false);
+    expect('allowedHosts' in req).toBe(false);
+  });
+
   it('resolveConversationId maps a platform thread back to the conversation', async () => {
     const h = harness();
     const created = await h.orch.handleChatEvent({
@@ -699,6 +736,35 @@ describe('session resume (M19)', () => {
     const createSession = vi.spyOn(h.agent, 'createSession');
     await message(h, conv.id);
     expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("a resume re-provision carries the unit's persisted egress policy (M22)", async () => {
+    const h = harness();
+    const created = (await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C-net-resume',
+      userId: 'u1',
+      repoChoice: { repoUrl: 'https://github.com/a/b.git', empty: false, networkAccess: 'none' },
+    })) as { conversationId: string };
+    const wu = (await h.repos.workUnits.getByConversation(created.conversationId))!;
+    await h.repos.workUnits.transition(wu.id, 'firstMessage');
+    await h.repos.workUnits.transition(wu.id, 'committedAndPushed');
+    await h.repos.workUnits.transition(wu.id, 'prCreated', {
+      prNumber: 7,
+      prUrl: 'https://github.com/a/b/pull/7',
+    });
+    await h.repos.workUnits.releaseEnv(wu.id); // the M18 release happened
+    (h.sandbox.createEnvironment as ReturnType<typeof vi.fn>).mockClear();
+
+    await resume(h, created.conversationId);
+
+    // The rebuilt env narrows exactly as the original did — a resume must
+    // never silently widen egress (m22-plan Decision 6).
+    expect(h.sandbox.createEnvironment).toHaveBeenCalledWith(
+      expect.objectContaining({ networkAccess: 'none' }),
+    );
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
   });
 
   it('a stale envId re-provisions — resume trusts the host, not the row', async () => {

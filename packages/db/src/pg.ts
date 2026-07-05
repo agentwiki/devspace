@@ -72,6 +72,8 @@ function mapWorkUnit(r: WorkUnitRow): WorkUnit {
     updatedAt: iso(r.updatedAt),
     lastActivityAt: r.lastActivityAt ? iso(r.lastActivityAt) : undefined,
     idleWarnedAt: r.idleWarnedAt ? iso(r.idleWarnedAt) : undefined,
+    networkAccess: opt(r.networkAccess) as WorkUnit['networkAccess'],
+    allowedHosts: (opt(r.allowedHosts) as string[] | undefined) ?? undefined,
   };
 }
 
@@ -141,6 +143,8 @@ function workUnitPatchColumns(patch: Partial<WorkUnit>): Partial<typeof workUnit
   if (patch.branch !== undefined) set.branch = patch.branch;
   if (patch.prNumber !== undefined) set.prNumber = patch.prNumber;
   if (patch.prUrl !== undefined) set.prUrl = patch.prUrl;
+  if (patch.networkAccess !== undefined) set.networkAccess = patch.networkAccess;
+  if (patch.allowedHosts !== undefined) set.allowedHosts = patch.allowedHosts;
   return set;
 }
 

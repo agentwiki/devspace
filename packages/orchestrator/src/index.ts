@@ -320,10 +320,21 @@ export class Orchestrator {
     }
 
     const branch = `devspace/${wu.id}`;
+    // The tenant's egress narrowing (M22) rides the choice onto the env
+    // request AND the unit row — resume must re-provision with the SAME
+    // policy, never a silently wider one (m22-plan Decision 6).
+    const egress =
+      choice.networkAccess !== undefined
+        ? {
+            networkAccess: choice.networkAccess,
+            ...(choice.allowedHosts !== undefined ? { allowedHosts: choice.allowedHosts } : {}),
+          }
+        : {};
     try {
       const provisioning = await this.advance(wu, 'repoChoice', 'PROVISIONING', {
         repoUrl: choice.repoUrl,
         branch,
+        ...egress,
       });
       await this.emit(
         statusCommand(conv.id, 'PROVISIONING', 'Provisioning environment…', registry),
@@ -351,6 +362,7 @@ export class Orchestrator {
           ref: choice.ref,
           mounts: [agentRuntimeMount()],
           secrets: cloneToken ? [{ name: SECRET_GH_CLONE, value: cloneToken, target: 'env' }] : [],
+          ...egress,
         }),
       );
 
@@ -867,6 +879,14 @@ export class Orchestrator {
             secrets: cloneToken
               ? [{ name: SECRET_GH_CLONE, value: cloneToken, target: 'env' }]
               : [],
+            // The unit's persisted egress policy (M22): a resume re-provision
+            // must never silently widen what the tenant originally narrowed.
+            ...(wu.networkAccess !== undefined
+              ? {
+                  networkAccess: wu.networkAccess,
+                  ...(wu.allowedHosts !== undefined ? { allowedHosts: wu.allowedHosts } : {}),
+                }
+              : {}),
           }),
         );
         envId = env.envId;

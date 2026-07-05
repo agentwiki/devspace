@@ -53,6 +53,11 @@ export const workUnits = pgTable(
     // Last idle-reap warning (M18). Written only by WorkUnitRepo.markIdleWarned
     // and never cleared — stale iff it predates max(lastActivityAt, updatedAt).
     idleWarnedAt: timestamp('idle_warned_at', { withTimezone: true }),
+    // The tenant's egress policy (M22), written at repo choice so the M19
+    // resume re-provision carries it — a resume must never silently widen
+    // egress. Nullable: pre-M22 rows and host-default units carry nothing.
+    networkAccess: text('network_access'),
+    allowedHosts: jsonb('allowed_hosts'),
   },
   (t) => [
     index('work_units_conversation_idx').on(t.conversationId),

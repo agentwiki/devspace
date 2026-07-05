@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DiscordAdapter, SlackAdapter, parsePortCommand } from './index.js';
+import { DiscordAdapter, SlackAdapter, parseHistoryCommand, parsePortCommand } from './index.js';
 
 describe('SlackAdapter (primary)', () => {
   it('declares the slack platform on both adapter and renderer surfaces', () => {
@@ -46,5 +46,19 @@ describe('parsePortCommand (M6)', () => {
     ['expose port 3000', null],
   ])('%s -> %s', (text, expected) => {
     expect(parsePortCommand(text as string)).toBe(expected);
+  });
+});
+
+describe('parseHistoryCommand (M21)', () => {
+  it.each([
+    ['!history', true],
+    ['  !history  ', true],
+    ['!history please', false],
+    ['!history 5', false],
+    ['show me !history', false],
+    ['history', false],
+    ['', false],
+  ])('%s -> %s', (text, expected) => {
+    expect(parseHistoryCommand(text as string)).toBe(expected);
   });
 });

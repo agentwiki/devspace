@@ -486,6 +486,116 @@ describe('transcript persistence (M20)', () => {
   });
 });
 
+describe('transcript replay (M21)', () => {
+  const viewHistory = (h: Harness, conversationId: string) =>
+    h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId,
+      userId: 'u1',
+      actionId: 'view-history',
+      payload: {},
+    });
+
+  const lastMessage = (h: Harness): string => {
+    const posts = h.rendered.filter((r) => r.type === 'post_message');
+    return posts.length > 0 ? (posts.at(-1) as { text: string }).text : '';
+  };
+
+  it('replays the persisted turns role-labelled into the thread', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'do the thing',
+    });
+
+    await viewHistory(h, conv.id);
+    const out = lastMessage(h);
+    expect(out).toContain('Conversation history');
+    expect(out).toContain('[user] do the thing');
+    expect(out).toContain('[agent] working');
+    expect(out).not.toContain('omitted');
+  });
+
+  it('answers after teardown — the rows survive and so does the surface', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'do the thing',
+    });
+    await h.orch.teardown(conv.id);
+
+    await viewHistory(h, conv.id);
+    expect(lastMessage(h)).toContain('[user] do the thing');
+  });
+
+  it('an empty transcript answers "nothing recorded", not an empty message', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'READY');
+    await viewHistory(h, conv.id);
+    expect(lastMessage(h)).toMatch(/no conversation history/i);
+  });
+
+  it('marks omitted history iff entries exist above the replay window', async () => {
+    const h = harness();
+    const { conv, wu } = await seed(h.repos, h.store, 'WORKING');
+    for (let i = 0; i < 25; i++) {
+      await h.repos.transcripts.append({
+        conversationId: conv.id,
+        workUnitId: wu.id,
+        role: 'user',
+        text: `entry-${i}`,
+      });
+    }
+
+    await viewHistory(h, conv.id);
+    const out = lastMessage(h);
+    expect(out).toContain('[… earlier history omitted …]');
+    expect(out).toContain('entry-24'); // newest survives
+    expect(out).not.toContain('entry-0'); // above the window
+  });
+
+  it('a throwing listTail answers message-only, never a throw', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+    vi.spyOn(h.repos.transcripts, 'listTail').mockRejectedValue(new Error('table on fire'));
+
+    await expect(viewHistory(h, conv.id)).resolves.toBeUndefined();
+    expect(lastMessage(h)).toMatch(/could not read/i);
+  });
+
+  it('re-redacts at render: a raw secret in a stored row never reaches chat', async () => {
+    const h = harness();
+    const { conv, wu } = await seed(h.repos, h.store, 'WORKING');
+    // create-pr resolves the push token into the conversation registry.
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'create-pr',
+      payload: {},
+    });
+    // Simulate a row that somehow landed unredacted — the render-side pass
+    // (m21-plan Decision 4) must still scrub it.
+    await h.repos.transcripts.append({
+      conversationId: conv.id,
+      workUnitId: wu.id,
+      role: 'agent',
+      text: 'the token is ghs_push_token',
+    });
+
+    await viewHistory(h, conv.id);
+    const out = lastMessage(h);
+    expect(out).not.toContain('ghs_push_token');
+    expect(out).toContain('«redacted»');
+  });
+});
+
 describe('session resume (M19)', () => {
   /** Walk a seeded unit to PR_OPEN (prNumber 42, the seed's PR branch). */
   async function seedPrOpen(h: Harness) {

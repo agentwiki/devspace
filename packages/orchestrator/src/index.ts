@@ -34,7 +34,12 @@ import { SandboxError, type SandboxCore } from '@devspace/sandbox-core';
 import type { AgentRunner } from '@devspace/agent-runner';
 import { agentRuntimeMount } from '@devspace/agent-runner';
 import { classifyAction, WorkUnitMachine } from './stateMachine.js';
-import { buildHistoryPreamble, HISTORY_MAX_ENTRIES } from './transcript.js';
+import {
+  buildHistoryPreamble,
+  buildHistoryReplay,
+  HISTORY_MAX_ENTRIES,
+  REPLAY_MAX_ENTRIES,
+} from './transcript.js';
 import {
   approxDuration,
   IDLE_REAP_STATES,
@@ -583,6 +588,8 @@ export class Orchestrator {
         return this.onCreatePr(event.conversationId, event.userId, wu, registry);
       case 'resume': // resume-work — re-open work on a PR_OPEN unit (M19)
         return this.onResumeWork(event.conversationId, event.userId, wu, registry);
+      case 'history': // view-history — replay the durable transcript (M21)
+        return this.onViewHistory(event.conversationId, registry);
       case 'expose-port':
         return this.onExposePort(event.conversationId, event.userId, wu, action.port, registry);
       case 'deterministic': // view-pr
@@ -600,6 +607,46 @@ export class Orchestrator {
         );
         return;
     }
+  }
+
+  /**
+   * Replay the durable transcript tail into the thread (M21) — the first
+   * product surface of the M20 table. Deliberately state-blind: the rows
+   * survive suspension, env release, and teardown, so the replay answers in
+   * every state (the "rows survive teardown … readable for product surfaces"
+   * promise, cashed). Rows are redacted at rest AND the reply flows through
+   * `messageCommand`'s redaction like every outbound string (m21-plan
+   * Decision 4); a failed read answers message-only — a read surface never
+   * throws into the action path.
+   */
+  private async onViewHistory(conversationId: string, registry: SecretRegistry): Promise<void> {
+    let entries;
+    try {
+      // Probe one entry past the window so the omitted marker appears iff
+      // something actually exists above it (m21-plan Decision 3).
+      entries = await this.deps.repos.transcripts.listTail(
+        conversationId,
+        REPLAY_MAX_ENTRIES + 1,
+      );
+    } catch {
+      await this.emit(
+        messageCommand(
+          conversationId,
+          'Could not read the conversation history — try again later.',
+          registry,
+        ),
+      );
+      return;
+    }
+    if (entries.length === 0) {
+      await this.emit(
+        messageCommand(conversationId, 'No conversation history recorded yet.', registry),
+      );
+      return;
+    }
+    const hasMore = entries.length > REPLAY_MAX_ENTRIES;
+    const window = hasMore ? entries.slice(1) : entries;
+    await this.emit(messageCommand(conversationId, buildHistoryReplay(window, hasMore), registry));
   }
 
   /**

@@ -244,6 +244,21 @@ describe('DiscordAdapter inbound', () => {
     ]);
   });
 
+  it('`!history` in a bound thread becomes the view-history action (M21)', async () => {
+    const h = await startAdapter();
+    h.binding.bind('conv-h', { channel: 'C100', threadTs: 'thread-of-m1' });
+    await handlers(h).message(threadMessage({ content: '!history' }));
+    expect(h.events).toEqual([
+      {
+        type: 'action.invoked',
+        conversationId: 'conv-h',
+        userId: 'U7',
+        actionId: 'view-history',
+        payload: {},
+      },
+    ]);
+  });
+
   it('button presses emit action.invoked with the raw customId', async () => {
     const h = await startAdapter();
     h.binding.bind('conv-b', { channel: 'C100', threadTs: 'thread-of-m1' });

@@ -1,0 +1,61 @@
+name: scenarios
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+
+  # 골든패스가 구현될 때까지 이 잡은 의도적으로 빨간불이다. (scenarios/README.md)
+  golden-path:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      E2E_REPO: ${{ vars.E2E_REPO }}
+      E2E_GITHUB_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Codex 구독 인증 복원 (docs/decisions.md §2)
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          if [ -z "$CODEX_AUTH_JSON" ]; then
+            echo "::warning::CODEX_AUTH_JSON secret이 비어 있음 — 에이전트 단계는 실패합니다"
+          else
+            mkdir -p ~/.codex
+            printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json
+            chmod 600 ~/.codex/auth.json
+          fi
+
+      # TODO(골든패스 구현 시): 여기서 devspace 서버를 띄운다.
+      # 지금은 서버가 없으므로 시나리오 1단계(접속)에서 실패한다 — 그게 현재 목표 지점.
+
+      - name: 골든패스 시나리오 실행
+        run: npm run e2e:golden-path
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

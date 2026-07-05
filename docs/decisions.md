@@ -134,11 +134,40 @@ Slack/Discord 어댑터는 외부 플랫폼을 통과해야 해서 사용자 시
   Express/Fastify 같은 프레임워크는 아직 값을 증명하지 못한다("필요가
   증명될 때만" 원칙). 라우팅은 `apps/server/src/server.ts`의 작은 분기로
   충분하고, 화면은 순수 함수 `ui.ts`가 문자열로 그린다(유닛테스트로 고정).
-- 다음 단계(에이전트 진행 스트리밍)에서 SSE/WebSocket이 필요해지면 그때
-  재검토한다 — 내장 `http`로도 SSE는 가능하므로 프레임워크 도입은 그 시점의
-  실제 필요로 판단한다.
+- **에이전트 진행 스트리밍은 SSE로 한다(내장 http만으로).** 서버가 세션
+  갱신(`SessionUpdate`)을 `text/event-stream`으로 흘리고, 브라우저는
+  `EventSource`로 받는다. 양방향이 필요 없는 단방향 진행 스트림이라
+  WebSocket까지 갈 이유가 없다. 늦게 접속한 구독자를 위해 세션별로 지나간
+  갱신을 버퍼에 담아 재생한다(`session-hub.ts`).
 - **기동 확인용 `/healthz`:** Playwright webServer가 준비를 기다릴 엔드포인트
   (§8). 200 "ok"만 돌려준다.
+
+## 9. 샌드박스·에이전트·GitHub 어댑터 (골든패스 2~7단계)
+
+**결정: 포트(SandboxPort/AgentPort/GitHostPort)를 실제 CLI·API로 구현하고, 샌드박스 접근은 하나의 SandboxPort로 공유한다.**
+
+- **샌드박스 = @devcontainers/cli.** `create`는 레포를 얕은 클론한 임시
+  워크스페이스에 devcontainer를 띄운다. 레포에 `.devcontainer`가 없으면 기본
+  설정(node 이미지)을 얹고, 있으면 존중한다. `sandboxId`는 워크스페이스 경로
+  (devcontainer 서브커맨드가 `--workspace-folder`로 컨테이너를 식별하므로).
+  CLI bin은 `createRequire`로 경로를 풀어 `node`로 직접 실행한다 — pnpm이 bin을
+  워크스페이스 패키지 `.bin`에만 링크해 서버 PATH엔 없기 때문.
+- **codex는 샌드박스 안에서 실행.** 호스트의 `~/.codex`(구독 인증, §2)를
+  컨테이너에 바인드 마운트하고, `up` 이후 컨테이너 안에 codex CLI를 설치한다.
+  `AgentPort`는 주입받은 `SandboxPort.execStream`으로 codex를 돌려 진행 출력을
+  줄 단위로 UI에 흘린다 — 어댑터가 devcontainer 세부를 다시 알 필요가 없다.
+- **GitHub = 샌드박스 git + REST.** `diffSummary`는 샌드박스에서 `git diff`
+  (새 파일은 intent-to-add로 포함). `openPullRequest`는 브랜치를 만들어 커밋·
+  푸시(클론 시 토큰이 박힌 origin 사용)한 뒤 REST로 PR을 연다. URL/헤더/본문
+  구성 같은 순수 부분은 함수로 분리해 유닛테스트로 고정했다.
+- **토큰이 없어도 서버는 뜬다.** 채팅 화면(1단계)은 토큰 없이 보이고, 토큰이
+  필요한 조작(푸시·PR)만 그 시점에 명확한 에러로 실패한다. 시크릿 미설정이
+  1단계를 회귀시키지 않게 하려는 것 — 조용한 실패가 아니라 필요한 자리에서
+  큰 소리로 실패한다.
+- **진짜 검증은 CI의 골든패스 E2E다.** 이 어댑터들은 Docker·codex 구독 인증·
+  실제 GitHub 토큰이 있어야 실제로 돈다(목 금지 원칙). 도메인·유스케이스는
+  인메모리 포트 유닛테스트로, 서버·UI·SSE는 브라우저로 검증하지만, 세 외부
+  통합의 최종 진실은 여전히 실제 E2E다.
 
 ## 8. 서버 실행 — 빌드 스텝 없이 tsx로 TS 직접 실행
 

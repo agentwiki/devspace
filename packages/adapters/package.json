@@ -6,6 +6,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@devcontainers/cli": "^0.87.0",
     "@devspace/core": "workspace:*"
   }
 }

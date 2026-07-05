@@ -1,14 +1,13 @@
 /**
  * 조립 루트(composition root) — 웹 채팅 서버가 사는 곳.
- * 포트에 어댑터를 꽂아 세션을 구동한다. 골든패스가 진행되며 여기서 조립된다.
- *
- * 1단계("접속하면 채팅 화면이 보인다")에서는 아직 꽂을 어댑터가 없다 —
- * 정적 채팅 화면을 내려주는 HTTP 서버를 띄우는 것으로 충분하다.
+ * 실제 어댑터를 포트에 꽂아(wiring) 세션을 구동하는 HTTP 서버를 띄운다.
+ * 골든패스 전 단계(접속 → 샌드박스 → 에이전트 → PR)가 여기서 조립된다.
  */
 import { createServer } from './server';
+import { buildPorts } from './wiring';
 
 const port = Number(process.env.PORT ?? 3000);
 
-createServer().listen(port, () => {
+createServer(buildPorts()).listen(port, () => {
   console.log(`devspace 서버 대기 중: http://localhost:${port}`);
 });

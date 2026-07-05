@@ -44,6 +44,9 @@ importers:
 
   packages/adapters:
     dependencies:
+      '@devcontainers/cli':
+        specifier: ^0.87.0
+        version: 0.87.0
       '@devspace/core':
         specifier: workspace:*
         version: link:../core
@@ -51,6 +54,11 @@ importers:
   packages/core: {}
 
 packages:
+
+  '@devcontainers/cli@0.87.0':
+    resolution: {integrity: sha512-OVwjI0LH6cYilo2MXrnqYALtCwKM0dsdphNsIguw0ESRBG8s1wPIjDbPiDO5taxPTe3cLshsQYVZY1UpKtFaJA==}
+    engines: {node: '>=20.0.0'}
+    hasBin: true
 
   '@esbuild/aix-ppc64@0.28.1':
     resolution: {integrity: sha512-Svl7tq8k/08+p6CXPpRjQ1fKX+1odH/BQbb48fV6fj3CWHhsoIOoY87w1oHXm0qEpkIK3ZfVgp0hed3XBXzXMQ==}
@@ -1206,6 +1214,8 @@ packages:
     engines: {node: '>=10'}
 
 snapshots:
+
+  '@devcontainers/cli@0.87.0': {}
 
   '@esbuild/aix-ppc64@0.28.1':
     optional: true

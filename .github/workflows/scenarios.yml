@@ -62,9 +62,10 @@ jobs:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
         run: bash .github/scripts/codex-auth.sh seed
 
-      # TODO(골든패스 구현 시): 여기서 devspace 서버를 띄운다.
-      # 지금은 서버가 없으므로 시나리오 1단계(접속)에서 실패한다 — 그게 현재 목표 지점.
-
+      # devspace 서버는 Playwright의 webServer가 `pnpm dev`로 띄운다
+      # (playwright.config.ts, docs/decisions.md §8). 1단계(접속·채팅 화면)는
+      # 통과하고, 아직 구현되지 않은 이후 단계(샌드박스~PR)에서 실패한다 —
+      # 그것이 현재 목표 지점이다.
       - name: 골든패스 시나리오 실행
         run: pnpm e2e:golden-path
 

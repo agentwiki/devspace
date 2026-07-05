@@ -125,3 +125,68 @@ Slack/Discord 어댑터는 외부 플랫폼을 통과해야 해서 사용자 시
 - **pre-push를 고른 이유:** `pnpm check`는 유닛테스트까지 돌아 커밋마다 걸면
   마찰이 크다. push 직전 한 번이 마지막 로컬 방어선으로 적절하다. 실패 시
   종료코드가 0이 아니면 push가 차단된다(확인함).
+
+## 7. 웹 서버 — 프레임워크 없이 node:http
+
+**결정: `apps/server`는 node 내장 `http`로 시작한다. 웹 프레임워크는 도입하지 않는다.**
+
+- 골든패스 1단계는 채팅 화면 HTML 하나를 GET `/`로 내려주는 것뿐이다.
+  Express/Fastify 같은 프레임워크는 아직 값을 증명하지 못한다("필요가
+  증명될 때만" 원칙). 라우팅은 `apps/server/src/server.ts`의 작은 분기로
+  충분하고, 화면은 순수 함수 `ui.ts`가 문자열로 그린다(유닛테스트로 고정).
+- **에이전트 진행 스트리밍은 SSE로 한다(내장 http만으로).** 서버가 세션
+  갱신(`SessionUpdate`)을 `text/event-stream`으로 흘리고, 브라우저는
+  `EventSource`로 받는다. 양방향이 필요 없는 단방향 진행 스트림이라
+  WebSocket까지 갈 이유가 없다. 늦게 접속한 구독자를 위해 세션별로 지나간
+  갱신을 버퍼에 담아 재생한다(`session-hub.ts`).
+- **기동 확인용 `/healthz`:** Playwright webServer가 준비를 기다릴 엔드포인트
+  (§8). 200 "ok"만 돌려준다.
+
+## 9. 샌드박스·에이전트·GitHub 어댑터 (골든패스 2~7단계)
+
+**결정: 포트(SandboxPort/AgentPort/GitHostPort)를 실제 CLI·API로 구현하고, 샌드박스 접근은 하나의 SandboxPort로 공유한다.**
+
+- **샌드박스 = @devcontainers/cli.** `create`는 레포를 얕은 클론한 임시
+  워크스페이스에 devcontainer를 띄운다. 레포에 `.devcontainer`가 없으면 기본
+  설정(node 이미지)을 얹고, 있으면 존중한다. `sandboxId`는 워크스페이스 경로
+  (devcontainer 서브커맨드가 `--workspace-folder`로 컨테이너를 식별하므로).
+  CLI bin은 `createRequire`로 경로를 풀어 `node`로 직접 실행한다 — pnpm이 bin을
+  워크스페이스 패키지 `.bin`에만 링크해 서버 PATH엔 없기 때문.
+- **codex는 샌드박스 안에서 실행.** 호스트의 `~/.codex`(구독 인증, §2)를
+  컨테이너에 바인드 마운트하고, `up` 이후 컨테이너 안에 codex CLI를 설치한다.
+  `AgentPort`는 주입받은 `SandboxPort.execStream`으로 codex를 돌려 진행 출력을
+  줄 단위로 UI에 흘린다 — 어댑터가 devcontainer 세부를 다시 알 필요가 없다.
+- **codex 자체 샌드박스는 끈다(`--dangerously-bypass-approvals-and-sandbox`).**
+  codex의 `workspace-write` 샌드박스는 bubblewrap을 쓰는데, devcontainer(중첩
+  컨테이너) 안에서는 네임스페이스 생성 권한이 없어 `bwrap: No permissions to
+  create new namespace`로 파일 편집이 막힌다. devcontainer가 이미 격리 경계이므로
+  codex 자체 샌드박스는 불필요하고, 이 플래그의 공식 용도가 바로 "외부에서
+  샌드박스된 환경에서의 실행"이다. (골든패스 E2E 로그로 확인한 실제 실패였다.)
+- **GitHub = 샌드박스 git + REST.** `diffSummary`는 샌드박스에서 `git diff`
+  (새 파일은 intent-to-add로 포함). `openPullRequest`는 브랜치를 만들어 커밋·
+  푸시(클론 시 토큰이 박힌 origin 사용)한 뒤 REST로 PR을 연다. URL/헤더/본문
+  구성 같은 순수 부분은 함수로 분리해 유닛테스트로 고정했다.
+- **토큰이 없어도 서버는 뜬다.** 채팅 화면(1단계)은 토큰 없이 보이고, 토큰이
+  필요한 조작(푸시·PR)만 그 시점에 명확한 에러로 실패한다. 시크릿 미설정이
+  1단계를 회귀시키지 않게 하려는 것 — 조용한 실패가 아니라 필요한 자리에서
+  큰 소리로 실패한다.
+- **진짜 검증은 CI의 골든패스 E2E다.** 이 어댑터들은 Docker·codex 구독 인증·
+  실제 GitHub 토큰이 있어야 실제로 돈다(목 금지 원칙). 도메인·유스케이스는
+  인메모리 포트 유닛테스트로, 서버·UI·SSE는 브라우저로 검증하지만, 세 외부
+  통합의 최종 진실은 여전히 실제 E2E다.
+
+## 8. 서버 실행 — 빌드 스텝 없이 tsx로 TS 직접 실행
+
+**결정: `tsx`를 devDependency로 두고 `pnpm dev`(= `tsx apps/server/src/index.ts`)로 서버를 띄운다.**
+
+- 이 레포는 빌드 스텝이 없다(`noEmit`, vitest·playwright 모두 TS를 직접 실행).
+  서버도 같은 결을 따라 트랜스파일 산출물 없이 실행한다.
+- **node 내장 타입 스트리핑을 못 쓰는 이유:** node 22의
+  `--experimental-strip-types`는 `node_modules` 안의 `.ts`를 거부한다
+  (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`). 워크스페이스 패키지
+  (`@devspace/core` 등)는 심링크로 `node_modules`에 들어오고 `exports`가
+  `./src/index.ts`를 가리키므로, 내장 방식으로는 서버가 core를 import하는
+  순간 깨진다. `tsx`는 이를 문제없이 처리한다.
+- **E2E 연결:** `playwright.config.ts`의 `webServer`가 `pnpm dev`로 서버를
+  띄우고 `/healthz` 200을 기다린 뒤 시나리오를 실행한다. 로컬에 이미 서버가
+  떠 있으면 재사용하고(`reuseExistingServer`), CI에서는 항상 새로 띄운다.

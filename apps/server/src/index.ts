@@ -1,10 +1,13 @@
 /**
- * 조립 루트(composition root) — 웹 채팅 UI + HTTP/WS 서버가 사는 곳.
- * 포트에 어댑터를 꽂아 세션 상태 머신을 구동한다.
- * 골든패스 1단계("접속하면 채팅 화면이 보인다")부터 여기서 구현된다.
+ * 조립 루트(composition root) — 웹 채팅 서버가 사는 곳.
+ * 실제 어댑터를 포트에 꽂아(wiring) 세션을 구동하는 HTTP 서버를 띄운다.
+ * 골든패스 전 단계(접속 → 샌드박스 → 에이전트 → PR)가 여기서 조립된다.
  */
-import { transition, type SessionState } from '@devspace/core';
+import { createServer } from './server';
+import { buildPorts } from './wiring';
 
-// 구현 전 임시 앵커 — 경계 규칙(core만 알고, adapters를 조립)이 살아있음을 보인다.
-export const initialState: SessionState = 'provisioning';
-export { transition };
+const port = Number(process.env.PORT ?? 3000);
+
+createServer(buildPorts()).listen(port, () => {
+  console.log(`devspace 서버 대기 중: http://localhost:${port}`);
+});

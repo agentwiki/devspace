@@ -33,6 +33,7 @@ import {
   nodeCommandRunner,
   previewProxyFromEnv,
   serverTlsOptions,
+  setupTimeoutFromEnv,
 } from '@devspace/sandbox-core';
 
 const SERVICE = 'sandbox-core';
@@ -120,6 +121,12 @@ if (budgets) {
 // listener, so the first fleet census / orphan sweep already sees what was
 // re-adopted; without the var, the documented in-memory posture is unchanged.
 const stateStore = envStateStoreFromEnv(process.env);
+// Setup-script bound (M24): SANDBOX_SETUP_TIMEOUT_MS caps the one-shot setup
+// a request may run at provisioning; unset = the 10-minute default.
+const setupTimeoutMs = setupTimeoutFromEnv(process.env);
+if (setupTimeoutMs !== undefined) {
+  console.log(`[${SERVICE}] setup-script timeout: ${setupTimeoutMs}ms`);
+}
 const core = new DevcontainerSandboxCore({
   hardening,
   preview,
@@ -127,6 +134,7 @@ const core = new DevcontainerSandboxCore({
   budgets,
   stateStore,
   egress,
+  setupTimeoutMs,
 });
 if (stateStore) {
   const { recovered, discarded, skipped } = await core.recover();

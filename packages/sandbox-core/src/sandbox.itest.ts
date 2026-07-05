@@ -166,6 +166,32 @@ describe.skipIf(!availability.ok)('sandbox-core live integration', () => {
     expect(await runtime.exists(containerId)).toBe(false);
   }, 300_000);
 
+  it('runs the one-shot setup script with tenant env baked in (M24)', async () => {
+    // A request with env + setupScript provisions with the script's effect
+    // observable (a file it wrote, as root, reading the tenant env var) —
+    // and a failing script fails the create and leaves no container behind.
+    const withSetup = await core.createEnvironment({
+      baseImage: TEST_IMAGE,
+      resources: { cpu: 1, memMB: 512, diskMB: 1024 },
+      env: { DEVSPACE_M24: 'setup-proof' },
+      setupScript: 'printf "%s $(id -u)" "$DEVSPACE_M24" > /setup-ran',
+    });
+    createdEnvIds.push(withSetup.envId);
+    const proof = await core.fsRead(withSetup.envId, '/setup-ran');
+    expect(Buffer.from(proof).toString()).toBe('setup-proof 0'); // root wrote it
+
+    await expect(
+      core.createEnvironment({
+        baseImage: TEST_IMAGE,
+        resources: { cpu: 1, memMB: 512, diskMB: 1024 },
+        setupScript: 'echo "no such package" 1>&2; exit 7',
+      }),
+    ).rejects.toMatchObject({
+      code: 'PROVISION_FAILED',
+      message: expect.stringContaining('no such package'),
+    });
+  }, 600_000);
+
   it('kills a runaway process tree via in-container pkill (the abort mechanism)', async () => {
     // The M5 auto-abort caveat: ExecStream.kill() only signals the local
     // `docker exec` client. Prove the REAL mechanism — a second exec running

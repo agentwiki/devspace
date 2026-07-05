@@ -19,6 +19,9 @@ import type { WorkState } from '@devspace/contracts';
  * for. The webhook/poll advances it to a terminal state; the grace collects
  * it there. Since M18 the exemption's env COST is covered separately:
  * `prOpenEnvTtlMs` releases just the environment while the unit lives on.
+ * Since M19 a RESUMED unit in these states (WORKING/PRE_PR with a prNumber)
+ * is SUSPENDED back to PR_OPEN at the idle TTL instead of torn down — the
+ * unit still holds the PR fields and token the reconciler needs.
  */
 export const IDLE_REAP_STATES: readonly WorkState[] = [
   'CREATED',

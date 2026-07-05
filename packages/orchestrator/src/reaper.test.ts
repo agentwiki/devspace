@@ -196,6 +196,7 @@ describe('reapExpired (M17)', () => {
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, HOUR - 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -205,6 +206,7 @@ describe('reapExpired (M17)', () => {
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, HOUR)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -227,6 +229,7 @@ describe('reapExpired (M17)', () => {
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 2 * HOUR)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -241,6 +244,7 @@ describe('reapExpired (M17)', () => {
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 5 * HOUR + HOUR - 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -254,12 +258,14 @@ describe('reapExpired (M17)', () => {
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 10 * HOUR + HOUR - 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 11 * HOUR)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -271,7 +277,7 @@ describe('reapExpired (M17)', () => {
     const { conv, wu } = await seedAt(h, 'PR_OPEN', 'C4');
     expect(
       await h.orch.reapExpired({ idleTtlMs: HOUR, terminalGraceMs: HOUR }, 100 * HOUR),
-    ).toEqual({ reaped: 0, warned: 0, released: 0, failed: 0 });
+    ).toEqual({ reaped: 0, warned: 0, suspended: 0, released: 0, failed: 0 });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_OPEN');
     // The reconciler's token survives with the unit.
     expect(await h.repos.secrets.get('u1', SECRET_GH_TOKEN, conv.id)).not.toBeNull();
@@ -283,12 +289,14 @@ describe('reapExpired (M17)', () => {
     expect(await h.orch.reapExpired({ terminalGraceMs: HOUR }, HOUR - 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired({ terminalGraceMs: HOUR }, HOUR)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -308,6 +316,7 @@ describe('reapExpired (M17)', () => {
     expect(await h.orch.reapExpired({ terminalGraceMs: HOUR }, 100 * HOUR)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -317,6 +326,7 @@ describe('reapExpired (M17)', () => {
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 100 * HOUR)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -332,6 +342,7 @@ describe('reapExpired (M17)', () => {
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 100 * HOUR)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 1,
     });
@@ -352,6 +363,7 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 45 * MIN - 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -360,6 +372,7 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 45 * MIN)).toEqual({
       reaped: 0,
       warned: 1,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -378,6 +391,7 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 50 * MIN)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -386,6 +400,7 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 60 * MIN)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -405,6 +420,7 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 60 * MIN)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -412,6 +428,7 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 95 * MIN - 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -419,6 +436,7 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 95 * MIN)).toEqual({
       reaped: 0,
       warned: 1,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -426,12 +444,14 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 110 * MIN - 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired(POLICY, 110 * MIN)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -446,6 +466,7 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 10 * HOUR)).toEqual({
       reaped: 0,
       warned: 1,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -454,12 +475,14 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 10 * HOUR + 15 * MIN - 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired(POLICY, 10 * HOUR + 15 * MIN)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -474,6 +497,7 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 45 * MIN)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 1,
     });
@@ -482,6 +506,7 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 46 * MIN)).toEqual({
       reaped: 0,
       warned: 1,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -497,12 +522,14 @@ describe('idle warnings (M18)', () => {
     expect(await h.orch.reapExpired({ ...POLICY, terminalGraceMs: HOUR }, 50 * MIN)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired({ ...POLICY, terminalGraceMs: HOUR }, HOUR)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -522,6 +549,7 @@ describe('PR_OPEN env release (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, DAY - 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -531,6 +559,7 @@ describe('PR_OPEN env release (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, DAY)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 1,
       failed: 0,
     });
@@ -542,12 +571,13 @@ describe('PR_OPEN env release (M18)', () => {
     expect(after?.prNumber).toBe(1); // the reconciler's input is intact
     // The reconciler's token survives with the unit.
     expect(await h.repos.secrets.get('u1', SECRET_GH_TOKEN, conv.id)).not.toBeNull();
-    // One notice, stating an accomplished fact.
+    // One notice, stating an accomplished fact — carrying the way back (M19).
     expect(h.rendered).toContainEqual(
       expect.objectContaining({
-        type: 'post_message',
+        type: 'post_actions',
         conversationId: conv.id,
         text: expect.stringContaining('Environment released'),
+        actions: [expect.objectContaining({ actionId: 'resume-work' })],
       }),
     );
     const audit = await h.repos.audit.listByConversation(conv.id);
@@ -560,6 +590,7 @@ describe('PR_OPEN env release (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 2 * DAY)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -574,6 +605,7 @@ describe('PR_OPEN env release (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 5 * DAY + DAY - 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -590,6 +622,7 @@ describe('PR_OPEN env release (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 2 * DAY)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 1,
       failed: 0,
     });
@@ -604,6 +637,7 @@ describe('PR_OPEN env release (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 2 * DAY)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 1,
     });
@@ -615,11 +649,12 @@ describe('PR_OPEN env release (M18)', () => {
     expect(await h.orch.reapExpired(POLICY, 2 * DAY + 1)).toEqual({
       reaped: 0,
       warned: 0,
+      suspended: 0,
       released: 1,
       failed: 0,
     });
     expect(
-      h.rendered.filter((c) => c.type === 'post_message' && c.conversationId === conv.id),
+      h.rendered.filter((c) => c.type === 'post_actions' && c.conversationId === conv.id),
     ).toHaveLength(1);
   });
 
@@ -634,6 +669,7 @@ describe('PR_OPEN env release (M18)', () => {
     expect(await h.orch.reapExpired({ terminalGraceMs: HOUR }, 3 * DAY + HOUR)).toEqual({
       reaped: 1,
       warned: 0,
+      suspended: 0,
       released: 0,
       failed: 0,
     });
@@ -641,5 +677,177 @@ describe('PR_OPEN env release (M18)', () => {
     // teardown had no env left to destroy — and the secrets are gone now.
     expect(h.sandbox.destroyEnvironment).not.toHaveBeenCalled();
     expect(await h.repos.secrets.get('u1', SECRET_GH_TOKEN, conv.id)).toBeNull();
+  });
+});
+
+describe('suspension of resumed units (M19)', () => {
+  const POLICY = { idleTtlMs: HOUR };
+
+  /** Seed to PR_OPEN and resume it — a WORKING unit carrying its prNumber. */
+  async function seedResumed(h: Harness, channel: string) {
+    const { conv, wu } = await seedAt(h, 'PR_OPEN', channel);
+    const resumed = await h.repos.workUnits.transition(wu.id, 'resume', { envId: 'env_1' });
+    return { conv, wu: resumed };
+  }
+
+  it('suspends an idle resumed unit back to PR_OPEN — never a teardown', async () => {
+    const h = harness();
+    const { conv, wu } = await seedResumed(h, 'S1'); // alive at t=0
+
+    // Within the TTL: untouched.
+    expect(await h.orch.reapExpired(POLICY, HOUR - 1)).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 0,
+      released: 0,
+      failed: 0,
+    });
+
+    // At the TTL: the env goes, the unit returns to waiting on its PR.
+    expect(await h.orch.reapExpired(POLICY, HOUR)).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 1,
+      released: 0,
+      failed: 0,
+    });
+    expect(h.sandbox.destroyEnvironment).toHaveBeenCalledWith('env_1');
+    const after = await h.repos.workUnits.get(wu.id);
+    expect(after?.state).toBe('PR_OPEN');
+    expect(after?.envId).toBeUndefined();
+    expect(after?.agentSessionId).toBeUndefined();
+    expect(after?.prNumber).toBe(1); // the reconciler's input is intact
+    // Secrets survive — the unit is alive and its PR still needs the token.
+    expect(await h.repos.secrets.get('u1', SECRET_GH_TOKEN, conv.id)).not.toBeNull();
+    const audit = await h.repos.audit.listByConversation(conv.id);
+    expect(audit.find((a) => a.action === 'session.suspended')?.detail).toEqual({
+      envId: 'env_1',
+      reason: 'idle',
+    });
+    expect(audit.some((a) => a.action === 'teardown')).toBe(false);
+    // One notice, carrying the way back.
+    expect(h.rendered).toContainEqual(
+      expect.objectContaining({
+        type: 'post_actions',
+        conversationId: conv.id,
+        text: expect.stringContaining('paused'),
+        actions: [expect.objectContaining({ actionId: 'resume-work' })],
+      }),
+    );
+
+    // A later sweep finds a PR_OPEN unit with no env — nothing left to do.
+    expect(await h.orch.reapExpired(POLICY, 2 * HOUR)).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 0,
+      released: 0,
+      failed: 0,
+    });
+  });
+
+  it('a non-NOT_FOUND destroy failure keeps the unit WORKING and retries — one notice', async () => {
+    const h = harness();
+    const { conv, wu } = await seedResumed(h, 'S2');
+    vi.mocked(h.sandbox.destroyEnvironment).mockRejectedValueOnce(new Error('host down'));
+
+    expect(await h.orch.reapExpired(POLICY, 2 * HOUR)).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 0,
+      released: 0,
+      failed: 1,
+    });
+    // The pointer survives so the next sweep retries the destroy…
+    const after = await h.repos.workUnits.get(wu.id);
+    expect(after?.state).toBe('WORKING');
+    expect(after?.envId).toBe('env_1');
+    // …and nothing announced a suspension that did not happen.
+    expect(h.rendered.filter((c) => c.conversationId === conv.id)).toEqual([]);
+
+    expect(await h.orch.reapExpired(POLICY, 2 * HOUR + 1)).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 1,
+      released: 0,
+      failed: 0,
+    });
+    expect(h.rendered.filter((c) => c.conversationId === conv.id)).toHaveLength(1);
+  });
+
+  it('NOT_FOUND from the destroy still suspends — the env is already gone', async () => {
+    const h = harness();
+    const { wu } = await seedResumed(h, 'S3');
+    vi.mocked(h.sandbox.destroyEnvironment).mockRejectedValueOnce(
+      new SandboxError('NOT_FOUND', 'no such environment: env_1'),
+    );
+
+    expect(await h.orch.reapExpired(POLICY, 2 * HOUR)).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 1,
+      released: 0,
+      failed: 0,
+    });
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_OPEN');
+  });
+
+  it('an envless resumed unit still suspends (the crash-between-writes retry)', async () => {
+    const h = harness();
+    const { wu } = await seedResumed(h, 'S4');
+    // A prior sweep crashed after releaseEnv but before the transition.
+    await h.repos.workUnits.releaseEnv(wu.id);
+
+    expect(await h.orch.reapExpired(POLICY, 2 * HOUR)).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 1,
+      released: 0,
+      failed: 0,
+    });
+    expect(h.sandbox.destroyEnvironment).not.toHaveBeenCalled();
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_OPEN');
+  });
+
+  it('the warning discipline covers suspension too, with paused wording', async () => {
+    const MIN = 60_000;
+    const h = harness();
+    const { conv, wu } = await seedResumed(h, 'S5'); // alive at t=0
+    const policy = { idleTtlMs: HOUR, idleWarnMs: 15 * MIN };
+
+    // Window open: one warning that says paused, not reclaimed.
+    h.clock.set(45 * MIN);
+    expect(await h.orch.reapExpired(policy, 45 * MIN)).toEqual({
+      reaped: 0,
+      warned: 1,
+      suspended: 0,
+      released: 0,
+      failed: 0,
+    });
+    expect(h.rendered).toContainEqual(
+      expect.objectContaining({
+        type: 'post_message',
+        conversationId: conv.id,
+        text: expect.stringContaining('paused in about 15m'),
+      }),
+    );
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
+
+    // No unwarned reclamation: the suspension waits out the full window.
+    expect(await h.orch.reapExpired(policy, 60 * MIN - 1)).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 0,
+      released: 0,
+      failed: 0,
+    });
+    h.clock.set(60 * MIN);
+    expect(await h.orch.reapExpired(policy, 60 * MIN)).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 1,
+      released: 0,
+      failed: 0,
+    });
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_OPEN');
   });
 });

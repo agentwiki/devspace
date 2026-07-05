@@ -36,6 +36,10 @@ e2e/               블랙박스 — 앱 내부 코드 import 금지.
 pnpm check   # typecheck + lint + check:arch + test:unit — 전부 통과해야 커밋
 ```
 
+`pnpm install`이 pre-push 훅(`.githooks/pre-push`)을 걸어 push 전에 이 묶음을
+자동 실행한다. 훅은 로컬 편의일 뿐 우회 가능하다 — 진짜 관문은 CI의 `checks`
+잡이다. 훅을 통과 못 하는 코드를 `--no-verify`로 밀지 말 것.
+
 - 도메인 로직은 유닛테스트와 함께 (vitest, 파일 옆 `*.test.ts`).
 - 조용한 실패 금지: 에러를 삼키지 말고 던지거나 명확히 보고한다.
 - 새 결정(라이브러리 도입, 경계 변경, 외부 서비스)은 `docs/decisions.md`에 한 항목.

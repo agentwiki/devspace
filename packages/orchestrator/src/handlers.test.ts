@@ -8,7 +8,7 @@ import type {
   TurnRequest,
 } from '@devspace/contracts';
 import { createInMemoryRepositories, type Repositories } from '@devspace/db';
-import type { SandboxCore } from '@devspace/sandbox-core';
+import { SandboxError, type SandboxCore } from '@devspace/sandbox-core';
 import type { AgentRunner } from '@devspace/agent-runner';
 import {
   Orchestrator,
@@ -379,6 +379,215 @@ describe('action.invoked', () => {
     expect(wu?.state).toBe('PR_OPEN');
     expect(wu?.prNumber).toBe(42);
     expect(wu?.prUrl).toBe('https://github.com/a/b/pull/42');
+  });
+});
+
+describe('session resume (M19)', () => {
+  /** Walk a seeded unit to PR_OPEN (prNumber 42, the seed's PR branch). */
+  async function seedPrOpen(h: Harness) {
+    const { conv, wu } = await seed(h.repos, h.store, 'WORKING');
+    await h.repos.workUnits.transition(wu.id, 'committedAndPushed');
+    const prOpen = await h.repos.workUnits.transition(wu.id, 'prCreated', {
+      prNumber: 42,
+      prUrl: 'https://github.com/a/b/pull/42',
+    });
+    return { conv, wu: prOpen };
+  }
+
+  const resume = (h: Harness, conversationId: string) =>
+    h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId,
+      userId: 'u1',
+      actionId: 'resume-work',
+      payload: {},
+    });
+
+  const message = (h: Harness, conversationId: string, text = 'address the review') =>
+    h.orch.handleChatEvent({ type: 'message.posted', conversationId, userId: 'u1', text });
+
+  it('a message in PR_OPEN offers the resume button instead of a dead end', async () => {
+    const h = harness();
+    const { conv } = await seedPrOpen(h);
+    await message(h, conv.id);
+    const offer = h.rendered.at(-1) as { type: string; actions: Array<{ actionId: string }> };
+    expect(offer.type).toBe('post_actions');
+    expect(offer.actions).toEqual([expect.objectContaining({ actionId: 'resume-work' })]);
+  });
+
+  it('resumes a released unit with a fresh env cloned from the PR branch', async () => {
+    const h = harness();
+    const { conv, wu } = await seedPrOpen(h);
+    await h.repos.workUnits.releaseEnv(wu.id); // the M18 release happened
+
+    await resume(h, conv.id);
+
+    // Re-provisioned at ref = the PR branch, not the repo default.
+    expect(h.sandbox.createEnvironment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repoUrl: 'https://github.com/a/b.git',
+        ref: `devspace/${wu.id}`,
+      }),
+    );
+    const after = await h.repos.workUnits.get(wu.id);
+    expect(after?.state).toBe('WORKING');
+    expect(after?.envId).toBe('env_1');
+    expect(after?.agentSessionId).toBeUndefined(); // created lazily by the next message
+    expect(after?.prNumber).toBe(42); // the PR association survives the resume
+
+    const audit = await h.repos.audit.listByConversation(conv.id);
+    expect(audit.find((a) => a.action === 'session.resumed')?.detail).toEqual({
+      envId: 'env_1',
+      reprovisioned: true,
+    });
+    expect(h.rendered.at(-1)).toMatchObject({
+      type: 'update_status',
+      state: 'WORKING',
+      text: expect.stringContaining('resumed'),
+    });
+  });
+
+  it('the next message creates ONE agent session and persists it', async () => {
+    const h = harness();
+    const { conv, wu } = await seedPrOpen(h);
+    await h.repos.workUnits.releaseEnv(wu.id);
+    await resume(h, conv.id);
+    const createSession = vi.spyOn(h.agent, 'createSession');
+
+    await message(h, conv.id);
+    expect(createSession).toHaveBeenCalledTimes(1);
+    // The regression the advance-drop would cause: the id must land on the
+    // row, or every later message would mint another orphan ACP session.
+    expect((await h.repos.workUnits.get(wu.id))?.agentSessionId).toBe('as_1');
+
+    await message(h, conv.id, 'and another thing');
+    expect(createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes in place when the environment is still alive', async () => {
+    const h = harness();
+    const { conv, wu } = await seedPrOpen(h); // envId env_1, agentSessionId as_1 intact
+
+    await resume(h, conv.id);
+
+    expect(h.sandbox.createEnvironment).not.toHaveBeenCalled();
+    const after = await h.repos.workUnits.get(wu.id);
+    expect(after?.state).toBe('WORKING');
+    expect(after?.envId).toBe('env_1');
+    expect(after?.agentSessionId).toBe('as_1'); // env and session die together — both live
+    const audit = await h.repos.audit.listByConversation(conv.id);
+    expect(audit.find((a) => a.action === 'session.resumed')?.detail).toEqual({
+      envId: 'env_1',
+      reprovisioned: false,
+    });
+
+    // The live session is reused — no new one is created.
+    const createSession = vi.spyOn(h.agent, 'createSession');
+    await message(h, conv.id);
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it('a stale envId re-provisions — resume trusts the host, not the row', async () => {
+    const h = harness();
+    const { conv, wu } = await seedPrOpen(h); // row still carries env_1
+    (h.sandbox.getEnvironment as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new SandboxError('NOT_FOUND', 'no such environment: env_1'),
+    );
+
+    await resume(h, conv.id);
+
+    expect(h.sandbox.createEnvironment).toHaveBeenCalledOnce();
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
+  });
+
+  it('a failed provisioning leaves the unit PR_OPEN and the button retries', async () => {
+    const h = harness();
+    const { conv, wu } = await seedPrOpen(h);
+    await h.repos.workUnits.releaseEnv(wu.id);
+    (h.sandbox.createEnvironment as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('no capacity'),
+    );
+
+    await resume(h, conv.id);
+    const after = await h.repos.workUnits.get(wu.id);
+    expect(after?.state).toBe('PR_OPEN'); // never FAILED — GitHub owns this lifecycle
+    expect(after?.envId).toBeUndefined();
+    expect((h.rendered.at(-1) as { text: string }).text).toContain('Could not resume');
+    const audit = await h.repos.audit.listByConversation(conv.id);
+    expect(audit.some((a) => a.action === 'session.resumed')).toBe(false);
+
+    await resume(h, conv.id); // the retry succeeds
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
+  });
+
+  it('a lost transition race destroys the freshly provisioned env', async () => {
+    const h = harness();
+    const { conv, wu } = await seedPrOpen(h);
+    await h.repos.workUnits.releaseEnv(wu.id);
+    vi.spyOn(h.repos.workUnits, 'transition').mockRejectedValueOnce(
+      new Error('unit advanced by a sibling'),
+    );
+
+    await resume(h, conv.id);
+
+    // The env id was never persisted — leaving it would leak the container.
+    expect(h.sandbox.destroyEnvironment).toHaveBeenCalledWith('env_1');
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_OPEN');
+    expect((h.rendered.at(-1) as { text: string }).text).toContain('Could not resume');
+  });
+
+  it('drops a bus PR event for a resumed unit; the poll re-detects after suspend', async () => {
+    const h = harness();
+    const { conv, wu } = await seedPrOpen(h);
+    await resume(h, conv.id);
+
+    const evt = await h.repos.events.append({
+      topic: TOPIC_PR_MERGED,
+      workUnitId: wu.id,
+      payload: {},
+    });
+    // Pre-M19 this threw IllegalTransition — a bus handler that throws
+    // redelivers forever. Now it drops.
+    await expect(h.orch.handleBusEvent(evt)).resolves.toBeUndefined();
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
+
+    // Back in PR_OPEN (the reaper's suspend), the same publish lands.
+    await h.repos.workUnits.transition(wu.id, 'suspend');
+    await h.orch.handleBusEvent(evt);
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_MERGED');
+  });
+
+  it('create-pr after resume re-pushes and returns to PR_OPEN', async () => {
+    const h = harness();
+    const { conv, wu } = await seedPrOpen(h);
+    await resume(h, conv.id);
+
+    await h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId: conv.id,
+      userId: 'u1',
+      actionId: 'create-pr',
+      payload: {},
+    });
+    const after = await h.repos.workUnits.get(wu.id);
+    expect(after?.state).toBe('PR_OPEN');
+    expect(after?.prNumber).toBe(42);
+  });
+
+  it('refuses to resume a settled unit, and answers gently when already active', async () => {
+    const h = harness();
+    const { conv, wu } = await seedPrOpen(h);
+    await resume(h, conv.id);
+    await resume(h, conv.id); // double click
+    expect((h.rendered.at(-1) as { text: string }).text).toContain('already active');
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
+
+    await h.repos.workUnits.transition(wu.id, 'suspend');
+    await h.repos.workUnits.transition(wu.id, 'prMerged');
+    await resume(h, conv.id);
+    expect((h.rendered.at(-1) as { text: string }).text).toContain('finished');
+    expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_MERGED');
+    expect(h.sandbox.createEnvironment).not.toHaveBeenCalled();
   });
 });
 

@@ -414,6 +414,12 @@ export const WorkEventSchema = z.enum([
   'prCreated',
   'prMerged',
   'prClosed',
+  // M19: resume takes a PR_OPEN unit back to WORKING (and self-loops on
+  // WORKING so the resumed session's lazily created agent session has a legal
+  // transition to persist through); suspend is the reaper's way back — an
+  // idle resumed unit returns to PR_OPEN instead of being torn down.
+  'resume',
+  'suspend',
   'error',
   'end',
 ]);
@@ -428,14 +434,30 @@ export const WORK_TRANSITIONS: Readonly<Record<WorkState, Partial<Record<WorkEve
     CREATED: { repoChoice: 'PROVISIONING', error: 'FAILED', end: 'TORN_DOWN' },
     PROVISIONING: { envReady: 'READY', error: 'FAILED', end: 'TORN_DOWN' },
     READY: { firstMessage: 'WORKING', error: 'FAILED', end: 'TORN_DOWN' },
-    WORKING: { committedAndPushed: 'PRE_PR', error: 'FAILED', end: 'TORN_DOWN' },
-    PRE_PR: {
-      prCreated: 'PR_OPEN',
+    WORKING: {
       committedAndPushed: 'PRE_PR',
+      // M19: the self-loop persists a resumed unit's fresh agent session id;
+      // suspend sends an idle resumed unit back to waiting on its PR.
+      resume: 'WORKING',
+      suspend: 'PR_OPEN',
       error: 'FAILED',
       end: 'TORN_DOWN',
     },
-    PR_OPEN: { prMerged: 'PR_MERGED', prClosed: 'PR_CLOSED', error: 'FAILED', end: 'TORN_DOWN' },
+    PRE_PR: {
+      prCreated: 'PR_OPEN',
+      committedAndPushed: 'PRE_PR',
+      suspend: 'PR_OPEN',
+      error: 'FAILED',
+      end: 'TORN_DOWN',
+    },
+    PR_OPEN: {
+      prMerged: 'PR_MERGED',
+      prClosed: 'PR_CLOSED',
+      // M19: an explicit resume-work action re-opens work on the PR branch.
+      resume: 'WORKING',
+      error: 'FAILED',
+      end: 'TORN_DOWN',
+    },
     PR_MERGED: { end: 'TORN_DOWN' },
     PR_CLOSED: { end: 'TORN_DOWN' },
     FAILED: { end: 'TORN_DOWN' },

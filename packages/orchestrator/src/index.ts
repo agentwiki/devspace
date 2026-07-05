@@ -381,6 +381,19 @@ export class Orchestrator {
       return;
     }
     if (STATE_RANK[wu.state] > STATE_RANK['WORKING']) {
+      // PR_OPEN is no longer a dead end (M19): offer the explicit resume
+      // action instead of booting a container on a stray "thanks!".
+      if (wu.state === 'PR_OPEN') {
+        await this.emit({
+          type: 'post_actions',
+          conversationId: event.conversationId,
+          text:
+            'This session is paused while its PR is under review — resume to keep ' +
+            'working on the same branch, or start a new conversation.',
+          actions: [{ actionId: 'resume-work', label: 'Resume work', style: 'primary' }],
+        });
+        return;
+      }
       await this.emit(
         messageCommand(
           event.conversationId,
@@ -432,7 +445,12 @@ export class Orchestrator {
         CreateAgentSessionRequestSchema.parse({ envId: unit.envId, llmKeyRef: llm.id }),
       );
       agentSessionId = session.agentSessionId;
-      unit = await this.advance(unit, 'firstMessage', 'WORKING', { agentSessionId });
+      // READY takes the firstMessage edge; a resumed unit is ALREADY WORKING,
+      // where `advance` would no-op and silently drop the patch — one orphan
+      // ACP session per message. The M19 self-loop persists it instead.
+      unit = await this.machine.apply(unit.id, unit.state === 'READY' ? 'firstMessage' : 'resume', {
+        agentSessionId,
+      });
     }
 
     for await (const agentEvent of this.deps.agents.runTurn(agentSessionId, {
@@ -493,6 +511,8 @@ export class Orchestrator {
       }
       case 'hybrid': // create-pr — agent finalizes commits, host-side wrapper pushes + opens PR
         return this.onCreatePr(event.conversationId, event.userId, wu, registry);
+      case 'resume': // resume-work — re-open work on a PR_OPEN unit (M19)
+        return this.onResumeWork(event.conversationId, event.userId, wu, registry);
       case 'expose-port':
         return this.onExposePort(event.conversationId, event.userId, wu, action.port, registry);
       case 'deterministic': // view-pr
@@ -650,6 +670,130 @@ export class Orchestrator {
     );
   }
 
+  /**
+   * Resume work on a PR_OPEN unit (M19, m19-plan Decisions 1–4): re-provision
+   * the environment from the PR branch when it is gone, then apply
+   * PR_OPEN --resume--> WORKING with the envId in the same transition. The
+   * agent session is NOT created here — the next message creates it through
+   * the ordinary lazy path, exactly like a fresh READY unit. A failed resume
+   * leaves the unit PR_OPEN (never FAILED — GitHub owns that lifecycle, the
+   * M17 exemption argument) and the button retries.
+   */
+  private async onResumeWork(
+    conversationId: string,
+    userId: string,
+    wu: WorkUnit,
+    registry: SecretRegistry,
+  ): Promise<void> {
+    if (wu.state === 'WORKING' || wu.state === 'PRE_PR') {
+      await this.emit(
+        messageCommand(
+          conversationId,
+          'This session is already active — just send a message.',
+          registry,
+        ),
+      );
+      return;
+    }
+    if (wu.state !== 'PR_OPEN') {
+      await this.emit(
+        messageCommand(
+          conversationId,
+          'This work unit is finished — start a new conversation for more changes.',
+          registry,
+        ),
+      );
+      return;
+    }
+    if (!wu.repoUrl || !wu.branch) {
+      await this.emit(
+        messageCommand(conversationId, 'This work unit has no repository.', registry),
+      );
+      return;
+    }
+
+    let envId = wu.envId;
+    let reprovisioned = false;
+    try {
+      // Trust the host, not the row (the M11 discipline, one hop up): a
+      // stale envId — the host lost the container, or a sibling released it
+      // between the read and the click — re-provisions instead of resuming
+      // onto a corpse. Any other probe failure fails the resume message-only.
+      if (envId) {
+        try {
+          await this.deps.sandbox.getEnvironment(envId);
+        } catch (err) {
+          if (!(err instanceof SandboxError && err.code === 'NOT_FOUND')) throw err;
+          envId = undefined;
+        }
+      }
+      if (!envId) {
+        // Same provisioning posture as conversation.created: only the
+        // read-only clone token enters the container — but the ref is the PR
+        // BRANCH, so the agent continues from what the reviewer sees.
+        const cloneToken = await this.deps.secrets.resolve(
+          userId,
+          SECRET_GH_CLONE,
+          conversationId,
+          registry,
+        );
+        if (cloneToken) {
+          await this.audit('secret.resolved', {
+            userId,
+            conversationId,
+            workUnitId: wu.id,
+            detail: { name: SECRET_GH_CLONE, purpose: 'env.resume' },
+          });
+        }
+        const env = await this.deps.sandbox.createEnvironment(
+          CreateEnvironmentRequestSchema.parse({
+            repoUrl: wu.repoUrl,
+            ref: wu.branch,
+            mounts: [agentRuntimeMount()],
+            secrets: cloneToken
+              ? [{ name: SECRET_GH_CLONE, value: cloneToken, target: 'env' }]
+              : [],
+          }),
+        );
+        envId = env.envId;
+        reprovisioned = true;
+      }
+      // envId lands in the SAME transition that makes the unit WORKING — no
+      // window where the row owns a container it doesn't know about. Backward
+      // move, so machine.apply directly: `advance` stays forward-only.
+      await this.machine.apply(wu.id, 'resume', { envId });
+      await this.audit('session.resumed', {
+        userId,
+        conversationId,
+        workUnitId: wu.id,
+        detail: { envId, reprovisioned },
+      });
+      await this.emit(
+        statusCommand(
+          conversationId,
+          'WORKING',
+          `Session resumed on \`${wu.branch}\` — send a message to continue.`,
+          registry,
+        ),
+      );
+    } catch (err) {
+      // A container provisioned by THIS failing attempt was never persisted —
+      // destroy it best-effort or it leaks with no pointer (m19-plan
+      // Decision 3; the window is this one call).
+      if (reprovisioned && envId) {
+        try {
+          await this.deps.sandbox.destroyEnvironment(envId);
+        } catch {
+          /* best-effort */
+        }
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      await this.emit(
+        messageCommand(conversationId, `Could not resume this session: ${message}`, registry),
+      );
+    }
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Out-of-process bus events (PR poll reconciler) + reconciler driver       */
   /* ---------------------------------------------------------------------- */
@@ -660,6 +804,11 @@ export class Orchestrator {
     if (!evt.workUnitId) return;
     const wu = await this.workUnits.get(evt.workUnitId);
     if (!wu) return;
+    // A resumed unit (M19) sits below PR_OPEN while its PR truth is paused —
+    // DROP the event rather than throw (`advance` would attempt the illegal
+    // transition, and a throwing bus handler redelivers forever). The poll
+    // backstop re-detects the PR state once the unit is back in PR_OPEN.
+    if (STATE_RANK[wu.state] < STATE_RANK['PR_OPEN']) return;
     const registry = this.registryFor(wu.conversationId);
     if (evt.topic === TOPIC_PR_MERGED) {
       await this.advance(wu, 'prMerged', 'PR_MERGED');

@@ -77,6 +77,20 @@ describe('work-unit FSM', () => {
     expect(nextWorkState('TORN_DOWN', 'repoChoice')).toBeNull();
   });
 
+  it('resume and suspend cycle work through review (M19)', () => {
+    // Resume re-opens work on an open PR; the WORKING self-loop persists the
+    // resumed session's lazily created agent session id.
+    expect(nextWorkState('PR_OPEN', 'resume')).toBe('WORKING');
+    expect(nextWorkState('WORKING', 'resume')).toBe('WORKING');
+    // Suspend is the reaper's way back — never from a terminal state.
+    expect(nextWorkState('WORKING', 'suspend')).toBe('PR_OPEN');
+    expect(nextWorkState('PRE_PR', 'suspend')).toBe('PR_OPEN');
+    expect(nextWorkState('READY', 'resume')).toBeNull();
+    expect(nextWorkState('PR_MERGED', 'resume')).toBeNull();
+    expect(nextWorkState('PR_OPEN', 'suspend')).toBeNull();
+    expect(nextWorkState('TORN_DOWN', 'resume')).toBeNull();
+  });
+
   it('every state has a transition entry', () => {
     for (const state of WorkStateSchema.options) {
       expect(WORK_TRANSITIONS[state]).toBeDefined();

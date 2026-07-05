@@ -15,6 +15,11 @@ describe('classifyAction', () => {
     expect(classifyAction('mystery')).toEqual({ kind: 'unknown', actionId: 'mystery' });
   });
 
+  it('classifies resume-work (M19)', () => {
+    expect(classifyAction('resume-work')).toEqual({ kind: 'resume' });
+    expect(classifyAction('resume-work:extra').kind).toBe('unknown');
+  });
+
   it('classifies expose-port with a validated port number (M6)', () => {
     expect(classifyAction('expose-port:3000')).toEqual({ kind: 'expose-port', port: 3000 });
     expect(classifyAction('expose-port:1')).toEqual({ kind: 'expose-port', port: 1 });

@@ -21,12 +21,16 @@ export type ActionClass =
   // M6: expose a container port through the preview proxy. Adapters normalize
   // their own ergonomics (`!port 3000`) onto this id (m6-plan Decision 6).
   | { kind: 'expose-port'; port: number }
+  // M19: re-open work on a PR_OPEN unit — re-provision the env from the PR
+  // branch when it was released, then PR_OPEN --resume--> WORKING.
+  | { kind: 'resume' }
   | { kind: 'unknown'; actionId: string };
 
 /** Classify a chat button click. "create-pr" is a hybrid task; "view-pr" is not. */
 export function classifyAction(actionId: string): ActionClass {
   if (actionId === 'view-pr') return { kind: 'deterministic', op: 'view-pr' };
   if (actionId === 'create-pr') return { kind: 'hybrid', op: 'create-pr' };
+  if (actionId === 'resume-work') return { kind: 'resume' };
   const m = /^(approve|deny):(.+)$/.exec(actionId);
   if (m)
     return { kind: 'approval', requestId: m[2]!, decision: m[1] === 'approve' ? 'allow' : 'deny' };

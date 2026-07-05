@@ -49,7 +49,7 @@ import {
   type DiscordModal,
   type ModalFields,
 } from '../discord/modals.js';
-import { parseRepoChoice } from './slack.js';
+import { choiceFromSubmission, parseRepoChoice } from './slack.js';
 
 /* -------------------------------------------------------------------------- */
 /* The transport seam                                                          */
@@ -299,7 +299,7 @@ export class DiscordAdapter implements ChatAdapter, ChatRenderer {
           await this.rootConversation(
             decoded.context,
             event.userId,
-            parseRepoChoice(parseRepoPickerSubmission(event.fields)),
+            choiceFromSubmission(parseRepoPickerSubmission(event.fields)),
           );
         }
       },

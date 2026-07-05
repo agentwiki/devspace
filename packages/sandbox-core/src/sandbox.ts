@@ -37,6 +37,9 @@ import { DockerRuntime } from './runtime.js';
 import type { ContainerRuntime } from './runtime.js';
 import type { PreviewRegistrar } from './preview-proxy.js';
 
+/** Default bound on the one-shot setup script (M24) — `up`'s own default. */
+export const DEFAULT_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+
 /** Typed error carrying one of the contract ErrorCodes. */
 export class SandboxError extends Error {
   constructor(
@@ -141,6 +144,9 @@ export class DevcontainerSandboxCore implements SandboxCore {
   /** Physical capacity reported with stats samples (M16); injectable for tests. */
   private readonly hostInfo: { cpuCount: number; memTotalMB: number };
 
+  /** Bound on the one-shot setup script (M24, `SANDBOX_SETUP_TIMEOUT_MS`). */
+  private readonly setupTimeoutMs: number;
+
   constructor(
     deps?: Partial<SandboxCoreDeps> & {
       runner?: CommandRunner;
@@ -151,6 +157,7 @@ export class DevcontainerSandboxCore implements SandboxCore {
       stateStore?: EnvStateStore;
       egress?: EgressScopeRegistrar;
       hostInfo?: { cpuCount: number; memTotalMB: number };
+      setupTimeoutMs?: number;
     },
   ) {
     const runner = deps?.runner ?? nodeCommandRunner;
@@ -169,6 +176,7 @@ export class DevcontainerSandboxCore implements SandboxCore {
       cpuCount: cpus().length,
       memTotalMB: totalmem() / 1024 ** 2,
     };
+    this.setupTimeoutMs = deps?.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS;
   }
 
   async createEnvironment(input: CreateEnvironmentRequest): Promise<Environment> {
@@ -240,14 +248,41 @@ export class DevcontainerSandboxCore implements SandboxCore {
     }
 
     try {
-      const { containerId, networkName, workspaceFolder, egressGateway, egressScope } =
-        await this.provisioner.provision(envId, req);
+      const {
+        containerId,
+        networkName,
+        workspaceFolder,
+        remoteWorkspaceFolder,
+        egressGateway,
+        egressScope,
+      } = await this.provisioner.provision(envId, req);
       record.containerId = containerId;
       record.networkName = networkName;
       record.workspaceFolder = workspaceFolder;
       record.egressGateway = egressGateway;
       record.egressScope = egressScope;
       record.env = { ...record.env, status: 'ready', containerId };
+      // One-shot setup (M24): the env is ready ONLY in memory here — the
+      // durable table records `ready` strictly after setup succeeds, so a
+      // crash mid-setup is a crashed transition and recovery discards it
+      // (m24-plan Decision 4). Root, workspace cwd, no secret injection —
+      // the same execution whether this create is a warm-pool fill or cold.
+      if (req.setupScript) {
+        try {
+          await this.runSetupScript(containerId, req.setupScript, remoteWorkspaceFolder);
+        } catch (err) {
+          // A half-setup env never reaches a tenant: same cleanup as the
+          // persist-failure path below.
+          await this.runtime.destroy(containerId).catch(() => {});
+          if (egressGateway !== undefined) this.egress?.clearScope(egressGateway);
+          if (networkName) await this.runtime.removeNetwork?.(networkName).catch(() => {});
+          record.containerId = undefined;
+          record.networkName = undefined;
+          record.egressGateway = undefined;
+          record.egressScope = undefined;
+          throw err;
+        }
+      }
       if (this.stateStore) {
         try {
           await this.stateStore.save(persistedState(record));
@@ -560,6 +595,47 @@ export class DevcontainerSandboxCore implements SandboxCore {
     return { proxyUrl: route.proxyUrl, token: route.token };
   }
 
+  /**
+   * Run the request's one-shot setup script (M24): `sh -c <script>` as root,
+   * cwd the container workspace, and deliberately NO secret injection — a
+   * warm-pool fill runs before any tenant is known, and the script must be
+   * the same execution warm and cold or the pool key would lie (m24-plan
+   * Decision 3). Bounded by `setupTimeoutMs`; the caller destroys the env on
+   * any failure, so the docker-exec kill caveat (the signal reaches only the
+   * local client) costs nothing here.
+   */
+  private async runSetupScript(
+    containerId: string,
+    script: string,
+    cwd: string | undefined,
+  ): Promise<void> {
+    const stream = this.runtime.execStream(containerId, {
+      cmd: ['sh', '-c', script],
+      user: 'root',
+      ...(cwd !== undefined ? { cwd } : {}),
+      tty: false,
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      stream.kill();
+    }, this.setupTimeoutMs);
+    try {
+      const { code, stderr } = await captureExec(stream);
+      if (timedOut) {
+        throw new Error(`setup script timed out after ${this.setupTimeoutMs}ms`);
+      }
+      if (code !== 0) {
+        // The tail only — no secrets were injected, and env values are
+        // non-secret by contract (m24-plan Decision 2).
+        const tail = stderr.toString('utf8').trim().slice(-500);
+        throw new Error(`setup script exited ${code}${tail ? `: ${tail}` : ''}`);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private requireReady(envId: string): EnvRecord {
     const record = this.envs.get(envId);
     if (!record) throw new SandboxError('NOT_FOUND', `no such environment: ${envId}`);
@@ -598,6 +674,20 @@ export function maxEnvsFromEnv(env: Record<string, string | undefined>): number 
   if (!raw) return undefined;
   if (!/^\d+$/.test(raw) || Number(raw) < 1) {
     throw new Error(`SANDBOX_MAX_ENVS must be a positive integer, got "${raw}"`);
+  }
+  return Number(raw);
+}
+
+/**
+ * Setup-script timeout from the environment (`SANDBOX_SETUP_TIMEOUT_MS`);
+ * undefined when unset (the caller falls back to DEFAULT_SETUP_TIMEOUT_MS).
+ * Config errors throw at boot — the SANDBOX_MAX_ENVS precedent.
+ */
+export function setupTimeoutFromEnv(env: Record<string, string | undefined>): number | undefined {
+  const raw = env.SANDBOX_SETUP_TIMEOUT_MS?.trim();
+  if (!raw) return undefined;
+  if (!/^\d+$/.test(raw) || Number(raw) < 1) {
+    throw new Error(`SANDBOX_SETUP_TIMEOUT_MS must be a positive ms integer, got "${raw}"`);
   }
   return Number(raw);
 }

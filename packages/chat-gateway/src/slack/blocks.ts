@@ -212,7 +212,12 @@ interface InputBlock {
   block_id: string;
   optional: boolean;
   label: PlainText;
-  element: { type: 'plain_text_input'; action_id: 'value'; placeholder?: PlainText };
+  element: {
+    type: 'plain_text_input';
+    action_id: 'value';
+    placeholder?: PlainText;
+    multiline?: boolean;
+  };
 }
 
 export interface SlackModalView {
@@ -233,6 +238,7 @@ const input = (
   label: string,
   optional: boolean,
   placeholder?: string,
+  multiline?: boolean,
 ): InputBlock => ({
   type: 'input',
   block_id: blockId,
@@ -242,6 +248,7 @@ const input = (
     type: 'plain_text_input',
     action_id: 'value',
     ...(placeholder ? { placeholder: plain(placeholder) } : {}),
+    ...(multiline ? { multiline: true } : {}),
   },
 });
 
@@ -281,6 +288,8 @@ export function repoPickerModal(privateMetadata: string): SlackModalView {
       input('repo', 'Repository', false, 'https://github.com/owner/repo or owner/repo'),
       input('ref', 'Branch or ref (optional)', true, 'main'),
       input('network', 'Network (optional)', true, 'none | host1,host2 | +extra.example.com'),
+      input('env_vars', 'Env vars (optional, non-secret)', true, 'KEY=value; OTHER=value'),
+      input('setup', 'Setup script (optional)', true, 'corepack enable && pnpm install', true),
     ],
   };
 }
@@ -313,10 +322,54 @@ export function normalizeNetworkField(raw: string | null | undefined): string {
   return (raw ?? '').replace(/\s+/g, '').replace(/^net=/i, '');
 }
 
-/** Extract the "<repo> [ref] [net=…]" text from a repo-picker submission. */
-export function parseRepoPickerSubmission(values: ViewStateValues): string {
+/**
+ * Parse env-var assignments (M24): `K=V` pairs separated by `;` (the `env=`
+ * command token) or newlines (the modal field), whitespace around pairs,
+ * names, and values forgiven. Values may be empty and may contain `=`; names
+ * must be POSIX. Returns null when the input is blank or ANY pair is
+ * malformed — the
+ * caller empties the WHOLE choice (the M22 Decision-8 posture: a typo costs
+ * a retype, never a differently-shaped env). One shared interpreter for the
+ * command token and both modal fields (m24-plan Decision 7).
+ */
+export function parseEnvAssignments(raw: string): Record<string, string> | null {
+  const pairs = raw
+    .split(/[;\n]/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (pairs.length === 0) return null;
+  const out: Record<string, string> = {};
+  for (const pair of pairs) {
+    const eq = pair.indexOf('=');
+    if (eq <= 0) return null;
+    const name = pair.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null;
+    out[name] = pair.slice(eq + 1).trim();
+  }
+  return out;
+}
+
+/** A parsed repo-picker submission (M24): the composed text for
+ * `parseRepoChoice` plus the fields that cannot ride a space-tokenized
+ * command — env assignments (null = filled but malformed) and the verbatim
+ * multi-line setup script. */
+export interface RepoPickerSubmission {
+  text: string;
+  env?: Record<string, string> | null;
+  setupScript?: string;
+}
+
+/** Extract the "<repo> [ref] [net=…]" text + env/setup fields from a
+ * repo-picker submission. */
+export function parseRepoPickerSubmission(values: ViewStateValues): RepoPickerSubmission {
   const repo = values.repo?.value?.value?.trim() ?? '';
   const ref = values.ref?.value?.value?.trim() ?? '';
   const net = normalizeNetworkField(values.network?.value?.value);
-  return [repo, ref, net ? `net=${net}` : ''].filter(Boolean).join(' ');
+  const envRaw = values.env_vars?.value?.value?.trim() ?? '';
+  const setup = values.setup?.value?.value ?? '';
+  return {
+    text: [repo, ref, net ? `net=${net}` : ''].filter(Boolean).join(' '),
+    ...(envRaw ? { env: parseEnvAssignments(envRaw) } : {}),
+    ...(setup.trim() ? { setupScript: setup } : {}),
+  };
 }

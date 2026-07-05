@@ -14,6 +14,7 @@ import {
   hostBudgetsFromEnv,
   maxEnvsFromEnv,
   parseFindOutput,
+  setupTimeoutFromEnv,
 } from './sandbox.js';
 import type { HostBudgets } from './sandbox.js';
 
@@ -26,10 +27,30 @@ class FakeContainer {
   readonly files = new Map<string, Buffer>();
   readonly modes = new Map<string, number>();
   lastEnv: Record<string, string> | undefined;
+  /** Generic `sh -c` runs (the M24 setup script), recorded verbatim. */
+  readonly shellRuns: Array<{
+    script: string;
+    user?: string;
+    cwd?: string;
+    env?: Record<string, string>;
+  }> = [];
+  shellResult: { code: number; stderr?: string } | undefined;
+  /** Called as a generic shell starts — lets tests observe mid-flight state. */
+  onShell?: () => void;
+  /** Generic shells never finish (until killed) — the timeout case. */
+  hangShell = false;
 
   exec(req: ExecRequest): ExecStream {
     this.lastEnv = req.env;
     const [cmd, ...rest] = req.cmd;
+    // A generic shell (not the fs helper's `cat > "$1"` shape): the setup script.
+    if (cmd === 'sh' && rest[0] === '-c' && rest[1] !== 'cat > "$1"') {
+      this.shellRuns.push({ script: rest[1]!, user: req.user, cwd: req.cwd, env: req.env });
+      this.onShell?.();
+      if (this.hangShell) return hangingStream();
+      const result = this.shellResult ?? { code: 0 };
+      return scriptStream(Buffer.alloc(0), Buffer.from(result.stderr ?? ''), result.code);
+    }
     const frames = this.run(cmd!, rest, req);
     return scriptStream(frames.out, frames.err, frames.code, (stdin) => frames.onStdin?.(stdin));
   }
@@ -118,6 +139,31 @@ function scriptStream(
   };
 }
 
+/** A stream that never produces frames until killed — the setup-timeout case. */
+function hangingStream(): ExecStream {
+  let killed = false;
+  let resolveDone!: (code: number) => void;
+  const done = new Promise<number>((r) => (resolveDone = r));
+  async function* gen() {
+    while (!killed) await new Promise((r) => setTimeout(r, 2));
+    // Nothing is ever yielded — the "process" produces no output before the
+    // kill; the yield below only convinces the type of the generator.
+    if (killed) return;
+    yield { kind: 'exit' as const, code: -1 };
+  }
+  return {
+    writeStdin: () => true,
+    drain: () => Promise.resolve(),
+    closeStdin() {},
+    frames: gen(),
+    done,
+    kill() {
+      killed = true;
+      resolveDone(-1);
+    },
+  };
+}
+
 /** In-memory EnvStateStore: inspectable, with injectable save failures. */
 class FakeEnvStateStore implements EnvStateStore {
   readonly states = new Map<string, PersistedEnvState>();
@@ -145,6 +191,7 @@ function makeCore(
     exists?: () => Promise<boolean>;
     stats?: ContainerRuntime['stats'];
     hostInfo?: { cpuCount: number; memTotalMB: number };
+    setupTimeoutMs?: number;
   } = {},
 ) {
   const destroy = vi.fn(async () => {});
@@ -200,6 +247,7 @@ function makeCore(
       stateStore: opts.stateStore,
       egress: opts.egress,
       hostInfo: opts.hostInfo,
+      setupTimeoutMs: opts.setupTimeoutMs,
     }),
     container,
     destroy,
@@ -984,5 +1032,80 @@ describe('getHostStats (M16 utilization truth)', () => {
     expect(hasHostStats({})).toBe(false);
     expect(hasHostStats(null)).toBe(false);
     expect(hasHostStats({ getHostStats: 42 })).toBe(false);
+  });
+});
+
+describe('setup script (M24)', () => {
+  it('runs as root in the container workspace, secret-less, before durable ready', async () => {
+    const store = new FakeEnvStateStore();
+    const container = new FakeContainer();
+    let statusAtSetup: string | undefined;
+    container.onShell = () => {
+      // The env is ready ONLY in memory while setup runs: the durable table
+      // still holds the provisioning record (m24-plan Decision 4).
+      statusAtSetup = [...store.states.values()][0]?.status;
+    };
+    const { core } = makeCore(
+      container,
+      { remoteWorkspaceFolder: '/workspaces/repo' },
+      { stateStore: store },
+    );
+
+    const env = await core.createEnvironment({
+      repoUrl: 'https://x/r.git',
+      secrets: [{ name: 'GH_TOKEN', value: 'secret-abc', target: 'env' }],
+      setupScript: 'corepack enable && pnpm install',
+    });
+    expect(env.status).toBe('ready');
+    expect(container.shellRuns).toEqual([
+      {
+        script: 'corepack enable && pnpm install',
+        user: 'root',
+        cwd: '/workspaces/repo',
+        env: undefined, // NO secret injection — identical warm and cold
+      },
+    ]);
+    expect(statusAtSetup).toBe('provisioning');
+    expect(store.states.get(env.envId)?.status).toBe('ready');
+  });
+
+  it('a failing setup destroys the env and fails the create with the stderr tail', async () => {
+    const store = new FakeEnvStateStore();
+    const container = new FakeContainer();
+    container.shellResult = { code: 1, stderr: 'npm ERR! boom' };
+    const { core, destroy, removeNetwork } = makeCore(
+      container,
+      { networkName: 'devspace-net-x' },
+      { stateStore: store },
+    );
+
+    await expect(core.createEnvironment({ setupScript: 'exit 1' })).rejects.toMatchObject({
+      code: 'PROVISION_FAILED',
+      message: expect.stringContaining('npm ERR! boom'),
+    });
+    // A half-setup env never reaches a tenant — and never survives a restart.
+    expect(destroy).toHaveBeenCalledWith('cont-1');
+    expect(removeNetwork).toHaveBeenCalledWith('devspace-net-x');
+    expect(store.states.size).toBe(0);
+  });
+
+  it('a hung setup times out, and the env is destroyed', async () => {
+    const container = new FakeContainer();
+    container.hangShell = true;
+    const { core, destroy } = makeCore(container, {}, { setupTimeoutMs: 20 });
+
+    await expect(core.createEnvironment({ setupScript: 'sleep infinity' })).rejects.toMatchObject({
+      code: 'PROVISION_FAILED',
+      message: expect.stringContaining('timed out'),
+    });
+    expect(destroy).toHaveBeenCalledWith('cont-1');
+  });
+
+  it('setupTimeoutFromEnv parses, rejects garbage, and is undefined when unset', () => {
+    expect(setupTimeoutFromEnv({})).toBeUndefined();
+    expect(setupTimeoutFromEnv({ SANDBOX_SETUP_TIMEOUT_MS: ' ' })).toBeUndefined();
+    expect(setupTimeoutFromEnv({ SANDBOX_SETUP_TIMEOUT_MS: '60000' })).toBe(60000);
+    expect(() => setupTimeoutFromEnv({ SANDBOX_SETUP_TIMEOUT_MS: '0' })).toThrow();
+    expect(() => setupTimeoutFromEnv({ SANDBOX_SETUP_TIMEOUT_MS: 'fast' })).toThrow();
   });
 });

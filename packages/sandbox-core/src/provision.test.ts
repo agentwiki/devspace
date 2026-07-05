@@ -14,6 +14,7 @@ import {
   mergeDevcontainerConfig,
   mountConfigEntries,
   parseDevcontainerUpOutput,
+  policyEnvCollisions,
   resourceRunArgs,
 } from './provision.js';
 import type { DevcontainerConfig } from './provision.js';
@@ -134,6 +135,40 @@ describe('mergeDevcontainerConfig', () => {
       mounts: [],
     });
     expect('containerEnv' in config).toBe(false);
+  });
+
+  it('merges tenant env between repo config and policy (M24)', () => {
+    const config = mergeDevcontainerConfig({
+      repoConfig: { containerEnv: { FROM_REPO: 'repo', SHARED: 'repo' } },
+      resources: { cpu: 1, memMB: 1024, diskMB: 1024 },
+      mounts: [],
+      tenantEnv: { SHARED: 'tenant', HTTP_PROXY: 'http://tenant:1' },
+      containerEnv: { HTTP_PROXY: 'http://gw:3128' },
+    });
+    // repo < tenant < policy — the tenant customizes the repo's defaults,
+    // policy stays untouchable (collisions refuse earlier, at the
+    // provisioner; the merge itself is a total function).
+    expect(config.containerEnv).toEqual({
+      FROM_REPO: 'repo',
+      SHARED: 'tenant',
+      HTTP_PROXY: 'http://gw:3128',
+    });
+  });
+});
+
+describe('policyEnvCollisions (M24)', () => {
+  const policy = { HTTP_PROXY: 'p', https_proxy: 'p', NO_PROXY: 'l' };
+
+  it('names tenant keys that collide with policy keys, case-insensitively', () => {
+    expect(policyEnvCollisions({ http_proxy: 'x', HTTPS_PROXY: 'y', OK: 'z' }, policy)).toEqual([
+      'http_proxy',
+      'HTTPS_PROXY',
+    ]);
+  });
+
+  it('is empty when nothing collides — and always in demo mode (no policy env)', () => {
+    expect(policyEnvCollisions({ NODE_OPTIONS: 'x' }, policy)).toEqual([]);
+    expect(policyEnvCollisions({ HTTP_PROXY: 'mine' }, {})).toEqual([]);
   });
 });
 
@@ -527,6 +562,42 @@ describe('DevcontainerProvisioner with a per-env network profile', () => {
         allowedHosts: ['mirror.corp.example'],
       }),
     ).rejects.toThrow(/SANDBOX_TENANT_HOSTS/);
+  });
+
+  it('bakes tenant env into the synthesized config, under policy (M24)', async () => {
+    const { runner, calls } = fakeRunner({});
+    const provisioner = new DevcontainerProvisioner(runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+      hardening: { network: 'per-env', egressProxyPort: 3128 },
+    });
+
+    await provisioner.provision('e11', { ...req, env: { NODE_OPTIONS: '--trace-warnings' } });
+    const upArgs = calls.find((c) => c.command === 'devcontainer')!.args;
+    const configPath = upArgs[upArgs.indexOf('--config') + 1]!;
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as DevcontainerConfig;
+    expect(config.containerEnv?.NODE_OPTIONS).toBe('--trace-warnings');
+    expect(config.containerEnv?.HTTPS_PROXY).toBe('http://172.20.0.1:3128');
+  });
+
+  it('refuses tenant env keys that collide with policy env, naming them (M24)', async () => {
+    const { runner } = fakeRunner({});
+    const provisioner = new DevcontainerProvisioner(runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+      hardening: { network: 'per-env', egressProxyPort: 3128 },
+    });
+
+    await expect(
+      provisioner.provision('e12', { ...req, env: { http_proxy: 'http://mine:1' } }),
+    ).rejects.toThrow(/http_proxy/);
+
+    // Demo mode has no policy env — the same key is the tenant's to set.
+    const demoCalls = fakeRunner({});
+    const demo = new DevcontainerProvisioner(demoCalls.runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+    });
+    await expect(
+      demo.provision('e13', { ...req, env: { http_proxy: 'http://mine:1' } }),
+    ).resolves.toMatchObject({ containerId: 'c1' });
   });
 
   it('refuses an uncovered custom policy before touching anything (M22)', async () => {

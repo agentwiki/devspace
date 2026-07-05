@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import type { App, Receiver } from '@slack/bolt';
 import type { ChatEvent } from '@devspace/contracts';
-import { parseRepoChoice, SlackAdapter } from './slack.js';
+import { choiceFromSubmission, parseRepoChoice, SlackAdapter } from './slack.js';
 import { ConversationBinding } from '../binding.js';
 import type { Clock } from '../status.js';
 
@@ -181,6 +181,54 @@ describe('parseRepoChoice', () => {
     expect(parseRepoChoice('acme/widgets net=+')).toEqual({ empty: true });
     expect(parseRepoChoice('acme/widgets net=+,+')).toEqual({ empty: true });
   });
+
+  it('parses an env= token into non-secret env vars (M24)', () => {
+    expect(
+      parseRepoChoice('acme/widgets main env=A=1;NODE_OPTIONS=--max-old-space-size=4096'),
+    ).toEqual({
+      repoUrl: 'https://github.com/acme/widgets',
+      ref: 'main',
+      empty: false,
+      env: { A: '1', NODE_OPTIONS: '--max-old-space-size=4096' },
+    });
+    // Composes with net= — token order is free.
+    expect(parseRepoChoice('env=A=1 acme/widgets net=none')).toMatchObject({
+      networkAccess: 'none',
+      env: { A: '1' },
+    });
+  });
+
+  it('a malformed or empty env= value empties the whole choice (M24)', () => {
+    expect(parseRepoChoice('acme/widgets env=')).toEqual({ empty: true });
+    expect(parseRepoChoice('acme/widgets env=A=1;oops')).toEqual({ empty: true });
+    expect(parseRepoChoice('acme/widgets env=1ST=x')).toEqual({ empty: true });
+  });
+});
+
+describe('choiceFromSubmission (M24)', () => {
+  it('attaches env + setup onto the parsed choice, the field winning over a token', () => {
+    expect(
+      choiceFromSubmission({
+        text: 'acme/widgets main net=none env=IGNORED=1',
+        env: { A: '1' },
+        setupScript: 'pnpm install',
+      }),
+    ).toEqual({
+      repoUrl: 'https://github.com/acme/widgets',
+      ref: 'main',
+      empty: false,
+      networkAccess: 'none',
+      env: { A: '1' },
+      setupScript: 'pnpm install',
+    });
+  });
+
+  it('a malformed env field empties the WHOLE choice; nothing attaches to an empty one', () => {
+    expect(choiceFromSubmission({ text: 'acme/widgets', env: null })).toEqual({ empty: true });
+    expect(choiceFromSubmission({ text: '', setupScript: 'pnpm install' })).toEqual({
+      empty: true,
+    });
+  });
 });
 
 describe('SlackAdapter inbound (recorded payloads through real Bolt)', () => {
@@ -309,6 +357,26 @@ describe('SlackAdapter inbound (recorded payloads through real Bolt)', () => {
         externalChannelId: 'C0123ABC:9999.000001',
         userId: 'U111',
         repoChoice: { repoUrl: 'https://github.com/acme/widgets', ref: 'main', empty: false },
+      },
+    ]);
+  });
+
+  it('repo picker env + setup fields reach conversation.created on the choice (M24)', async () => {
+    const h = await startAdapter();
+    await h.receiver.dispatch(fixture('view-repo-picker-submit-env-setup.json'));
+    expect(h.events).toEqual([
+      {
+        type: 'conversation.created',
+        platform: 'slack',
+        externalChannelId: 'C0123ABC:9999.000001',
+        userId: 'U111',
+        repoChoice: {
+          repoUrl: 'https://github.com/acme/widgets',
+          ref: 'main',
+          empty: false,
+          env: { A: '1', NODE_OPTIONS: '--trace-warnings' },
+          setupScript: 'corepack enable\npnpm install',
+        },
       },
     ]);
   });

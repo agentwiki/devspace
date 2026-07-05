@@ -213,6 +213,21 @@ on both repo-picker modals, which rides the composed picker text as a
 `net=` token so `parseRepoChoice` stays the single interpreter
 (docs/m23-plan.md).
 
+Since M24 a request also shapes its environment's process env and its
+preparation: `env` (non-secret BY CONTRACT — values are visible in the
+container config; anything sensitive belongs in `secrets`) bakes into the
+synthesized `containerEnv`, merged repo config < tenant < policy with
+policy-key collisions refused at provision naming the keys, and
+`setupScript` runs once (`sh -c`, as root, container-workspace cwd, no
+secret injection — a warm-pool fill runs it identically) after
+`devcontainer up` and strictly before the durable table records `ready`,
+bounded by `SANDBOX_SETUP_TIMEOUT_MS`; a failing or hung setup destroys the
+env rather than hand out a half-setup one. Both fields join the canonical
+pool key, persist on the work unit (the M22 pattern), and ride
+`env=K=V;K2=V2` / the repo-picker modals' Env-vars + Setup-script fields —
+`parseEnvAssignments` is the single env interpreter, the script attaches
+verbatim (docs/m24-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

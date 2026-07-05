@@ -36,6 +36,7 @@ import {
   nodeCommandRunner,
   previewProxyFromEnv,
   sandboxHostsFromEnv,
+  setupTimeoutFromEnv,
   statsIntervalFromEnv,
   warmKeepOnStopFromEnv,
   warmPoolsFromEnv,
@@ -273,7 +274,14 @@ export async function bootOrchestrator(
     // Durable env table (M11): the in-process sandbox recovers what its
     // predecessor was serving BEFORE anything places or sweeps.
     const stateStore = config.envStateStore ?? envStateStoreFromEnv(process.env);
-    const local = new DevcontainerSandboxCore({ hardening, preview, stateStore, egress });
+    // Setup-script bound (M24) — host policy, like everything else local here.
+    const local = new DevcontainerSandboxCore({
+      hardening,
+      preview,
+      stateStore,
+      egress,
+      setupTimeoutMs: setupTimeoutFromEnv(process.env),
+    });
     if (stateStore) {
       const { recovered, discarded, skipped } = await local.recover();
       console.log(

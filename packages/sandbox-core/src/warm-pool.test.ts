@@ -212,6 +212,22 @@ describe('WarmPoolSandboxCore', () => {
     ).not.toBe(canonicalRequestKey({ ...TEMPLATE, networkAccess: 'none' }));
   });
 
+  it('env + setupScript shape the key; requests without them keep pre-M24 keys (M24)', () => {
+    // Both fields are env SHAPE — a pool whose template carries a setup
+    // script pre-runs it at fill time, and only an exactly-matching request
+    // may claim that env. Optional-absent, per the M22 posture.
+    expect(canonicalRequestKey(TEMPLATE)).not.toContain('setupScript');
+    expect(canonicalRequestKey({ ...TEMPLATE, setupScript: 'pnpm install' })).not.toBe(
+      canonicalRequestKey(TEMPLATE),
+    );
+    expect(canonicalRequestKey({ ...TEMPLATE, env: { A: '1' } })).not.toBe(
+      canonicalRequestKey(TEMPLATE),
+    );
+    expect(canonicalRequestKey({ ...TEMPLATE, env: { A: '1' } })).not.toBe(
+      canonicalRequestKey({ ...TEMPLATE, env: { A: '2' } }),
+    );
+  });
+
   it('goes cold when the pool is empty — and kicks a refill', async () => {
     const inner = fakeInner();
     const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }]);

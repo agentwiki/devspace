@@ -114,8 +114,48 @@ export const CreateEnvironmentRequestSchema = z
     networkAccess: z.enum(['none', 'custom', 'extend']).optional(),
     /** Required (non-empty) iff networkAccess is 'custom' or 'extend'. */
     allowedHosts: z.array(z.string().min(1)).optional(),
+    /**
+     * Non-secret environment variables (M24), baked into the container's own
+     * env — merged between the repo config's `containerEnv` and host policy
+     * (a key colliding with policy env refuses at provision, never a silent
+     * override in either direction). NON-SECRET BY CONTRACT: values ride the
+     * open JSON surface, persist plaintext on the work unit, and are visible
+     * in `docker inspect`; anything sensitive belongs in `secrets`.
+     * Optional-absent (no default) so pre-M24 canonical pool keys stay
+     * byte-identical.
+     */
+    env: z.record(z.string()).optional(),
+    /**
+     * One-shot setup script (M24): the host runs `sh -c <script>` as root in
+     * the container workspace after `devcontainer up`, BEFORE the env is
+     * durably ready — with NO secret injection, so a warm-pool fill runs it
+     * identically (both fields join the canonical pool key). Failure or
+     * timeout fails the provision: a half-setup env never reaches a tenant.
+     */
+    setupScript: z.string().min(1).max(16384).optional(),
   })
   .superRefine((req, ctx) => {
+    if (req.env !== undefined) {
+      const names = Object.keys(req.env);
+      if (names.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'env must not be empty when present',
+          path: ['env'],
+        });
+      }
+      for (const name of names) {
+        // POSIX names only — anything else could smuggle `=`/whitespace into
+        // `docker exec -e` or the synthesized containerEnv.
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `env name '${name}' is not a valid environment variable name`,
+            path: ['env', name],
+          });
+        }
+      }
+    }
     const wantsHosts = req.networkAccess === 'custom' || req.networkAccess === 'extend';
     if (wantsHosts && !(req.allowedHosts && req.allowedHosts.length > 0)) {
       ctx.addIssue({
@@ -346,6 +386,15 @@ export const RepoChoiceSchema = z.object({
    */
   networkAccess: z.enum(['none', 'custom', 'extend']).optional(),
   allowedHosts: z.array(z.string().min(1)).optional(),
+  /**
+   * Non-secret env vars + one-shot setup script (M24), tenant-chosen at
+   * creation (`env=K=V;K2=V2` or the repo-picker modal fields; the script is
+   * modal-only — a multi-line script cannot ride a space-tokenized command).
+   * Same semantics as `CreateEnvironmentRequest`, which is where they land;
+   * the env request's superRefine is the contract-level guard.
+   */
+  env: z.record(z.string()).optional(),
+  setupScript: z.string().min(1).optional(),
 });
 export type RepoChoice = z.infer<typeof RepoChoiceSchema>;
 
@@ -536,6 +585,12 @@ export const WorkUnitSchema = z.object({
    * use the host default. */
   networkAccess: z.enum(['none', 'custom', 'extend']).optional(),
   allowedHosts: z.array(z.string().min(1)).optional(),
+  /** The tenant's env vars + setup script (M24), persisted at repo choice
+   * like the egress policy above, so the M19 resume re-provision rebuilds
+   * the SAME environment — env, setup and all. Non-secret by contract
+   * (m24-plan Decision 2). Absent on pre-M24 rows. */
+  env: z.record(z.string()).optional(),
+  setupScript: z.string().min(1).optional(),
 });
 export type WorkUnit = z.infer<typeof WorkUnitSchema>;
 

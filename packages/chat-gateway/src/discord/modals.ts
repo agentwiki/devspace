@@ -13,7 +13,13 @@
  * (Decision 6): every secret field optional, one `secret.submitted` per
  * filled field, repo required + ref optional.
  */
-import { SECRET_INPUTS, normalizeNetworkField, type SecretName } from '../slack/blocks.js';
+import {
+  SECRET_INPUTS,
+  normalizeNetworkField,
+  parseEnvAssignments,
+  type RepoPickerSubmission,
+  type SecretName,
+} from '../slack/blocks.js';
 
 /** Discord's hard cap on custom_id (components and modals alike). */
 export const CUSTOM_ID_MAX = 100;
@@ -117,6 +123,21 @@ export function repoPickerModal(channelId: string): DiscordModal {
         required: false,
         placeholder: 'none | host1,host2 | +extra.example.com',
       }),
+      // M24 — Discord caps a modal at 5 rows; these two fill the budget.
+      row({
+        custom_id: 'env_vars',
+        style: TEXT_INPUT_STYLE.short,
+        label: 'Env vars (optional, non-secret)',
+        required: false,
+        placeholder: 'KEY=value; OTHER=value',
+      }),
+      row({
+        custom_id: 'setup',
+        style: TEXT_INPUT_STYLE.paragraph,
+        label: 'Setup script (optional)',
+        required: false,
+        placeholder: 'corepack enable && pnpm install',
+      }),
     ],
   };
 }
@@ -136,12 +157,20 @@ export function parseSecretsSubmission(
   return out;
 }
 
-/** Extract the "<repo> [ref] [net=…]" text from a repo-picker submission —
- * the network field rides the shared `net=` value normalization (M23), so
- * `parseRepoChoice` stays the single interpreter on both platforms. */
-export function parseRepoPickerSubmission(fields: ModalFields): string {
+/** Extract the "<repo> [ref] [net=…]" text + env/setup fields (M24) from a
+ * repo-picker submission — the network field rides the shared `net=` value
+ * normalization (M23) and the env field the shared `parseEnvAssignments`, so
+ * `parseRepoChoice`/`choiceFromSubmission` stay the single interpreters on
+ * both platforms. */
+export function parseRepoPickerSubmission(fields: ModalFields): RepoPickerSubmission {
   const repo = fields.repo?.trim() ?? '';
   const ref = fields.ref?.trim() ?? '';
   const net = normalizeNetworkField(fields.network);
-  return [repo, ref, net ? `net=${net}` : ''].filter(Boolean).join(' ');
+  const envRaw = fields.env_vars?.trim() ?? '';
+  const setup = fields.setup ?? '';
+  return {
+    text: [repo, ref, net ? `net=${net}` : ''].filter(Boolean).join(' '),
+    ...(envRaw ? { env: parseEnvAssignments(envRaw) } : {}),
+    ...(setup.trim() ? { setupScript: setup } : {}),
+  };
 }

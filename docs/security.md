@@ -48,6 +48,16 @@ policy on the provisioner, never on the tenant request):
   widening remains operator-only (`EGRESS_ALLOWLIST`).
 - cgroup CPU/mem/pids limits (M1) + opt-in disk quota (`--storage-opt`,
   driver-gated; M5-A) against noisy-neighbor / fork-bomb DoS.
+- **Tenant env vars + setup scripts add no new boundary** (M24): the setup
+  script is arbitrary tenant code, but the agent already runs arbitrary
+  code in the same container one message later — setup only moves the time
+  (before the agent; at fill for pools), under the same gVisor/egress
+  posture, secret-less, and bounded by `SANDBOX_SETUP_TIMEOUT_MS`. Request
+  `env` is NON-SECRET BY CONTRACT (plaintext on the work unit, visible in
+  `docker inspect` — credentials belong in the envelope-encrypted secret
+  store), merges UNDER host policy, and a key colliding with policy env
+  (the proxy vars) refuses at provision — a tenant cannot silently shadow
+  policy, and policy never silently shadows the tenant.
 - **Turn budgets + real auto-abort** (M5-C): tool-call + wall-clock budgets on
   every turn; breach ⇒ in-container kill (never `ExecStream.kill()`).
 

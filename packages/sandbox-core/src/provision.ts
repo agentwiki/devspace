@@ -78,7 +78,10 @@ export function mountConfigEntries(mounts: readonly MountSpec[]): string[] {
  * hardening runArgs, and generic mounts are appended so they never clobber
  * what the repo/override set. `containerEnv` is the one exception to the
  * append rule: our entries (the egress proxy vars) MERGE OVER the repo's —
- * they are policy, and a repo config must not be able to unset them.
+ * they are policy, and a repo config must not be able to unset them. The
+ * tenant's own `env` (M24) sits BETWEEN the two: over the repo config (the
+ * request customizes the repo's defaults) and under policy (a collision with
+ * a policy key refuses at provision instead of ever merging silently).
  */
 export function mergeDevcontainerConfig(input: {
   repoConfig?: DevcontainerConfig;
@@ -90,6 +93,8 @@ export function mergeDevcontainerConfig(input: {
   hardening?: SandboxHardening;
   /** Resolved network for this env (per-env profiles resolve by envId). */
   networkName?: string;
+  /** The request's non-secret env vars (M24) — repo < tenant < policy. */
+  tenantEnv?: Record<string, string>;
   /** Policy env for every in-container process (e.g. egress proxy vars). */
   containerEnv?: Record<string, string>;
 }): DevcontainerConfig {
@@ -111,7 +116,7 @@ export function mergeDevcontainerConfig(input: {
       : []),
   ];
   const mounts = [...(base.mounts ?? []), ...mountConfigEntries(input.mounts)];
-  const containerEnv = { ...base.containerEnv, ...input.containerEnv };
+  const containerEnv = { ...base.containerEnv, ...input.tenantEnv, ...input.containerEnv };
   return {
     ...base,
     runArgs,
@@ -175,6 +180,22 @@ export function effectiveEgressAllowlist(
     union.push(entry);
   }
   return union;
+}
+
+/**
+ * Tenant env keys that collide with host POLICY env (M24, m24-plan
+ * Decision 5) — case-insensitive, because env lookups by proxy-polite tools
+ * are (HTTP_PROXY/http_proxy). A collision refuses at provision: policy
+ * silently winning would break the tenant's mental model, the tenant
+ * silently winning would break the operator's. In demo mode there is no
+ * policy env and nothing collides.
+ */
+export function policyEnvCollisions(
+  tenantEnv: Record<string, string>,
+  policyEnv: Record<string, string>,
+): string[] {
+  const policyKeys = new Set(Object.keys(policyEnv).map((k) => k.toLowerCase()));
+  return Object.keys(tenantEnv).filter((k) => policyKeys.has(k.toLowerCase()));
 }
 
 export function buildGitCloneArgs(repoUrl: string, dest: string, ref?: string): string[] {
@@ -252,6 +273,9 @@ export interface ProvisionResult {
   containerId: string;
   workspaceFolder: string;
   remoteUser?: string;
+  /** The workspace path INSIDE the container (`devcontainer up` reports it);
+   * the cwd the one-shot setup script (M24) runs in when present. */
+  remoteWorkspaceFolder?: string;
   /** Per-env network created for this env (owner: sandbox teardown). */
   networkName?: string;
   /**
@@ -379,6 +403,20 @@ export class DevcontainerProvisioner implements Provisioner {
         }
       }
 
+      // Tenant env merges UNDER policy — and a collision refuses NAMING the
+      // keys (m24-plan Decision 5): two writers must never silently disagree
+      // about what an env var means inside the container.
+      const policyEnv = proxyUrl ? proxyContainerEnv(proxyUrl) : undefined;
+      if (req.env) {
+        const collisions = policyEnvCollisions(req.env, policyEnv ?? {});
+        if (collisions.length > 0) {
+          throw new Error(
+            `env keys collide with host policy env: ${collisions.join(', ')} — ` +
+              `these are owned by the host's egress policy on this deployment`,
+          );
+        }
+      }
+
       const config = mergeDevcontainerConfig({
         override: req.devcontainerOverride,
         baseImage: req.baseImage,
@@ -386,7 +424,8 @@ export class DevcontainerProvisioner implements Provisioner {
         mounts: req.mounts,
         hardening: this.hardening,
         networkName,
-        containerEnv: proxyUrl ? proxyContainerEnv(proxyUrl) : undefined,
+        tenantEnv: req.env,
+        containerEnv: policyEnv,
       });
 
       // Write our synthesized config to a sibling path and point `--config` at
@@ -411,6 +450,7 @@ export class DevcontainerProvisioner implements Provisioner {
         containerId: parsed.containerId,
         workspaceFolder,
         remoteUser: parsed.remoteUser,
+        remoteWorkspaceFolder: parsed.remoteWorkspaceFolder,
         networkName: createdNetwork ? networkName : undefined,
         ...(egressGateway !== undefined ? { egressGateway, egressScope } : {}),
       };

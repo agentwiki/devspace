@@ -221,6 +221,35 @@ describe('conversation.created', () => {
     expect(wu).toMatchObject({ networkAccess: 'extend', allowedHosts: ['mirror.corp.example'] });
   });
 
+  it('passes env vars + setup script to the sandbox and persists them on the unit (M24)', async () => {
+    const h = harness();
+    await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C-env',
+      userId: 'u1',
+      repoChoice: {
+        repoUrl: 'https://github.com/a/b.git',
+        empty: false,
+        env: { NODE_OPTIONS: '--trace-warnings' },
+        setupScript: 'pnpm install',
+      },
+    });
+    expect(h.sandbox.createEnvironment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: { NODE_OPTIONS: '--trace-warnings' },
+        setupScript: 'pnpm install',
+      }),
+    );
+    // Persisted on the row — the M19 resume re-provision rebuilds the SAME
+    // environment, env and setup included.
+    const [wu] = await h.repos.workUnits.listByState('READY');
+    expect(wu).toMatchObject({
+      env: { NODE_OPTIONS: '--trace-warnings' },
+      setupScript: 'pnpm install',
+    });
+  });
+
   it('a policy-less choice sends a policy-less request (pre-M22 shape)', async () => {
     const h = harness();
     await h.orch.handleChatEvent({
@@ -768,7 +797,13 @@ describe('session resume (M19)', () => {
       platform: 'slack',
       externalChannelId: 'C-net-resume',
       userId: 'u1',
-      repoChoice: { repoUrl: 'https://github.com/a/b.git', empty: false, networkAccess: 'none' },
+      repoChoice: {
+        repoUrl: 'https://github.com/a/b.git',
+        empty: false,
+        networkAccess: 'none',
+        env: { A: '1' },
+        setupScript: 'pnpm install',
+      },
     })) as { conversationId: string };
     const wu = (await h.repos.workUnits.getByConversation(created.conversationId))!;
     await h.repos.workUnits.transition(wu.id, 'firstMessage');
@@ -783,9 +818,14 @@ describe('session resume (M19)', () => {
     await resume(h, created.conversationId);
 
     // The rebuilt env narrows exactly as the original did — a resume must
-    // never silently widen egress (m22-plan Decision 6).
+    // never silently widen egress (m22-plan Decision 6) — and re-runs the
+    // same setup with the same env vars (M24).
     expect(h.sandbox.createEnvironment).toHaveBeenCalledWith(
-      expect.objectContaining({ networkAccess: 'none' }),
+      expect.objectContaining({
+        networkAccess: 'none',
+        env: { A: '1' },
+        setupScript: 'pnpm install',
+      }),
     );
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
   });

@@ -63,6 +63,32 @@ describe('contract round-trips', () => {
     ).toThrow();
   });
 
+  it('guards the tenant env + setup-script shape (M24)', () => {
+    // Field-less requests parse WITHOUT the keys — canonical pool keys for
+    // pre-M24 requests must stay byte-identical (m24-plan, the M22 posture).
+    const bare = CreateEnvironmentRequestSchema.parse({});
+    expect('env' in bare).toBe(false);
+    expect('setupScript' in bare).toBe(false);
+
+    expect(() =>
+      CreateEnvironmentRequestSchema.parse({
+        env: { NODE_OPTIONS: '--max-old-space-size=4096', _FLAG: '' },
+        setupScript: 'corepack enable && pnpm install',
+      }),
+    ).not.toThrow();
+    // Empty-when-present, empty scripts, and oversized scripts refuse.
+    expect(() => CreateEnvironmentRequestSchema.parse({ env: {} })).toThrow();
+    expect(() => CreateEnvironmentRequestSchema.parse({ setupScript: '' })).toThrow();
+    expect(() =>
+      CreateEnvironmentRequestSchema.parse({ setupScript: 'x'.repeat(16385) }),
+    ).toThrow();
+    // Non-POSIX names refuse — a name must not smuggle `=`/whitespace into
+    // `docker exec -e` or the synthesized containerEnv.
+    expect(() => CreateEnvironmentRequestSchema.parse({ env: { 'A=B': 'x' } })).toThrow();
+    expect(() => CreateEnvironmentRequestSchema.parse({ env: { '1ST': 'x' } })).toThrow();
+    expect(() => CreateEnvironmentRequestSchema.parse({ env: { 'MY VAR': 'x' } })).toThrow();
+  });
+
   it('accepts apply-secrets requests but never an empty one', () => {
     expect(() =>
       ApplySecretsRequestSchema.parse({

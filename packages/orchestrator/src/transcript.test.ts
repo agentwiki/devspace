@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildHistoryPreamble, HISTORY_MAX_CHARS } from './transcript.js';
+import {
+  buildHistoryPreamble,
+  buildHistoryReplay,
+  HISTORY_MAX_CHARS,
+  REPLAY_MAX_CHARS,
+} from './transcript.js';
 
 const entry = (role: 'user' | 'agent', text: string) => ({ role, text });
 
@@ -51,5 +56,44 @@ describe('buildHistoryPreamble (M20)', () => {
     const out = buildHistoryPreamble(entries);
     // Framing text is small; the whole preamble stays within budget + framing.
     expect(out.length).toBeLessThan(HISTORY_MAX_CHARS + 500);
+  });
+});
+
+describe('buildHistoryReplay (M21)', () => {
+  it('returns empty for an empty transcript — the caller answers "nothing recorded"', () => {
+    expect(buildHistoryReplay([], false)).toBe('');
+  });
+
+  it('renders role-labelled lines in order under a chat-shaped header', () => {
+    const out = buildHistoryReplay(
+      [entry('user', 'add a retry'), entry('agent', 'done — three attempts')],
+      false,
+    );
+    expect(out).toContain('Conversation history');
+    expect(out).toContain('[user] add a retry\n[agent] done — three attempts');
+    expect(out).not.toContain('omitted');
+    expect(out).not.toContain('resumed'); // never the preamble framing
+  });
+
+  it('marks the cut when the caller probed more entries above the window', () => {
+    const out = buildHistoryReplay([entry('user', 'latest')], true);
+    expect(out).toContain('[… earlier history omitted …]');
+    expect(out).toContain('[user] latest');
+  });
+
+  it('drops oldest whole entries past the char budget and marks the cut', () => {
+    const entries = Array.from({ length: 10 }, (_, i) =>
+      entry('agent', `msg-${i} ${'x'.repeat(40)}`),
+    );
+    const out = buildHistoryReplay(entries, false, 120);
+    expect(out).toContain('[… earlier history omitted …]');
+    expect(out).toContain('msg-9');
+    expect(out).not.toContain('msg-0');
+  });
+
+  it('default budget keeps the replay inside both platforms’ chunked paths', () => {
+    const entries = Array.from({ length: 50 }, (_, i) => entry('user', `${i} ${'z'.repeat(99)}`));
+    const out = buildHistoryReplay(entries, false);
+    expect(out.length).toBeLessThan(REPLAY_MAX_CHARS + 200);
   });
 });

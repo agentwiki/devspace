@@ -171,6 +171,18 @@ prefixed onto that first prompt only; the preamble is never persisted, so
 suspend/resume cycles cannot compound it, and a failed read degrades to the
 M19 blind resume (docs/m20-plan.md).
 
+Since M21 the transcript has a tenant-reachable reader and both append-only
+tables have an operator horizon: `!history` in a session thread (both
+adapters normalize it onto the `view-history` action id, the `!port` shape)
+replays a bounded, role-labelled tail of the durable transcript as one
+ordinary redacted message — state-blind, because the rows survive
+suspension, env release, and teardown; the omitted marker appears iff
+history actually exists above the window. `DEVSPACE_TRANSCRIPT_RETENTION_MS`
+/ `DEVSPACE_AUDIT_RETENTION_MS` (deliberately separate knobs — the audit log
+is the compliance record) add a prune phase to the elected reaper's sweep:
+rows strictly older than each horizon are deleted and the counts reported,
+never silently (docs/m21-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

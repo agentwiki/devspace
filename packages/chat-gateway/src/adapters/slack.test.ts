@@ -199,6 +199,24 @@ describe('SlackAdapter inbound (recorded payloads through real Bolt)', () => {
     ]);
   });
 
+  it('a `!history` reply becomes the view-history action, not an agent prompt (M21)', async () => {
+    const binding = new ConversationBinding();
+    binding.bind('conv-t', { channel: 'C0123ABC', threadTs: '1712345678.000200' });
+    const h = await startAdapter({ binding });
+    const body = fixture('event-thread-message.json');
+    (body.event as Record<string, unknown>).text = '!history';
+    await h.receiver.dispatch(body);
+    expect(h.events).toEqual([
+      {
+        type: 'action.invoked',
+        conversationId: 'conv-t',
+        userId: 'U111',
+        actionId: 'view-history',
+        payload: {},
+      },
+    ]);
+  });
+
   it('bare /devspace opens the repo picker modal instead of an empty session (M6)', async () => {
     const h = await startAdapter();
     await h.receiver.dispatch(fixture('command-devspace-bare.json'));

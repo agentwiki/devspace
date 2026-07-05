@@ -23,7 +23,7 @@ import type {
   MessageRef,
   StreamHandle,
 } from '../index.js';
-import { parsePortCommand } from '../index.js';
+import { parseHistoryCommand, parsePortCommand } from '../index.js';
 import { ConversationBinding, decodeRef, encodeRef, type ThreadRef } from '../binding.js';
 import { StatusRegistry, StreamCoalescer, type Clock } from '../status.js';
 import {
@@ -236,6 +236,17 @@ export class SlackAdapter implements ChatAdapter, ChatRenderer {
           conversationId,
           userId: user,
           actionId: `expose-port:${port}`,
+          payload: {},
+        });
+        return;
+      }
+      // `!history` replays the durable transcript (M21) — same shape.
+      if (parseHistoryCommand(text ?? '')) {
+        await this.emitSafe({
+          type: 'action.invoked',
+          conversationId,
+          userId: user,
+          actionId: 'view-history',
           payload: {},
         });
         return;

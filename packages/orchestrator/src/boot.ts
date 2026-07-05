@@ -341,11 +341,22 @@ export async function bootOrchestrator(
         instanceId,
         intervalMs: policy.intervalMs,
         run: async () => {
-          const { reaped, warned, suspended, released, failed } = await orch.reapExpired(policy);
-          if (reaped || warned || suspended || released || failed) {
+          const { reaped, warned, suspended, released, prunedTranscripts, prunedAudit, failed } =
+            await orch.reapExpired(policy);
+          if (
+            reaped ||
+            warned ||
+            suspended ||
+            released ||
+            prunedTranscripts ||
+            prunedAudit ||
+            failed
+          ) {
             console.log(
               `[reap] reclaimed ${reaped} work unit(s), warned ${warned}, ` +
-                `suspended ${suspended}, released ${released} env(s), ${failed} failure(s)`,
+                `suspended ${suspended}, released ${released} env(s), pruned ` +
+                `${prunedTranscripts} transcript + ${prunedAudit} audit row(s), ` +
+                `${failed} failure(s)`,
             );
           }
         },

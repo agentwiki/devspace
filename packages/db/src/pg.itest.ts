@@ -224,6 +224,30 @@ suite('postgres repositories', () => {
     expect(await repos.transcripts.listTail('c-none', 5)).toEqual([]);
   });
 
+  it('deleteBefore prunes strictly-older rows on both tables and counts them (M21)', async () => {
+    const repos = createPostgresRepositories(pool);
+    await repos.transcripts.append({ conversationId: 'c-ret', role: 'user', text: 'old' });
+    await repos.audit.append({ conversationId: 'c-ret', action: 'old.action', detail: {} });
+    // A cutoff between the two batches — wall-clock, so a real pause.
+    await new Promise((r) => setTimeout(r, 20));
+    const cutoff = new Date().toISOString();
+    await new Promise((r) => setTimeout(r, 20));
+    await repos.transcripts.append({ conversationId: 'c-ret', role: 'agent', text: 'fresh' });
+    await repos.audit.append({ conversationId: 'c-ret', action: 'fresh.action', detail: {} });
+
+    expect(await repos.transcripts.deleteBefore(cutoff)).toBe(1);
+    expect((await repos.transcripts.listByConversation('c-ret')).map((t) => t.text)).toEqual([
+      'fresh',
+    ]);
+    expect(await repos.audit.deleteBefore(cutoff)).toBe(1);
+    expect((await repos.audit.listByConversation('c-ret')).map((a) => a.action)).toEqual([
+      'fresh.action',
+    ]);
+    // Idempotent re-run.
+    expect(await repos.transcripts.deleteBefore(cutoff)).toBe(0);
+    expect(await repos.audit.deleteBefore(cutoff)).toBe(0);
+  });
+
   it('rejects a genuinely illegal transition', async () => {
     const repos = createPostgresRepositories(pool);
     const conv = await repos.conversations.create({

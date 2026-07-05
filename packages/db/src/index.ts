@@ -159,6 +159,13 @@ export interface AuditRecord {
 export interface AuditRepo {
   append(input: Omit<AuditRecord, 'id' | 'at'>): Promise<AuditRecord>;
   listByConversation(conversationId: string): Promise<AuditRecord[]>;
+  /**
+   * Delete rows recorded strictly before `cutoff` and return how many went
+   * (M21 retention — bulk deletion must never be silent). The audit log is
+   * the compliance record: this is only ever driven by the operator's own
+   * DEVSPACE_AUDIT_RETENTION_MS horizon, never by anything automatic.
+   */
+  deleteBefore(cutoff: string): Promise<number>;
 }
 
 /**
@@ -185,6 +192,13 @@ export interface TranscriptRepo {
   listTail(conversationId: string, limit: number): Promise<TranscriptRecord[]>;
   /** The full transcript, oldest first (diagnostics + later product reads). */
   listByConversation(conversationId: string): Promise<TranscriptRecord[]>;
+  /**
+   * Delete rows appended strictly before `cutoff` and return how many went
+   * (M21 retention). Age-uniform and state-blind: pruning a live
+   * conversation's oldest rows costs restore/replay quality, never
+   * correctness (m21-plan Decision 5).
+   */
+  deleteBefore(cutoff: string): Promise<number>;
 }
 
 export interface Repositories {
@@ -381,6 +395,14 @@ export function createInMemoryRepositories(
       async listByConversation(conversationId) {
         return auditEntries.filter((a) => a.conversationId === conversationId);
       },
+      async deleteBefore(cutoff) {
+        const cutoffMs = Date.parse(cutoff);
+        const keep = auditEntries.filter((a) => !(Date.parse(a.at) < cutoffMs));
+        const pruned = auditEntries.length - keep.length;
+        auditEntries.length = 0;
+        auditEntries.push(...keep);
+        return pruned;
+      },
     },
     transcripts: {
       async append(input) {
@@ -395,6 +417,14 @@ export function createInMemoryRepositories(
       },
       async listByConversation(conversationId) {
         return transcriptEntries.filter((t) => t.conversationId === conversationId);
+      },
+      async deleteBefore(cutoff) {
+        const cutoffMs = Date.parse(cutoff);
+        const keep = transcriptEntries.filter((t) => !(Date.parse(t.createdAt) < cutoffMs));
+        const pruned = transcriptEntries.length - keep.length;
+        transcriptEntries.length = 0;
+        transcriptEntries.push(...keep);
+        return pruned;
       },
     },
   };

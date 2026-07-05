@@ -53,6 +53,15 @@ export function parsePortCommand(text: string): number | null {
   return port > 0 && port <= 65535 ? port : null;
 }
 
+/**
+ * Parse the `!history` thread convention (M21, the `!port` shape): a matching
+ * message becomes `action.invoked` with `view-history` — a replay of the
+ * durable transcript — instead of a plain agent prompt.
+ */
+export function parseHistoryCommand(text: string): boolean {
+  return /^!history$/.test(text.trim());
+}
+
 export * from './binding.js';
 export * from './status.js';
 export * from './slack/blocks.js';

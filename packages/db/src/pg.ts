@@ -403,6 +403,13 @@ export function createPostgresRepositories(pool: Pool): Repositories {
           .orderBy(auditLog.at);
         return rows.map(mapAudit);
       },
+      async deleteBefore(cutoff) {
+        const gone = await db
+          .delete(auditLog)
+          .where(lt(auditLog.at, new Date(cutoff)))
+          .returning({ id: auditLog.id });
+        return gone.length;
+      },
     },
 
     transcripts: {
@@ -437,6 +444,13 @@ export function createPostgresRepositories(pool: Pool): Repositories {
           .where(eq(transcripts.conversationId, conversationId))
           .orderBy(asc(transcripts.seq));
         return rows.map(mapTranscript);
+      },
+      async deleteBefore(cutoff) {
+        const gone = await db
+          .delete(transcripts)
+          .where(lt(transcripts.createdAt, new Date(cutoff)))
+          .returning({ id: transcripts.id });
+        return gone.length;
       },
     },
   };

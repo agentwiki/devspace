@@ -53,6 +53,18 @@ export interface ReapPolicy {
    * path the M17 PR_OPEN exemption priced (m18-plan Decisions 4–6).
    */
   prOpenEnvTtlMs?: number;
+  /**
+   * Delete transcript rows older than this horizon (M21): age-uniform,
+   * state-blind — pruning a live conversation's oldest rows costs
+   * restore/replay quality, never correctness (m21-plan Decision 5).
+   */
+  transcriptRetentionMs?: number;
+  /**
+   * Delete audit rows older than this horizon (M21). Deliberately its own
+   * knob: the audit log is the compliance record and never rides along on
+   * the transcript horizon (m21-plan Decision 6).
+   */
+  auditRetentionMs?: number;
   /** Sweep cadence (also the election lease's renewal tick). */
   intervalMs: number;
 }
@@ -70,6 +82,8 @@ export function reapPolicyFromEnv(env: Record<string, string | undefined>): Reap
   const idleWarnMs = positiveIntFromEnv(env, 'DEVSPACE_IDLE_WARN_MS');
   const terminalGraceMs = positiveIntFromEnv(env, 'DEVSPACE_TERMINAL_GRACE_MS');
   const prOpenEnvTtlMs = positiveIntFromEnv(env, 'DEVSPACE_PR_OPEN_ENV_TTL_MS');
+  const transcriptRetentionMs = positiveIntFromEnv(env, 'DEVSPACE_TRANSCRIPT_RETENTION_MS');
+  const auditRetentionMs = positiveIntFromEnv(env, 'DEVSPACE_AUDIT_RETENTION_MS');
   const intervalMs = positiveIntFromEnv(env, 'DEVSPACE_REAP_INTERVAL_MS');
   if (idleWarnMs !== undefined && idleTtlMs === undefined) {
     throw new Error(
@@ -82,12 +96,20 @@ export function reapPolicyFromEnv(env: Record<string, string | undefined>): Reap
         `(${idleTtlMs}) — the warning window opens before the TTL, not around it`,
     );
   }
-  if (idleTtlMs === undefined && terminalGraceMs === undefined && prOpenEnvTtlMs === undefined) {
+  const enablers = [
+    idleTtlMs,
+    terminalGraceMs,
+    prOpenEnvTtlMs,
+    transcriptRetentionMs,
+    auditRetentionMs,
+  ];
+  if (enablers.every((v) => v === undefined)) {
     if (intervalMs !== undefined) {
       throw new Error(
         'DEVSPACE_REAP_INTERVAL_MS is set but none of DEVSPACE_IDLE_TTL_MS, ' +
-          'DEVSPACE_TERMINAL_GRACE_MS, or DEVSPACE_PR_OPEN_ENV_TTL_MS is — the ' +
-          'interval alone reaps nothing',
+          'DEVSPACE_TERMINAL_GRACE_MS, DEVSPACE_PR_OPEN_ENV_TTL_MS, ' +
+          'DEVSPACE_TRANSCRIPT_RETENTION_MS, or DEVSPACE_AUDIT_RETENTION_MS is — ' +
+          'the interval alone reaps nothing',
       );
     }
     return undefined;
@@ -97,6 +119,8 @@ export function reapPolicyFromEnv(env: Record<string, string | undefined>): Reap
     idleWarnMs,
     terminalGraceMs,
     prOpenEnvTtlMs,
+    transcriptRetentionMs,
+    auditRetentionMs,
     intervalMs: intervalMs ?? DEFAULT_REAP_INTERVAL_MS,
   };
 }

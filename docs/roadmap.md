@@ -17,6 +17,7 @@ Expansion XII (work-unit lifecycle reclamation): **M17.**
 Expansion XIII (idle warnings + PR_OPEN env release): **M18.**
 Expansion XIV (session resume): **M19.**
 Expansion XV (history restore on resume): **M20.**
+Expansion XVI (transcript replay + retention policy): **M21.**
 
 ## M0 — Scaffolding (done)
 
@@ -762,24 +763,57 @@ Landed:
 - **Rows survive teardown** like audit rows — redacted at rest, readable
   (`listByConversation`) for the product surfaces the M21+ seeds carry.
 
-## M21+ — Expansion XVI
+## M21 — Expansion XVI: transcript replay + retention policy (done)
+
+The two M20 seeds that were ready: the first transcript product surface,
+and the operator horizon both append-only tables were priced for. Zero
+contract changes, zero migrations: one action id + a thread convention,
+two additive repo methods, two knobs, and a prune phase in the sweep the
+elected reaper already runs. Design of record: docs/m21-plan.md.
+
+Landed:
+
+- **In-chat transcript replay** — `!history` in a session thread (both
+  adapters, normalized onto the stable `view-history` action id exactly
+  like `!port` → expose-port) answers with a bounded, role-labelled replay
+  of the durable transcript tail as one ordinary redacted `post_message`.
+  Deliberately state-blind: the rows survive suspension, env release, and
+  teardown, so the replay answers in every state — the M20 "readable for
+  the product surfaces" promise, cashed. The read probes one entry past
+  the window, so the "[… earlier history omitted …]" marker appears iff
+  history actually exists above it (never a false marker, never silent
+  truncation); rows are redacted at rest AND re-redacted at render (the
+  100%-of-outbound invariant stays structural); a failed read answers
+  message-only.
+- **Retention as a prune phase** — `TranscriptRepo.deleteBefore` /
+  `AuditRepo.deleteBefore` (strictly-older-than, counts returned — bulk
+  deletion is never silent), driven by `DEVSPACE_TRANSCRIPT_RETENTION_MS`
+  and `DEVSPACE_AUDIT_RETENTION_MS` as the reaper's fourth and fifth
+  independent enablers. Audit deliberately its own knob: the compliance
+  record never rides the transcript horizon. Age-uniform and state-blind —
+  pruning a live conversation's oldest rows costs restore/replay QUALITY,
+  never correctness — idempotent under elected double-runs, and a prune
+  failure counts as `failed` without stopping the sweep. The
+  interval-without-anything refusal now spans all five enablers.
+
+## M22+ — Expansion XVII
 
 Native session import (the prompt preamble is the injection story that
 works for every ACP backend today; if the protocol grows a session-load
-surface, the transcript table is already the source); transcript product
-surfaces (chat backfill, `/sessions` detail, web/CLI handoff — the table
-is deliberately readable, UI stays chat-only per the parity analysis);
-transcript/audit retention policy (both are append-only, text-only,
-per-conversation — the same growth class; a retention knob is an operator
-policy for the milestone that needs one); NATS bus (still unnecessary:
-LISTEN/NOTIFY + the M14 claim survives N orchestrators by construction;
-`EventBus` remains the seam if volume ever demands it); turn-level failover
-(a controller that dies mid-turn loses that turn; the conversation resumes
-on whichever instance gets the next message — checkpointing is a product
-decision); usage-based ADMISSION and eviction (the unpaid half of M16:
-scheduling on measured usage needs an eviction story — ranking got the win
-without the cost) and disk-weighted placement (host disk budgets interact
-with image/layer sharing in ways neither grants nor `docker stats` — which
+surface, the transcript table is already the source); richer transcript
+surfaces (web/CLI handoff, `/sessions` detail views — `!history` is the
+chat-native read; UI stays chat-only per the parity analysis); transcript
+export/archival before deletion (retention deletes; an operator who needs
+archives sets a long horizon and dumps the table — an export pipeline is
+its own feature); NATS bus (still unnecessary: LISTEN/NOTIFY + the M14
+claim survives N orchestrators by construction; `EventBus` remains the
+seam if volume ever demands it); turn-level failover (a controller that
+dies mid-turn loses that turn; the conversation resumes on whichever
+instance gets the next message — checkpointing is a product decision);
+usage-based ADMISSION and eviction (the unpaid half of M16: scheduling on
+measured usage needs an eviction story — ranking got the win without the
+cost) and disk-weighted placement (host disk budgets interact with
+image/layer sharing in ways neither grants nor `docker stats` — which
 reports no disk at all — model); certificate rotation/revocation tooling
 (at three certs per deployment, re-minting IS the revocation story — until
 it isn't); Discord Forum-channel session dashboard (presentation upgrade

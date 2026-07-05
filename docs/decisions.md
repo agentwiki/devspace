@@ -156,6 +156,12 @@ Slack/Discord 어댑터는 외부 플랫폼을 통과해야 해서 사용자 시
   컨테이너에 바인드 마운트하고, `up` 이후 컨테이너 안에 codex CLI를 설치한다.
   `AgentPort`는 주입받은 `SandboxPort.execStream`으로 codex를 돌려 진행 출력을
   줄 단위로 UI에 흘린다 — 어댑터가 devcontainer 세부를 다시 알 필요가 없다.
+- **codex 자체 샌드박스는 끈다(`--dangerously-bypass-approvals-and-sandbox`).**
+  codex의 `workspace-write` 샌드박스는 bubblewrap을 쓰는데, devcontainer(중첩
+  컨테이너) 안에서는 네임스페이스 생성 권한이 없어 `bwrap: No permissions to
+  create new namespace`로 파일 편집이 막힌다. devcontainer가 이미 격리 경계이므로
+  codex 자체 샌드박스는 불필요하고, 이 플래그의 공식 용도가 바로 "외부에서
+  샌드박스된 환경에서의 실행"이다. (골든패스 E2E 로그로 확인한 실제 실패였다.)
 - **GitHub = 샌드박스 git + REST.** `diffSummary`는 샌드박스에서 `git diff`
   (새 파일은 intent-to-add로 포함). `openPullRequest`는 브랜치를 만들어 커밋·
   푸시(클론 시 토큰이 박힌 origin 사용)한 뒤 REST로 PR을 연다. URL/헤더/본문

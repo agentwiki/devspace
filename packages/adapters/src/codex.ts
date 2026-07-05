@@ -11,11 +11,15 @@ import type { AgentPort, SandboxPort } from '@devspace/core';
 export function createCodexAgent(sandbox: SandboxPort): AgentPort {
   return {
     async run(sandboxId, instruction, onActivity) {
-      // codex가 워크스페이스를 수정하도록 workspace-write 샌드박스로 실행한다.
+      // devcontainer가 곧 샌드박스다. codex 자체 샌드박스(workspace-write)는
+      // bubblewrap을 쓰는데, 컨테이너 안에서는 네임스페이스를 못 만들어
+      // (`bwrap: No permissions to create new namespace`) 파일 편집이 막힌다.
+      // 이미 외부에서 격리됐으므로 codex 자체 샌드박스를 끈다 — 이 플래그의
+      // 공식 용도가 "외부에서 샌드박스된 환경에서 실행"이다.
       // 진행 출력을 줄 단위로 그대로 UI에 흘린다.
       const result = await sandbox.execStream(
         sandboxId,
-        ['codex', 'exec', '--sandbox', 'workspace-write', '--skip-git-repo-check', instruction],
+        ['codex', 'exec', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check', instruction],
         onActivity,
       );
       if (result.code !== 0) {

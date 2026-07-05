@@ -1095,21 +1095,40 @@ export class Orchestrator {
    * PR_OPEN), audit `session.suspended`, one notice carrying the
    * resume-work button. Each step is retryable by the next sweep; the M18
    * warning discipline covers suspension too, with "paused" wording.
+   *
+   * With a retention horizon set (M21), a prune phase deletes transcript /
+   * audit rows older than `now − retentionMs` and reports the counts —
+   * bulk deletion is never silent (m21-plan Decision 7). Age predicates
+   * are idempotent, so an elected sibling double-running past its lease
+   * TTL double-deletes nothing; a prune failure counts as `failed` and
+   * the rest of the sweep still runs.
    */
   async reapExpired(
-    policy: Pick<ReapPolicy, 'idleTtlMs' | 'idleWarnMs' | 'terminalGraceMs' | 'prOpenEnvTtlMs'>,
+    policy: Pick<
+      ReapPolicy,
+      | 'idleTtlMs'
+      | 'idleWarnMs'
+      | 'terminalGraceMs'
+      | 'prOpenEnvTtlMs'
+      | 'transcriptRetentionMs'
+      | 'auditRetentionMs'
+    >,
     nowMs: number = Date.now(),
   ): Promise<{
     reaped: number;
     warned: number;
     suspended: number;
     released: number;
+    prunedTranscripts: number;
+    prunedAudit: number;
     failed: number;
   }> {
     let reaped = 0;
     let warned = 0;
     let suspended = 0;
     let released = 0;
+    let prunedTranscripts = 0;
+    let prunedAudit = 0;
     let failed = 0;
 
     // The idle clock (M17): a fresh transition counts as life; pre-M17 rows
@@ -1277,7 +1296,29 @@ export class Orchestrator {
         }
       }
     }
-    return { reaped, warned, suspended, released, failed };
+
+    // Retention (M21): one uniform age horizon per table, enforced where the
+    // elected sweep already runs. Strictly-older-than, so a row exactly at
+    // the horizon survives one more sweep — the cheap side of the fence.
+    if (policy.transcriptRetentionMs !== undefined) {
+      try {
+        prunedTranscripts += await this.deps.repos.transcripts.deleteBefore(
+          new Date(nowMs - policy.transcriptRetentionMs).toISOString(),
+        );
+      } catch {
+        failed += 1;
+      }
+    }
+    if (policy.auditRetentionMs !== undefined) {
+      try {
+        prunedAudit += await this.deps.repos.audit.deleteBefore(
+          new Date(nowMs - policy.auditRetentionMs).toISOString(),
+        );
+      } catch {
+        failed += 1;
+      }
+    }
+    return { reaped, warned, suspended, released, prunedTranscripts, prunedAudit, failed };
   }
 
   /* ---------------------------------------------------------------------- */

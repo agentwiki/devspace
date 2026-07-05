@@ -176,6 +176,24 @@ describe('reapPolicyFromEnv', () => {
       /positive integer/,
     );
   });
+
+  it('the retention horizons are independent enablers (M21)', () => {
+    expect(reapPolicyFromEnv({ DEVSPACE_TRANSCRIPT_RETENTION_MS: '2592000000' })).toEqual({
+      transcriptRetentionMs: 2_592_000_000,
+      intervalMs: 60_000,
+    });
+    expect(reapPolicyFromEnv({ DEVSPACE_AUDIT_RETENTION_MS: '31536000000' })).toEqual({
+      auditRetentionMs: 31_536_000_000,
+      intervalMs: 60_000,
+    });
+    expect(() => reapPolicyFromEnv({ DEVSPACE_TRANSCRIPT_RETENTION_MS: 'forever' })).toThrow(
+      /positive integer/,
+    );
+    // The dead-knob refusal spans the M21 enablers too.
+    expect(() => reapPolicyFromEnv({ DEVSPACE_REAP_INTERVAL_MS: '30000' })).toThrow(
+      /DEVSPACE_TRANSCRIPT_RETENTION_MS/,
+    );
+  });
 });
 
 describe('approxDuration', () => {
@@ -198,6 +216,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
@@ -208,6 +228,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('TORN_DOWN');
@@ -231,6 +253,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
   });
@@ -246,6 +270,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
@@ -260,6 +286,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired({ idleTtlMs: HOUR }, 11 * HOUR)).toEqual({
@@ -267,6 +295,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('TORN_DOWN');
@@ -277,7 +307,7 @@ describe('reapExpired (M17)', () => {
     const { conv, wu } = await seedAt(h, 'PR_OPEN', 'C4');
     expect(
       await h.orch.reapExpired({ idleTtlMs: HOUR, terminalGraceMs: HOUR }, 100 * HOUR),
-    ).toEqual({ reaped: 0, warned: 0, suspended: 0, released: 0, failed: 0 });
+    ).toEqual({ reaped: 0, warned: 0, suspended: 0, released: 0, prunedTranscripts: 0, prunedAudit: 0, failed: 0 });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_OPEN');
     // The reconciler's token survives with the unit.
     expect(await h.repos.secrets.get('u1', SECRET_GH_TOKEN, conv.id)).not.toBeNull();
@@ -291,6 +321,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired({ terminalGraceMs: HOUR }, HOUR)).toEqual({
@@ -298,6 +330,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('TORN_DOWN');
@@ -318,6 +352,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(idle.wu.id))?.state).toBe('WORKING');
@@ -328,6 +364,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(idle.wu.id))?.state).toBe('TORN_DOWN');
@@ -344,6 +382,8 @@ describe('reapExpired (M17)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 1,
     });
     expect((await h.repos.workUnits.get(second.wu.id))?.state).toBe('TORN_DOWN');
@@ -365,6 +405,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     // Window open: one warning, recorded on the row.
@@ -374,6 +416,8 @@ describe('idle warnings (M18)', () => {
       warned: 1,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(h.rendered).toContainEqual(
@@ -393,6 +437,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     // At the TTL the unit dies — the warning has stood for the full window.
@@ -402,6 +448,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('TORN_DOWN');
@@ -422,6 +470,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     // The window reopens off the new activity clock (50m + 45m)…
@@ -430,6 +480,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     h.clock.set(95 * MIN);
@@ -438,6 +490,8 @@ describe('idle warnings (M18)', () => {
       warned: 1,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     // …and the reap honors the fresh warning's full window.
@@ -446,6 +500,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired(POLICY, 110 * MIN)).toEqual({
@@ -453,6 +509,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
   });
@@ -468,6 +526,8 @@ describe('idle warnings (M18)', () => {
       warned: 1,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('WORKING');
@@ -477,6 +537,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired(POLICY, 10 * HOUR + 15 * MIN)).toEqual({
@@ -484,6 +546,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
   });
@@ -499,6 +563,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 1,
     });
     // The retry re-posts once — annoying beats unwarned (m18-plan Decision 3).
@@ -508,6 +574,8 @@ describe('idle warnings (M18)', () => {
       warned: 1,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     const warnings = h.rendered.filter(
@@ -524,6 +592,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(await h.orch.reapExpired({ ...POLICY, terminalGraceMs: HOUR }, HOUR)).toEqual({
@@ -531,6 +601,8 @@ describe('idle warnings (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(h.rendered.filter((c) => c.conversationId === conv.id)).toEqual([]);
@@ -551,6 +623,8 @@ describe('PR_OPEN env release (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(h.sandbox.destroyEnvironment).not.toHaveBeenCalled();
@@ -561,6 +635,8 @@ describe('PR_OPEN env release (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 1,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(h.sandbox.destroyEnvironment).toHaveBeenCalledWith('env_1');
@@ -592,6 +668,8 @@ describe('PR_OPEN env release (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
   });
@@ -607,6 +685,8 @@ describe('PR_OPEN env release (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.envId).toBe('env_1');
@@ -624,6 +704,8 @@ describe('PR_OPEN env release (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 1,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.envId).toBeUndefined();
@@ -639,6 +721,8 @@ describe('PR_OPEN env release (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 1,
     });
     // The pointer survives the failure so the next sweep can retry the destroy…
@@ -651,6 +735,8 @@ describe('PR_OPEN env release (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 1,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(
@@ -671,6 +757,8 @@ describe('PR_OPEN env release (M18)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('TORN_DOWN');
@@ -700,6 +788,8 @@ describe('suspension of resumed units (M19)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
 
@@ -709,6 +799,8 @@ describe('suspension of resumed units (M19)', () => {
       warned: 0,
       suspended: 1,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(h.sandbox.destroyEnvironment).toHaveBeenCalledWith('env_1');
@@ -741,6 +833,8 @@ describe('suspension of resumed units (M19)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
   });
@@ -755,6 +849,8 @@ describe('suspension of resumed units (M19)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 1,
     });
     // The pointer survives so the next sweep retries the destroy…
@@ -769,6 +865,8 @@ describe('suspension of resumed units (M19)', () => {
       warned: 0,
       suspended: 1,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(h.rendered.filter((c) => c.conversationId === conv.id)).toHaveLength(1);
@@ -786,6 +884,8 @@ describe('suspension of resumed units (M19)', () => {
       warned: 0,
       suspended: 1,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_OPEN');
@@ -802,6 +902,8 @@ describe('suspension of resumed units (M19)', () => {
       warned: 0,
       suspended: 1,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(h.sandbox.destroyEnvironment).not.toHaveBeenCalled();
@@ -821,6 +923,8 @@ describe('suspension of resumed units (M19)', () => {
       warned: 1,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect(h.rendered).toContainEqual(
@@ -838,6 +942,8 @@ describe('suspension of resumed units (M19)', () => {
       warned: 0,
       suspended: 0,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     h.clock.set(60 * MIN);
@@ -846,8 +952,106 @@ describe('suspension of resumed units (M19)', () => {
       warned: 0,
       suspended: 1,
       released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
       failed: 0,
     });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_OPEN');
+  });
+});
+
+describe('retention pruning (M21)', () => {
+  const seedRows = async (h: Harness) => {
+    const { conv, wu } = await seedAt(h, 'WORKING', 'R1');
+    h.clock.set(0);
+    await h.repos.transcripts.append({
+      conversationId: conv.id,
+      workUnitId: wu.id,
+      role: 'user',
+      text: 'old row',
+    });
+    await h.repos.audit.append({ conversationId: conv.id, action: 'old.action', detail: {} });
+    h.clock.set(HOUR);
+    await h.repos.transcripts.append({
+      conversationId: conv.id,
+      workUnitId: wu.id,
+      role: 'agent',
+      text: 'fresh row',
+    });
+    await h.repos.audit.append({ conversationId: conv.id, action: 'fresh.action', detail: {} });
+    return { conv, wu };
+  };
+
+  it('prunes strictly-older rows per table and reports the counts', async () => {
+    const h = harness();
+    const { conv, wu } = await seedRows(h);
+    // Keep the unit alive so the idle policy (absent anyway) is not the story.
+    h.clock.set(2 * HOUR);
+    await h.repos.workUnits.touch(wu.id);
+
+    // Horizon = 1h at now = 2h → cutoff = 1h: the t=0 rows go, t=1h survive
+    // (strictly-older-than — a row exactly at the horizon lives one more sweep).
+    expect(
+      await h.orch.reapExpired(
+        { transcriptRetentionMs: HOUR, auditRetentionMs: HOUR },
+        2 * HOUR,
+      ),
+    ).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 0,
+      released: 0,
+      prunedTranscripts: 1,
+      prunedAudit: 1,
+      failed: 0,
+    });
+    expect((await h.repos.transcripts.listByConversation(conv.id)).map((r) => r.text)).toEqual([
+      'fresh row',
+    ]);
+    expect(
+      (await h.repos.audit.listByConversation(conv.id)).map((a) => a.action),
+    ).toEqual(['fresh.action']);
+
+    // A second sweep at the same instant prunes nothing — age deletion is
+    // idempotent, so an elected sibling double-run is harmless.
+    const again = await h.orch.reapExpired(
+      { transcriptRetentionMs: HOUR, auditRetentionMs: HOUR },
+      2 * HOUR,
+    );
+    expect(again.prunedTranscripts).toBe(0);
+    expect(again.prunedAudit).toBe(0);
+  });
+
+  it('each horizon prunes ITS table only — audit never rides the transcript knob', async () => {
+    const h = harness();
+    const { conv } = await seedRows(h);
+
+    const res = await h.orch.reapExpired({ transcriptRetentionMs: HOUR }, 2 * HOUR);
+    expect(res.prunedTranscripts).toBe(1);
+    expect(res.prunedAudit).toBe(0);
+    expect((await h.repos.audit.listByConversation(conv.id)).length).toBeGreaterThanOrEqual(2);
+
+    const res2 = await h.orch.reapExpired({ auditRetentionMs: HOUR }, 2 * HOUR);
+    expect(res2.prunedAudit).toBe(1);
+    expect(res2.prunedTranscripts).toBe(0);
+  });
+
+  it('a throwing deleteBefore counts as failed and never stops the sweep', async () => {
+    const h = harness();
+    await seedRows(h);
+    const { wu: terminal } = await seedAt(h, 'PR_MERGED', 'R2'); // updatedAt = 1h
+    vi.spyOn(h.repos.transcripts, 'deleteBefore').mockRejectedValue(new Error('table on fire'));
+
+    const res = await h.orch.reapExpired(
+      { transcriptRetentionMs: HOUR, auditRetentionMs: HOUR, terminalGraceMs: HOUR },
+      3 * HOUR,
+    );
+    // The prune failure is counted; the audit prune AND the terminal
+    // collection both still ran.
+    expect(res.failed).toBe(1);
+    expect(res.prunedTranscripts).toBe(0);
+    expect(res.prunedAudit).toBeGreaterThanOrEqual(1);
+    expect(res.reaped).toBe(1);
+    expect((await h.repos.workUnits.get(terminal.id))?.state).toBe('TORN_DOWN');
   });
 });

@@ -248,6 +248,30 @@ describe('in-memory repositories', () => {
     expect(await repos.transcripts.listTail('nope', 5)).toEqual([]);
   });
 
+  it('deleteBefore prunes strictly-older rows and returns the count (M21)', async () => {
+    let tick = 0;
+    const repos = createInMemoryRepositories(() => new Date(tick).toISOString());
+    await repos.transcripts.append({ conversationId: 'c1', role: 'user', text: 'old' });
+    await repos.audit.append({ conversationId: 'c1', action: 'old.action', detail: {} });
+    tick = 60_000;
+    await repos.transcripts.append({ conversationId: 'c1', role: 'agent', text: 'fresh' });
+    await repos.audit.append({ conversationId: 'c1', action: 'fresh.action', detail: {} });
+
+    const cutoff = new Date(60_000).toISOString();
+    // Strictly older than the cutoff goes; a row exactly AT it survives.
+    expect(await repos.transcripts.deleteBefore(cutoff)).toBe(1);
+    expect((await repos.transcripts.listByConversation('c1')).map((t) => t.text)).toEqual([
+      'fresh',
+    ]);
+    expect(await repos.audit.deleteBefore(cutoff)).toBe(1);
+    expect((await repos.audit.listByConversation('c1')).map((a) => a.action)).toEqual([
+      'fresh.action',
+    ]);
+    // Idempotent: a re-run with the same cutoff deletes nothing.
+    expect(await repos.transcripts.deleteBefore(cutoff)).toBe(0);
+    expect(await repos.audit.deleteBefore(cutoff)).toBe(0);
+  });
+
   it('tracks event consumption', async () => {
     const repos = createInMemoryRepositories();
     const e = await repos.events.append({ topic: 't', payload: {} });

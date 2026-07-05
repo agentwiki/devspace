@@ -37,7 +37,12 @@ policy on the provisioner, never on the tenant request):
 - Per-env `--internal` network + **egress allowlist proxy** (GitHub, the LLM
   endpoint, registries — `DEFAULT_EGRESS_ALLOWLIST`). No route out except the
   proxy at the env's own bridge gateway; per-env networks deny env↔env
-  traffic (M5-A/B).
+  traffic (M5-A/B). Since M22 a request can NARROW its own env's allowlist
+  (`networkAccess: 'none' | 'custom'` — enforced as a per-gateway scope at
+  the proxy, keyed on the address the connection arrived on, which the
+  workload cannot forge); widening stays operator-only (`EGRESS_ALLOWLIST`),
+  and hosts that cannot enforce a scope refuse the request rather than honor
+  it loosely.
 - cgroup CPU/mem/pids limits (M1) + opt-in disk quota (`--storage-opt`,
   driver-gated; M5-A) against noisy-neighbor / fork-bomb DoS.
 - **Turn budgets + real auto-abort** (M5-C): tool-call + wall-clock budgets on

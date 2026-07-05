@@ -453,9 +453,9 @@ describe('DevcontainerProvisioner with a per-env network profile', () => {
         ...(withRegistrar ? { egress: registrar } : {}),
       });
 
-      await expect(
-        provisioner.provision('e8', { ...req, networkAccess: 'none' }),
-      ).rejects.toThrow(message);
+      await expect(provisioner.provision('e8', { ...req, networkAccess: 'none' })).rejects.toThrow(
+        message,
+      );
       expect(calls).toEqual([]);
     },
   );

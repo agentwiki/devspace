@@ -36,7 +36,7 @@ one migration (the work unit remembers the choice for resume), and the
 In:
 
 - **Contract: the request narrows, never widens.** `networkAccess?: 'none' |
-  'custom'` + `allowedHosts?: string[]` on `CreateEnvironmentRequest` (and on
+'custom'` + `allowedHosts?: string[]` on `CreateEnvironmentRequest` (and on
   `RepoChoice`). Absent = the host's full operator allowlist — pre-M22
   behavior, and absent keys keep canonical pool keys byte-identical. `'none'`
   = zero egress. `'custom'` = exactly `allowedHosts`, each of which must be
@@ -64,7 +64,7 @@ In:
   to key a scope on) refuse with a clear error. A tenant who asked for
   `none` must never silently get the default.
 - **Tenant surface + resume parity.** `/devspace <repo> [ref] [net=none |
-  net=host1,host2]` on both adapters (the shared parser); the orchestrator
+net=host1,host2]` on both adapters (the shared parser); the orchestrator
   passes the choice onto the env request AND persists it on the work unit
   (migration 0007), so the M19 resume re-provision carries the same policy —
   a resume must never silently widen egress.

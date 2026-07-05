@@ -40,9 +40,7 @@ describe('contract round-trips', () => {
     expect(() =>
       CreateEnvironmentRequestSchema.parse({ networkAccess: 'custom', allowedHosts: [] }),
     ).toThrow();
-    expect(() =>
-      CreateEnvironmentRequestSchema.parse({ allowedHosts: ['github.com'] }),
-    ).toThrow();
+    expect(() => CreateEnvironmentRequestSchema.parse({ allowedHosts: ['github.com'] })).toThrow();
     expect(() =>
       CreateEnvironmentRequestSchema.parse({ networkAccess: 'none', allowedHosts: ['x.io'] }),
     ).toThrow();

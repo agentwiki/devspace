@@ -23,6 +23,9 @@ jobs:
   golden-path:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    permissions:
+      contents: write # 스크린샷을 ci-media 브랜치에 커밋
+      pull-requests: write # 스크린샷 댓글
     env:
       E2E_REPO: ${{ vars.E2E_REPO }}
       E2E_GITHUB_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}
@@ -52,6 +55,15 @@ jobs:
 
       - name: 골든패스 시나리오 실행
         run: npm run e2e:golden-path
+
+      # 주요 장면 + 실패 장면 스크린샷을 트리거한 PR에 인라인 이미지 댓글로 첨부.
+      # (fork PR은 토큰이 읽기 전용이라 제외 — 혼자 쓰는 레포라 사실상 해당 없음)
+      - name: 스크린샷을 PR 댓글로 첨부 (docs/decisions.md §4)
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash .github/scripts/pr-screenshots.sh
 
       - uses: actions/upload-artifact@v4
         if: failure()

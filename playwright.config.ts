@@ -13,5 +13,7 @@ export default defineConfig({
     launchOptions: process.env.PW_CHROMIUM_PATH ? { executablePath: process.env.PW_CHROMIUM_PATH } : {},
     trace: 'retain-on-failure',
     video: 'retain-on-failure',
+    // 실패한 순간도 하나의 "장면"이다 — PR 댓글 첨부에 함께 수집된다.
+    screenshot: 'only-on-failure',
   },
 });

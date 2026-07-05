@@ -44,3 +44,20 @@
 Slack/Discord 어댑터는 외부 플랫폼을 통과해야 해서 사용자 시나리오 E2E가
 불가능하다. 자체 웹 채팅 UI는 Playwright로 사용자가 하는 그대로 조작할 수
 있으므로, 채팅 표면은 자체 웹 UI 하나만 둔다. (README 원칙 4)
+
+## 4. E2E 주요 장면 스크린샷을 PR에 첨부
+
+**결정: `ci-media` 브랜치에 커밋 + PR 마커 댓글에 인라인 이미지, 실행마다 갱신.**
+
+- GitHub에는 PR "첨부파일" 업로드 API가 없다(웹 UI의 드래그&드롭 전용).
+  그래서 표준 우회 패턴을 쓴다: 스크린샷을 이 레포의 `ci-media` 브랜치
+  `runs/<run_id>/`에 커밋하고, PR 댓글에 `raw.githubusercontent.com` URL로
+  인라인 렌더링한다. 이 레포가 **public**이라 가능한 방식이다 (private으로
+  바꾸면 raw URL이 댓글에서 렌더링되지 않으므로 아티팩트 링크로 폴백해야 함).
+- **무엇이 찍히나:** 시나리오 단계 중 주요 장면(`e2e/support/snap.ts` 호출
+  지점, 파일명 = 단계 번호 + 슬러그) + 실패한 순간의 자동 캡처
+  (`screenshot: 'only-on-failure'`). 실행 구현: `.github/scripts/pr-screenshots.sh`.
+- **스팸 방지:** PR당 댓글 하나(`<!-- devspace-e2e-screenshots -->` 마커)를
+  만들고 이후 실행은 그 댓글을 수정한다.
+- **청소:** `ci-media`는 최근 20개 실행만 유지한다. 오래된 댓글의 이미지는
+  깨질 수 있고, 브랜치 전체를 지워도 다음 실행이 다시 만든다.

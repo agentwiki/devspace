@@ -4,7 +4,7 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M23 (expansion XVIII).** The full vertical is live end to end — sandbox
+> **Status: M24 (expansion XIX).** The full vertical is live end to end — sandbox
 > engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
 > secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
 > (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
@@ -67,7 +67,15 @@ interface — a self-hostable "Claude Code on the web."
 > names the hosts a tenant may add, `net=+extra1,+extra2` (or the new
 > Network field on both repo-picker modals) extends the default allowlist
 > with exactly those — validated against the ceiling at provision, refused
-> loudly otherwise; blanket widening stays operator-only.
+> loudly otherwise; blanket widening stays operator-only. M24 lets a
+> request shape the environment itself: `env=K=V;K2=V2` (or the Env-vars
+> modal field) bakes non-secret variables into the container under host
+> policy, and a Setup-script modal field runs a one-shot root script after
+> the clone and strictly before the env is durably ready — failing or
+> timing out (`SANDBOX_SETUP_TIMEOUT_MS`) destroys the env instead of
+> handing out a half-setup one, both fields persist so a resume rebuilds
+> the same environment, and both join the warm-pool key so pooled fills
+> pre-run setup off the hot path.
 > See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing

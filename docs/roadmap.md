@@ -20,6 +20,7 @@ Expansion XV (history restore on resume): **M20.**
 Expansion XVI (transcript replay + retention policy): **M21.**
 Expansion XVII (per-environment egress policy): **M22.**
 Expansion XVIII (tenant egress widening under an operator ceiling): **M23.**
+Expansion XIX (tenant env vars + setup scripts): **M24.**
 
 ## M0 — Scaffolding (done)
 
@@ -886,9 +887,61 @@ Landed:
   tightening refuses in-thread and the unit stays PR_OPEN (the M19
   failed-resume posture, unchanged).
 
-## M24+ — Expansion XIX
+## M24 — Expansion XIX: tenant env vars + setup scripts (done)
 
-Per-tenant/per-user widening ceilings (`SANDBOX_TENANT_HOSTS` is per host —
+The last contract-stage axis the gap analysis carried (reusable
+environments) gets its request-shape half: non-secret env vars and a
+one-shot setup script on `CreateEnvironmentRequest` — CCW's "environment
+variables" and "setup script", request-first. One contract extension, one
+host knob, one migration, two modal inputs. Design of record:
+docs/m24-plan.md.
+
+Landed:
+
+- **Tenant env, under policy** — `env` (POSIX-named, non-empty record)
+  bakes into the synthesized devcontainer `containerEnv`, merged repo
+  config < tenant < policy; a key that case-insensitively collides with
+  the host's policy env (the egress-proxy vars) refuses at provision
+  naming the keys — two writers never silently disagree. NON-SECRET BY
+  CONTRACT: values ride the open JSON surface, persist plaintext on the
+  work unit, and appear in `docker inspect`; anything sensitive belongs
+  in `secrets`, which redact and encrypt. Both fields are optional-absent,
+  so pre-M24 canonical pool keys stay byte-identical.
+- **Setup as part of provisioning** — with `setupScript` set, the host
+  runs `sh -c <script>` in the fresh container (as root, cwd the container
+  workspace, NO secret injection — a warm-pool fill must run it
+  identically, so the script is the same execution warm and cold) after
+  `devcontainer up` and strictly BEFORE the durable table records `ready`:
+  a crash mid-setup is a crashed transition and recovery discards it.
+  Failure or timeout (`SANDBOX_SETUP_TIMEOUT_MS`, default 10 min) destroys
+  container + scope + network and fails the create with the stderr tail —
+  a half-setup env never reaches a tenant. Both fields join the canonical
+  pool key automatically, so a pool whose template carries a setup script
+  pre-runs it at FILL time and the claim skips it — the cold-start lever,
+  half-pulled until richer pool templates (M25+) can express scripts.
+- **Tenant surface + resume parity** — `env=K=V;K2=V2` on both adapters
+  (`;`-separated: values may carry commas; whitespace-free: the command
+  line is space-tokenized; any malformed pair empties the whole choice —
+  the M22 posture). Both repo-picker modals gain an "Env vars" input and a
+  multi-line "Setup script" input (the script is modal-only, the
+  secrets-modal precedent): `parseEnvAssignments` is the single env
+  interpreter for token and fields, and the script attaches verbatim via
+  `choiceFromSubmission`, shared by both adapters. Both fields persist on
+  the work unit (migration 0008), so the M19 resume re-provision rebuilds
+  the SAME environment — env, setup and all.
+
+## M25+ — Expansion XX
+
+Reusable `EnvironmentConfig` object + store (the other half of the M24
+axis: a control-plane `environments` table owning
+network/env/setupScript/baseImage/cache that RESOLVES into the now-landed
+request shape — the picker surface, ownership, and richer warm-pool
+templates all hang off it); snapshot caching after setup (`docker commit`
+— now there is something to cache, but image reuse across tenants needs
+its own security review); secret-bearing setup (setup runs secret-less by
+design so fills can run it — private-registry installs need a scoped,
+short-lived credential story, not "secrets happen to be there cold");
+per-tenant/per-user widening ceilings (`SANDBOX_TENANT_HOSTS` is per host —
 every tenant on the host shares one ceiling; identity-keyed policy needs a
 control-plane policy store and a way to ship it to hosts, its own feature
 with its own review); mid-session widening (the scope stays fixed at

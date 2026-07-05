@@ -52,7 +52,7 @@
 - **그래도 만료되면:** (예: 크론 8일+ 중단, Actions 캐시 7일 미사용 축출 후
   시드도 이미 stale) 골든패스가 인증 단계에서 명확히 실패한다 — 로컬 재로그인
   후 secret만 다시 올리면 된다. 조용히 썩지 않는다.
-- **주의 2 — rate limit:** 구독 요금제의 사용량을 개인 사용과 공유한다.
+- **주의 — rate limit:** 구독 요금제의 사용량을 개인 사용과 공유한다.
   시나리오의 에이전트 작업은 "README에 한 줄 추가" 수준으로 작게 유지한다.
 - **백업 경로:** 만료가 잦아 성가시면 usage-based `OPENAI_API_KEY`로 전환
   가능(codex는 API key 인증도 지원). 비용이 들지만 만료가 없다.
@@ -79,3 +79,49 @@ Slack/Discord 어댑터는 외부 플랫폼을 통과해야 해서 사용자 시
   만들고 이후 실행은 그 댓글을 수정한다.
 - **청소:** `ci-media`는 최근 20개 실행만 유지한다. 오래된 댓글의 이미지는
   깨질 수 있고, 브랜치 전체를 지워도 다음 실행이 다시 만든다.
+
+## 5. 헥사고날 모노레포 + 결정론적 경계 강제
+
+**결정: pnpm workspace 3패키지(core/adapters/server) + dependency-cruiser로 경계를 CI에서 강제.**
+
+- **구조:** `packages/core`(순수 도메인 + 포트 인터페이스) ←
+  `packages/adapters`(포트 구현: devcontainer/codex/GitHub) ←
+  `apps/server`(조립 루트 + 웹 채팅). 화살표 방향으로만 알 수 있다.
+  패키지는 필요가 증명될 때만 늘린다 — 지금은 3개면 충분하다.
+- **강제 장치 4중 (문서가 아니라 기계가 지킨다):**
+  1. **pnpm 엄격 node_modules** — package.json에 선언 안 한 패키지는
+     import 자체가 실패한다. core는 dependencies가 없으므로 아무것도 못 가져온다.
+  2. **dependency-cruiser** (`pnpm check:arch`) — core 순수성(외부 패키지·node
+     내장까지 금지), "adapters는 server만이 조립", "e2e는 앱 내부 import 금지
+     (블랙박스)", 순환 의존 금지. 위반 = CI 실패.
+  3. **ESLint + tsc strict** (`noUncheckedIndexedAccess`,
+     `exactOptionalPropertyTypes`) — 코드 수준 결함.
+  4. **유닛테스트** (vitest) — 도메인 로직(예: 세션 상태 머신)은 포트 목 없이
+     순수 함수로 테스트된다. E2E가 사용자 진실을, 유닛이 도메인 진실을 지킨다.
+- CI의 `checks` 잡이 위 전부를 실행한다. 저성능 에이전트든 사람이든,
+  경계를 깨면 머지 전에 기계적으로 걸린다.
+- **pnpm 복귀:** 단일 패키지 시절 npm이었으나 모노레포 유지 결정(이 항목)으로
+  pnpm workspace로 전환. 엄격 node_modules가 강제 장치 1번을 겸한다.
+- **core 내부 세부 경계 (도메인 비대화 대응):** `domain/`(규칙)은 `ports`도
+  `usecase/`도 import할 수 없다(`domain-knows-no-ports`). 포트가 필요한
+  로직이 domain에 들어오는 순간 CI가 깨지므로, 오케스트레이션은 기계적으로
+  usecase로 밀려난다. 여기에 파일 비대화 브레이크(ESLint `max-lines` 400,
+  `complexity` 12)를 더했다. 단, **로직의 의미론적 배치 자체(빈약한 유스케이스,
+  잘못 놓인 규칙)는 import 그래프로 판별 불가능** — 그 부분은 "domain은 가짜
+  포트 없이, usecase는 인메모리 포트로 테스트한다"는 테스트 규약과 리뷰가
+  담당한다. 기계가 못 지키는 것을 지킨다고 주장하지 않는다.
+
+## 6. git 훅 — 로컬 빠른 피드백 (게이트는 아님)
+
+**결정: 의존성 0으로 `.githooks/pre-push`에서 `pnpm check` 실행, `prepare`가 설치.**
+
+- 커밋한 `.githooks/` + `pnpm install` 시 도는 `prepare` 스크립트
+  (`git config core.hooksPath .githooks`)로 훅을 배포한다. husky 등 추가
+  패키지 없이 순수 git + pnpm만 쓴다.
+- **역할은 편의이지 게이트가 아니다:** `--no-verify`로 우회되고, 훅이 설치
+  안 된 클론/샌드박스에선 아예 안 돈다. 그래서 "함부로 못 깨게 막는" 실제
+  관문은 CI의 `checks` 잡 + 브랜치 보호이고, 훅은 CI까지 안 가고 push 전에
+  같은 묶음을 로컬에서 몇 초 만에 잡아주는 것뿐이다. 둘은 대체 관계가 아니다.
+- **pre-push를 고른 이유:** `pnpm check`는 유닛테스트까지 돌아 커밋마다 걸면
+  마찰이 크다. push 직전 한 번이 마지막 로컬 방어선으로 적절하다. 실패 시
+  종료코드가 0이 아니면 push가 차단된다(확인함).

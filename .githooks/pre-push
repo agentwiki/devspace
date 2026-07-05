@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 로컬 빠른 피드백 — CI와 같은 결정론적 묶음을 push 전에 한 번 돌린다.
+#
+# 이것은 편의이지 진짜 게이트가 아니다:
+#   - `git push --no-verify` 로 우회된다
+#   - 클론마다 `pnpm install`(prepare 스크립트)로 설치돼야 동작한다
+# 함부로 못 깨게 막는 실제 관문은 CI의 `checks` 잡 + 브랜치 보호다.
+# (docs/decisions.md §6)
+set -euo pipefail
+echo "pre-push: pnpm check 실행 중… (긴급 우회: git push --no-verify)"
+pnpm check

@@ -1,0 +1,9 @@
+{
+  "name": "@devspace/server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@devspace/adapters": "workspace:*",
+    "@devspace/core": "workspace:*"
+  }
+}

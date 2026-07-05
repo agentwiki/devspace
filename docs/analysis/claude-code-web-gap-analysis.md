@@ -28,8 +28,8 @@ UI 표면 결정은 [`chat-platform-ui-parity.md`](./chat-platform-ui-parity.md)
 | PR Auto-fix 루프                                          | ❌                                |
 | 채팅 표면 (Slack/Discord)                                 | 🟡 계약만                         |
 | diff 뷰 + 라인 코멘트                                     | ❌ GitHub PR 위임                 |
-| 세션 공유/아카이브/삭제                                   | ❌                                |
-| 대화 트랜스크립트 영속/복원                               | ✅ M20 transcripts + resume 주입  |
+| 세션 공유/아카이브/삭제                                   | 🟠 M21 보존 정책(자동 삭제)만     |
+| 대화 트랜스크립트 영속/복원                               | ✅ M20 영속 + M21 `!history` 재생 |
 | 유휴 회수(GC)                                             | ✅ M17-M19 reaper/경고/resume     |
 | 웹↔CLI 핸드오프 (--remote/teleport)                       | ❌                                |
 | 루틴/트리거 (schedule/API/GitHub event)                   | ❌                                |
@@ -50,7 +50,8 @@ sandbox 실행 엔진과 FSM·계약은 견고하다. 트랜스크립트 영속(
 - **셋업 스크립트 + 스냅샷 캐싱** — `setupScript` 필드 + 실행 후 컨테이너 커밋 재사용
   (`docker commit`/이미지 태깅). 콜드스타트의 최대 레버.
 - ~~**대화 트랜스크립트 영속**~~ — M20 완료: `conversationId`별 `transcripts`
-  테이블(`events` 버스와 별개), resume 첫 턴 히스토리 주입까지.
+  테이블(`events` 버스와 별개), resume 첫 턴 히스토리 주입까지. M21이 인챗
+  `!history` 재생과 트랜스크립트/감사 보존 정책(연령 기반 prune)을 얹었다.
 
 **구현과 함께**:
 

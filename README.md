@@ -4,7 +4,7 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M20 (expansion XV).** The full vertical is live end to end — sandbox
+> **Status: M21 (expansion XVI).** The full vertical is live end to end — sandbox
 > engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
 > secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
 > (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
@@ -54,7 +54,11 @@ interface — a self-hostable "Claude Code on the web."
 > idle resumed session is suspended back to waiting on its PR instead of
 > torn down. M20 makes the resumed session remember: every turn lands in a
 > durable, redacted-at-write transcript, and the first turn after a resume
-> carries a bounded digest of the prior conversation.
+> carries a bounded digest of the prior conversation. M21 surfaces that
+> record and bounds its growth: `!history` replays the durable transcript
+> in-thread in any state (even after teardown), and
+> `DEVSPACE_TRANSCRIPT_RETENTION_MS` / `DEVSPACE_AUDIT_RETENTION_MS` give
+> the elected reaper per-table age horizons with reported prune counts.
 > See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing

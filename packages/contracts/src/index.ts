@@ -100,32 +100,34 @@ export const CreateEnvironmentRequestSchema = z
      */
     poolKey: z.string().min(1).optional(),
     /**
-     * Per-env egress policy (M22): the request NARROWS the host's egress
-     * ceiling, never widens it (m5-plan Decision 1, extended). Absent = the
-     * operator allowlist, pre-M22 behavior — deliberately optional-absent
-     * (no default) so requests that don't use the feature keep byte-identical
+     * Per-env egress policy (M22, extended M23). Absent = the operator
+     * allowlist, pre-M22 behavior — deliberately optional-absent (no
+     * default) so requests that don't use the feature keep byte-identical
      * canonical pool keys. `'none'` = zero egress; `'custom'` = exactly
-     * `allowedHosts`, each of which must be covered by the operator
-     * allowlist — an uncovered entry refuses at provision, never a silent
-     * intersection. Hosts that cannot enforce a per-env scope (no per-env
-     * network / no gateway-addressed proxy) refuse rather than honor loosely.
+     * `allowedHosts`; `'extend'` (M23) = the operator allowlist PLUS
+     * `allowedHosts`. Every requested host must be covered by the operator
+     * allowlist or the host's tenant ceiling (`SANDBOX_TENANT_HOSTS`) — an
+     * inadmissible entry refuses at provision, never a silent intersection.
+     * Hosts that cannot enforce a per-env scope (no per-env network / no
+     * gateway-addressed proxy) refuse rather than honor loosely.
      */
-    networkAccess: z.enum(['none', 'custom']).optional(),
-    /** Required (non-empty) iff networkAccess === 'custom'. */
+    networkAccess: z.enum(['none', 'custom', 'extend']).optional(),
+    /** Required (non-empty) iff networkAccess is 'custom' or 'extend'. */
     allowedHosts: z.array(z.string().min(1)).optional(),
   })
   .superRefine((req, ctx) => {
-    if (req.networkAccess === 'custom' && !(req.allowedHosts && req.allowedHosts.length > 0)) {
+    const wantsHosts = req.networkAccess === 'custom' || req.networkAccess === 'extend';
+    if (wantsHosts && !(req.allowedHosts && req.allowedHosts.length > 0)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "networkAccess 'custom' requires a non-empty allowedHosts",
+        message: `networkAccess '${req.networkAccess}' requires a non-empty allowedHosts`,
         path: ['allowedHosts'],
       });
     }
-    if (req.networkAccess !== 'custom' && req.allowedHosts !== undefined) {
+    if (!wantsHosts && req.allowedHosts !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "allowedHosts is only meaningful with networkAccess 'custom'",
+        message: "allowedHosts is only meaningful with networkAccess 'custom' or 'extend'",
         path: ['allowedHosts'],
       });
     }
@@ -336,13 +338,13 @@ export const RepoChoiceSchema = z.object({
   ref: z.string().optional(),
   empty: z.boolean().default(false),
   /**
-   * Per-env egress policy (M22), tenant-chosen at creation
-   * (`/devspace <repo> [ref] [net=none|net=host1,host2]`) — the same
-   * narrowing semantics as `CreateEnvironmentRequest`, which is where it
+   * Per-env egress policy (M22, extended M23), tenant-chosen at creation
+   * (`/devspace <repo> [ref] [net=none|net=host1,host2|net=+extra1,+extra2]`)
+   * — the same semantics as `CreateEnvironmentRequest`, which is where it
    * lands. Adapters construct these; the env request's superRefine is the
    * contract-level guard.
    */
-  networkAccess: z.enum(['none', 'custom']).optional(),
+  networkAccess: z.enum(['none', 'custom', 'extend']).optional(),
   allowedHosts: z.array(z.string().min(1)).optional(),
 });
 export type RepoChoice = z.infer<typeof RepoChoiceSchema>;
@@ -527,10 +529,12 @@ export const WorkUnitSchema = z.object({
   /** When the reaper last warned this session about an idle reap (M18).
    * Never cleared — stale iff it predates max(lastActivityAt, updatedAt). */
   idleWarnedAt: z.string().datetime().optional(),
-  /** The tenant's egress policy (M22), persisted at repo choice so the M19
-   * resume re-provision carries it — a resume must never silently widen
-   * egress. Absent on pre-M22 rows and on units that use the host default. */
-  networkAccess: z.enum(['none', 'custom']).optional(),
+  /** The tenant's egress policy (M22, extended M23), persisted at repo
+   * choice so the M19 resume re-provision carries it — a resume must never
+   * silently widen (or for 'extend', silently re-widen past a tightened
+   * ceiling: resume re-validates). Absent on pre-M22 rows and on units that
+   * use the host default. */
+  networkAccess: z.enum(['none', 'custom', 'extend']).optional(),
   allowedHosts: z.array(z.string().min(1)).optional(),
 });
 export type WorkUnit = z.infer<typeof WorkUnitSchema>;

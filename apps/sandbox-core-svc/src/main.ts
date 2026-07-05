@@ -57,7 +57,10 @@ if (hardening?.runtime) {
 // The egress allowlist proxy — the only door out of an --internal env network.
 // EGRESS_ALLOWLIST extends the sandbox defaults (comma-separated hostnames).
 // Since M22 it doubles as the per-env scope registrar: a request carrying
-// `networkAccess` narrows its own env's allowlist at this proxy.
+// `networkAccess` narrows its own env's allowlist at this proxy. Since M23
+// SANDBOX_TENANT_HOSTS is the widening ceiling: hosts a per-env request may
+// ADD on top of the allowlist — validation input only, never reachable
+// outside an env whose resolved scope names them.
 let egress: EgressProxy | undefined;
 if (hardening?.egressProxyPort) {
   const allowlist = [
@@ -67,13 +70,21 @@ if (hardening?.egressProxyPort) {
       .map((s) => s.trim())
       .filter(Boolean),
   ];
+  const tenantHosts = (process.env.SANDBOX_TENANT_HOSTS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   egress = new EgressProxy({
     allowlist,
+    ...(tenantHosts.length > 0 ? { tenantHosts } : {}),
     port: hardening.egressProxyPort,
     onLog: (line) => console.log(`[${SERVICE}] egress: ${line}`),
   });
   await egress.start();
-  console.log(`[${SERVICE}] egress proxy on :${hardening.egressProxyPort}`);
+  console.log(
+    `[${SERVICE}] egress proxy on :${hardening.egressProxyPort}` +
+      (tenantHosts.length > 0 ? ` (tenant ceiling: ${tenantHosts.length} host(s))` : ''),
+  );
 }
 
 // The ports preview proxy (M6) — authenticated ingress to env ports; the

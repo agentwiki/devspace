@@ -89,10 +89,15 @@ export function coveredByAllowlist(entry: string, allowlist: readonly string[]):
  * Per-env scope registration (M22): the provisioner/core scope a network
  * gateway to an env's own (narrowed) allowlist; connections arriving on an
  * unscoped address keep the default allowlist. `allowlist` exposes the
- * operator ceiling `custom` requests are validated against.
+ * operator ceiling `custom` requests are validated against; `tenantHosts`
+ * (M23) is the widening ceiling — hosts a tenant request may ADD on top of
+ * the operator allowlist. It is validation input only: enforcement always
+ * reads the RESOLVED per-env scope, never the ceiling.
  */
 export interface EgressScopeRegistrar {
   readonly allowlist: readonly string[];
+  /** Tenant-addable hosts (SANDBOX_TENANT_HOSTS, M23). Absent = none. */
+  readonly tenantHosts?: readonly string[];
   setScope(clientAddr: string, allowlist: readonly string[]): void;
   clearScope(clientAddr: string): void;
 }
@@ -114,6 +119,13 @@ export function parseConnectTarget(url: string | undefined): { host: string; por
 
 export interface EgressProxyOptions {
   allowlist: readonly string[];
+  /**
+   * The tenant widening ceiling (M23): entries a per-env request may add
+   * beyond `allowlist`. Carried verbatim for the provisioner's validation;
+   * the proxy itself never consults it — an unscoped connection is governed
+   * by `allowlist` alone, and a scoped one by its resolved scope.
+   */
+  tenantHosts?: readonly string[];
   /** Bind address. Default 0.0.0.0 (containers reach it at their gateway). */
   bindHost?: string;
   /** Listen port. Default 0 (ephemeral; read it from `start()`'s result). */
@@ -124,6 +136,7 @@ export interface EgressProxyOptions {
 
 export class EgressProxy implements EgressScopeRegistrar {
   readonly allowlist: readonly string[];
+  readonly tenantHosts?: readonly string[];
   private readonly bindHost: string;
   private readonly requestedPort: number;
   private readonly onLog: (line: string) => void;
@@ -138,6 +151,7 @@ export class EgressProxy implements EgressScopeRegistrar {
 
   constructor(options: EgressProxyOptions) {
     this.allowlist = options.allowlist;
+    if (options.tenantHosts !== undefined) this.tenantHosts = options.tenantHosts;
     this.bindHost = options.bindHost ?? '0.0.0.0';
     this.requestedPort = options.port ?? 0;
     this.onLog = options.onLog ?? (() => {});

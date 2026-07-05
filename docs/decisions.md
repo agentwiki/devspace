@@ -30,10 +30,28 @@
 - 로컬에서 `codex login`(구독 계정) 후 `~/.codex/auth.json`의 내용 전체를
   GitHub Actions secret `CODEX_AUTH_JSON`에 붙여넣는다. CI는 이를
   `~/.codex/auth.json`으로 써넣기만 하면 codex CLI가 그대로 인증된다.
-- **주의 1 — 토큰 갱신:** codex는 사용 중 auth.json의 토큰을 갱신(rotate)해서
-  다시 써넣는데, CI 안에서 갱신된 값은 secret에 반영되지 않는다. 오래 지나
-  refresh token이 만료되면 로컬에서 재로그인 후 secret을 다시 올린다.
-  (만료 시 골든패스가 인증 단계에서 명확히 실패하므로 조용히 썩지 않는다.)
+- **공식 지원 패턴이다:** OpenAI의
+  [CI/CD auth 가이드](https://developers.openai.com/codex/auth/ci-cd-auth)가
+  권하는 방식이 정확히 이것 — "refresh API를 직접 부르지 말고, codex가
+  갱신해 써넣은 auth.json을 다음 실행을 위해 보존하고, secret은 캐시가 없을
+  때의 시드로만 써라." 참고로 공식 GitHub Action인
+  [`openai/codex-action`](https://github.com/openai/codex-action)도 있지만
+  **API key 인증 전용**이라 구독 계정에는 못 쓰고, 러너에서 `codex exec`를
+  직접 돌리는 용도라(codex가 devspace 샌드박스 안에서 도는 우리 구조와 다름)
+  채택하지 않았다.
+- **토큰 갱신 자동화:** 구독 세션은 마지막 갱신 후 ~8일이 지나면 만료된다.
+  그래서 (a) codex가 갱신한 auth.json을 **암호화해 Actions 캐시에 보존**하고
+  다음 실행은 secret 대신 캐시본을 우선 사용하며(시드는 캐시가 없을 때만),
+  (b) 주 1회 `codex-auth-keepalive` 잡이 codex를 아주 짧게 한 번 실행해
+  토큰을 갱신·재저장한다. 크론이 도는 한 재로그인이 필요 없다.
+  구현: `.github/scripts/codex-auth.sh` (seed/save).
+- **캐시를 암호화하는 이유:** Actions 캐시는 secret 저장소가 아니다 — public
+  레포에선 fork PR 워크플로가 기본 브랜치 캐시를 복원할 수 있다. 암호화 키를
+  secret 내용에서 파생하므로 secret이 없는 fork에게 캐시는 무용지물이고,
+  재로그인으로 시드를 교체하면 키가 바뀌어 옛 캐시는 자동 폐기된다.
+- **그래도 만료되면:** (예: 크론 8일+ 중단, Actions 캐시 7일 미사용 축출 후
+  시드도 이미 stale) 골든패스가 인증 단계에서 명확히 실패한다 — 로컬 재로그인
+  후 secret만 다시 올리면 된다. 조용히 썩지 않는다.
 - **주의 2 — rate limit:** 구독 요금제의 사용량을 개인 사용과 공유한다.
   시나리오의 에이전트 작업은 "README에 한 줄 추가" 수준으로 작게 유지한다.
 - **백업 경로:** 만료가 잦아 성가시면 usage-based `OPENAI_API_KEY`로 전환

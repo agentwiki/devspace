@@ -56,7 +56,7 @@ suite('postgres repositories', () => {
   // Isolate every test from the others and from prior runs.
   afterEach(async () => {
     await pool.query(
-      'TRUNCATE audit_log, events, leases, secrets, work_units, conversations CASCADE',
+      'TRUNCATE audit_log, transcripts, events, leases, secrets, work_units, conversations CASCADE',
     );
   });
 
@@ -196,6 +196,32 @@ suite('postgres repositories', () => {
     expect(after?.updatedAt).toBe(wu.updatedAt);
     // Missing ids are a no-op, matching the in-memory contract.
     await expect(repos.workUnits.releaseEnv('missing')).resolves.toBeUndefined();
+  });
+
+  it('transcripts round-trip: seq owns the order, the tail is chronological (M20)', async () => {
+    const repos = createPostgresRepositories(pool);
+    // A same-millisecond burst: created_at may collide; seq must not.
+    const texts = ['one', 'two', 'three', 'four'];
+    for (const [i, text] of texts.entries()) {
+      await repos.transcripts.append({
+        conversationId: 'c-tr',
+        workUnitId: 'wu-tr',
+        role: i % 2 === 0 ? 'user' : 'agent',
+        text,
+      });
+    }
+    await repos.transcripts.append({ conversationId: 'c-other', role: 'user', text: 'foreign' });
+
+    const all = await repos.transcripts.listByConversation('c-tr');
+    expect(all.map((t) => t.text)).toEqual(texts);
+    expect(all[0]).toMatchObject({ role: 'user', workUnitId: 'wu-tr', conversationId: 'c-tr' });
+    expect(all[0]?.createdAt).toBeTruthy();
+
+    // The tail is the newest n, oldest-first, and never crosses conversations.
+    const tail = await repos.transcripts.listTail('c-tr', 2);
+    expect(tail.map((t) => t.text)).toEqual(['three', 'four']);
+    expect(await repos.transcripts.listTail('c-tr', 99)).toHaveLength(4);
+    expect(await repos.transcripts.listTail('c-none', 5)).toEqual([]);
   });
 
   it('rejects a genuinely illegal transition', async () => {

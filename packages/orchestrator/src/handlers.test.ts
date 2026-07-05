@@ -382,6 +382,110 @@ describe('action.invoked', () => {
   });
 });
 
+describe('transcript persistence (M20)', () => {
+  it('persists the tenant prompt and ONE coalesced agent row per turn', async () => {
+    const agent = fakeAgent([
+      { type: 'thought', text: 'let me think' },
+      { type: 'message', text: 'first chunk, ' },
+      { type: 'tool_call', name: 'shell', args: {} },
+      { type: 'message', text: 'second chunk' },
+      { type: 'turn_end', reason: 'completed' },
+    ]);
+    const h = harness({ agent });
+    const { conv, wu } = await seed(h.repos, h.store, 'WORKING');
+
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'do the thing',
+    });
+
+    const rows = await h.repos.transcripts.listByConversation(conv.id);
+    // Chunks coalesce into one agent row; thoughts/tool calls never persist.
+    expect(rows.map((r) => `${r.role}:${r.text}`)).toEqual([
+      'user:do the thing',
+      'agent:first chunk, second chunk',
+    ]);
+    expect(rows[0]?.workUnitId).toBe(wu.id);
+  });
+
+  it('redacts before storing: an echoed LLM key never reaches the table', async () => {
+    const agent = fakeAgent([{ type: 'message', text: 'my key is sk-llm' }]);
+    const h = harness({ agent });
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'please echo sk-llm back at me',
+    });
+
+    const rows = await h.repos.transcripts.listByConversation(conv.id);
+    expect(rows).toHaveLength(2); // the tenant's own paste is scrubbed too
+    expect(JSON.stringify(rows)).not.toContain('sk-llm');
+    expect(rows.every((r) => r.text.includes('«redacted»'))).toBe(true);
+  });
+
+  it('guard-path replies never persist — the transcript is turns only', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'READY');
+    // Walk to PR_OPEN without running a turn, then post: the resume offer is
+    // platform chrome, not conversation.
+    const wu = await h.repos.workUnits.getByConversation(conv.id);
+    await h.repos.workUnits.transition(wu!.id, 'firstMessage', { agentSessionId: 'as_1' });
+    await h.repos.workUnits.transition(wu!.id, 'committedAndPushed');
+    await h.repos.workUnits.transition(wu!.id, 'prCreated', { prNumber: 1, prUrl: 'https://x/1' });
+
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'thanks!',
+    });
+    expect(await h.repos.transcripts.listByConversation(conv.id)).toEqual([]);
+  });
+
+  it('a throwing transcript repo never fails the turn (best-effort writes)', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+    vi.spyOn(h.repos.transcripts, 'append').mockRejectedValue(new Error('table on fire'));
+
+    await expect(
+      h.orch.handleChatEvent({
+        type: 'message.posted',
+        conversationId: conv.id,
+        userId: 'u1',
+        text: 'still works',
+      }),
+    ).resolves.toBeUndefined();
+    expect(h.rendered.some((r) => r.type === 'post_message')).toBe(true);
+  });
+
+  it('a turn that dies mid-stream still flushes the partial agent row', async () => {
+    const agent = fakeAgent();
+    agent.runTurn = async function* () {
+      yield { type: 'message', text: 'partial ' } as AgentEvent;
+      throw new Error('stream died');
+    };
+    const h = harness({ agent });
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+
+    await expect(
+      h.orch.handleChatEvent({
+        type: 'message.posted',
+        conversationId: conv.id,
+        userId: 'u1',
+        text: 'go',
+      }),
+    ).rejects.toThrow('stream died');
+
+    const rows = await h.repos.transcripts.listByConversation(conv.id);
+    expect(rows.map((r) => `${r.role}:${r.text}`)).toEqual(['user:go', 'agent:partial ']);
+  });
+});
+
 describe('session resume (M19)', () => {
   /** Walk a seeded unit to PR_OPEN (prNumber 42, the seed's PR branch). */
   async function seedPrOpen(h: Harness) {

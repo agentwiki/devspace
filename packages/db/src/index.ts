@@ -161,6 +161,32 @@ export interface AuditRepo {
   listByConversation(conversationId: string): Promise<AuditRecord[]>;
 }
 
+/**
+ * One conversation-visible turn half in the durable transcript (M20): a
+ * tenant prompt or a coalesced agent reply, redacted BEFORE it was appended
+ * (the writer's obligation — this layer stores what it is given).
+ */
+export interface TranscriptRecord {
+  id: string;
+  conversationId: string;
+  workUnitId?: string;
+  role: 'user' | 'agent';
+  text: string;
+  createdAt: string;
+}
+
+export interface TranscriptRepo {
+  append(input: Omit<TranscriptRecord, 'id' | 'createdAt'>): Promise<TranscriptRecord>;
+  /**
+   * The last `limit` entries in chronological order — the history-restore
+   * read (M20). Ordering is by insertion (`seq` in Pg), never by timestamp:
+   * created_at collides inside a burst.
+   */
+  listTail(conversationId: string, limit: number): Promise<TranscriptRecord[]>;
+  /** The full transcript, oldest first (diagnostics + later product reads). */
+  listByConversation(conversationId: string): Promise<TranscriptRecord[]>;
+}
+
 export interface Repositories {
   conversations: ConversationRepo;
   workUnits: WorkUnitRepo;
@@ -168,6 +194,7 @@ export interface Repositories {
   events: EventRepo;
   leases: LeaseRepo;
   audit: AuditRepo;
+  transcripts: TranscriptRepo;
 }
 
 export class IllegalTransitionError extends Error {
@@ -197,6 +224,7 @@ export function createInMemoryRepositories(
   const events: EventRecord[] = [];
   const leaseRows = new Map<string, LeaseRecord>();
   const auditEntries: AuditRecord[] = [];
+  const transcriptEntries: TranscriptRecord[] = [];
 
   const secretKey = (userId: string, conversationId: string | undefined, name: string): string =>
     `${userId}:${conversationId ?? ''}:${name}`;
@@ -352,6 +380,21 @@ export function createInMemoryRepositories(
       },
       async listByConversation(conversationId) {
         return auditEntries.filter((a) => a.conversationId === conversationId);
+      },
+    },
+    transcripts: {
+      async append(input) {
+        const rec: TranscriptRecord = { id: id('tr'), createdAt: now(), ...input };
+        transcriptEntries.push(rec);
+        return rec;
+      },
+      async listTail(conversationId, limit) {
+        // Insertion order IS the total order here (seq in Pg).
+        const all = transcriptEntries.filter((t) => t.conversationId === conversationId);
+        return all.slice(Math.max(0, all.length - limit));
+      },
+      async listByConversation(conversationId) {
+        return transcriptEntries.filter((t) => t.conversationId === conversationId);
       },
     },
   };

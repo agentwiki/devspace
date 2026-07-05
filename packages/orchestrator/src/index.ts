@@ -173,6 +173,35 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Persist one transcript entry (M20), redacted through the conversation's
+   * registry BEFORE storage — the 100%-of-outbound invariant extends to the
+   * table at rest (m20-plan Decision 3; the registry is warm because the
+   * message path re-registers the LLM key every turn). Best-effort:
+   * transcript bookkeeping never fails the turn it rode in on (the M17
+   * `touch` discipline). Empty text (a turn with no message chunks) is
+   * skipped — no row, no noise.
+   */
+  private async appendTranscript(
+    conversationId: string,
+    workUnitId: string,
+    role: 'user' | 'agent',
+    text: string,
+    registry: SecretRegistry,
+  ): Promise<void> {
+    if (!text) return;
+    try {
+      await this.deps.repos.transcripts.append({
+        conversationId,
+        workUnitId,
+        role,
+        text: registry.redact(text),
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+
   /** The in-chat entry point for secret setup (M6-D) — a single stable action
    * id the platform adapter turns into its own UI (Slack: a modal). */
   private emitSecretsPrompt(conversationId: string): Promise<void> {
@@ -453,20 +482,35 @@ export class Orchestrator {
       });
     }
 
-    for await (const agentEvent of this.deps.agents.runTurn(agentSessionId, {
-      prompt: event.text,
-      attachments: [],
-    })) {
-      // A budget-aborted turn is a privileged intervention worth an audit row.
-      if (agentEvent.type === 'turn_end' && agentEvent.reason === 'aborted') {
-        await this.audit('turn.aborted', {
-          userId: event.userId,
-          conversationId: event.conversationId,
-          workUnitId: unit.id,
-          detail: { agentSessionId },
-        });
+    // The turn is going to run: the tenant's prompt joins the durable
+    // transcript (M20, m20-plan Decision 1 — guard-path replies above never
+    // ran a turn and never persist). Always the tenant's OWN text, never a
+    // restored-history preamble.
+    await this.appendTranscript(event.conversationId, unit.id, 'user', event.text, registry);
+
+    let agentReply = '';
+    try {
+      for await (const agentEvent of this.deps.agents.runTurn(agentSessionId, {
+        prompt: event.text,
+        attachments: [],
+      })) {
+        // `message` events are stream CHUNKS — coalesce into one row per turn.
+        if (agentEvent.type === 'message') agentReply += agentEvent.text;
+        // A budget-aborted turn is a privileged intervention worth an audit row.
+        if (agentEvent.type === 'turn_end' && agentEvent.reason === 'aborted') {
+          await this.audit('turn.aborted', {
+            userId: event.userId,
+            conversationId: event.conversationId,
+            workUnitId: unit.id,
+            detail: { agentSessionId },
+          });
+        }
+        await this.renderMany(event.conversationId, agentEvent, registry);
       }
-      await this.renderMany(event.conversationId, agentEvent, registry);
+    } finally {
+      // Flushed in a finally (m20-plan Decision 2): a turn that dies
+      // mid-stream still records what it said before dying.
+      await this.appendTranscript(event.conversationId, unit.id, 'agent', agentReply, registry);
     }
   }
 

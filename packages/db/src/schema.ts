@@ -4,7 +4,16 @@
  * migrations from it locally (offline-friendly, air-gap-friendly), which is
  * why we use Drizzle over Prisma for an on-prem product. See ADR-0004.
  */
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+import {
+  bigserial,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+} from 'drizzle-orm/pg-core';
 
 export const conversations = pgTable(
   'conversations',
@@ -119,9 +128,29 @@ export const auditLog = pgTable(
   ],
 );
 
+// Durable per-conversation transcript (M20): the conversation-visible turns —
+// tenant prompts and coalesced agent replies — REDACTED at write time (the
+// orchestrator passes text through the conversation's registry before it
+// lands, m20-plan Decision 3). Append-only like audit_log; rows survive
+// teardown. `seq` owns the total order — created_at collides inside a burst.
+export const transcripts = pgTable(
+  'transcripts',
+  {
+    id: text('id').primaryKey().notNull(),
+    conversationId: text('conversation_id').notNull(),
+    workUnitId: text('work_unit_id'),
+    role: text('role').notNull(), // user | agent
+    text: text('text').notNull(),
+    seq: bigserial('seq', { mode: 'number' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('transcripts_conversation_seq_idx').on(t.conversationId, t.seq)],
+);
+
 export type ConversationRow = typeof conversations.$inferSelect;
 export type WorkUnitRow = typeof workUnits.$inferSelect;
 export type SecretRow = typeof secrets.$inferSelect;
 export type EventRow = typeof events.$inferSelect;
 export type LeaseRow = typeof leases.$inferSelect;
 export type AuditRow = typeof auditLog.$inferSelect;
+export type TranscriptRow = typeof transcripts.$inferSelect;

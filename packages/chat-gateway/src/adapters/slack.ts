@@ -32,6 +32,7 @@ import {
   actionsBlocks,
   homeView,
   messageBlocks,
+  parseEnvAssignments,
   parseRepoPickerSubmission,
   parseSecretsSubmission,
   repoPickerModal,
@@ -39,6 +40,7 @@ import {
   statusBlocks,
   streamBlocks,
   type HomeSession,
+  type RepoPickerSubmission,
   type SlackMessage,
   type ViewStateValues,
 } from '../slack/blocks.js';
@@ -86,25 +88,41 @@ export interface SlackAdapterOptions {
 
 /**
  * Parse "/devspace <repoUrl|owner/repo> [ref]
- * [net=none|net=host1,host2|net=+extra1,+extra2]" text into a RepoChoice.
- * `net=` (M22) narrows the session env's egress: `none` for no egress, a
- * comma list for exactly those hosts. A `+`-marked list (M23) EXTENDS the
- * host default instead — each extra must clear the host's tenant ceiling
- * (provisioning refuses otherwise). All entries marked or none: a mixed
- * list is ambiguous and either guess mis-shapes egress, so it empties the
- * choice, like an empty `net=` value — a typo must cost a retype, never a
- * differently-shaped env (m22-plan Decision 8; m23-plan Decision 5).
+ * [net=none|net=host1,host2|net=+extra1,+extra2] [env=K=V;K2=V2]" text into
+ * a RepoChoice. `net=` (M22) narrows the session env's egress: `none` for no
+ * egress, a comma list for exactly those hosts. A `+`-marked list (M23)
+ * EXTENDS the host default instead — each extra must clear the host's tenant
+ * ceiling (provisioning refuses otherwise). All entries marked or none: a
+ * mixed list is ambiguous and either guess mis-shapes egress, so it empties
+ * the choice, like an empty `net=` value — a typo must cost a retype, never
+ * a differently-shaped env (m22-plan Decision 8; m23-plan Decision 5).
+ * `env=` (M24) carries non-secret env vars, `;`-separated because values may
+ * contain commas (whitespace-free — the command line is space-tokenized; the
+ * modal field takes anything); any malformed pair empties the whole choice,
+ * same posture. The setup script has no command form — modal only.
  */
 export function parseRepoChoice(text: string): RepoChoice {
   const tokens = text.trim().split(/\s+/).filter(Boolean);
   const positional: string[] = [];
   let net: string | undefined;
+  let envRaw: string | undefined;
   for (const token of tokens) {
     if (/^net=/i.test(token)) {
       net = token.slice(4);
       continue;
     }
+    if (/^env=/i.test(token)) {
+      envRaw = token.slice(4);
+      continue;
+    }
     positional.push(token);
+  }
+
+  let env: Record<string, string> | undefined;
+  if (envRaw !== undefined) {
+    const parsed = parseEnvAssignments(envRaw);
+    if (parsed === null) return { empty: true };
+    env = parsed;
   }
 
   let networkAccess: RepoChoice['networkAccess'];
@@ -144,6 +162,25 @@ export function parseRepoChoice(text: string): RepoChoice {
     empty: false,
     ...(networkAccess !== undefined ? { networkAccess } : {}),
     ...(allowedHosts !== undefined ? { allowedHosts } : {}),
+    ...(env !== undefined ? { env } : {}),
+  };
+}
+
+/**
+ * Compose a repo-picker submission into a RepoChoice (M24): the text rides
+ * `parseRepoChoice` (the single interpreter of repo/ref/net syntax); a
+ * filled-but-malformed env field empties the WHOLE choice; env/setup attach
+ * onto a non-empty choice, the explicit field winning over an `env=` token
+ * typed into the repo field. Shared by both platform adapters.
+ */
+export function choiceFromSubmission(sub: RepoPickerSubmission): RepoChoice {
+  if (sub.env === null) return { empty: true };
+  const choice = parseRepoChoice(sub.text);
+  if (choice.empty) return choice;
+  return {
+    ...choice,
+    ...(sub.env !== undefined ? { env: sub.env } : {}),
+    ...(sub.setupScript !== undefined ? { setupScript: sub.setupScript } : {}),
   };
 }
 
@@ -372,7 +409,7 @@ export class SlackAdapter implements ChatAdapter, ChatRenderer {
       await this.rootThreadConversation(
         channel,
         body.user.id,
-        parseRepoChoice(parseRepoPickerSubmission(view.state.values as ViewStateValues)),
+        choiceFromSubmission(parseRepoPickerSubmission(view.state.values as ViewStateValues)),
       );
     });
 

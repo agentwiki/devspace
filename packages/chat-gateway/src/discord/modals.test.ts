@@ -85,17 +85,17 @@ describe('submission parsers', () => {
   });
 
   it('parseRepoPickerSubmission joins "<repo> [ref]"', () => {
-    expect(parseRepoPickerSubmission({ repo: ' acme/widgets ', ref: 'main' })).toBe(
-      'acme/widgets main',
-    );
-    expect(parseRepoPickerSubmission({ repo: 'acme/widgets' })).toBe('acme/widgets');
-    expect(parseRepoPickerSubmission({})).toBe('');
+    expect(parseRepoPickerSubmission({ repo: ' acme/widgets ', ref: 'main' })).toEqual({
+      text: 'acme/widgets main',
+    });
+    expect(parseRepoPickerSubmission({ repo: 'acme/widgets' })).toEqual({ text: 'acme/widgets' });
+    expect(parseRepoPickerSubmission({})).toEqual({ text: '' });
   });
 
   it('parseRepoPickerSubmission composes the network field as a net= token (M23)', () => {
-    expect(parseRepoPickerSubmission({ repo: 'acme/widgets', network: 'none' })).toBe(
-      'acme/widgets net=none',
-    );
+    expect(parseRepoPickerSubmission({ repo: 'acme/widgets', network: 'none' })).toEqual({
+      text: 'acme/widgets net=none',
+    });
     // Shared normalization with Slack: whitespace stripped, `net=` forgiven.
     expect(
       parseRepoPickerSubmission({
@@ -103,9 +103,35 @@ describe('submission parsers', () => {
         ref: 'main',
         network: ' net=+mirror.corp.example ',
       }),
-    ).toBe('acme/widgets main net=+mirror.corp.example');
+    ).toEqual({ text: 'acme/widgets main net=+mirror.corp.example' });
     // A blank field is unused — default egress, never an empty net= token.
-    expect(parseRepoPickerSubmission({ repo: 'acme/widgets', network: '  ' })).toBe('acme/widgets');
+    expect(parseRepoPickerSubmission({ repo: 'acme/widgets', network: '  ' })).toEqual({
+      text: 'acme/widgets',
+    });
+  });
+
+  it('parseRepoPickerSubmission carries the env + setup fields (M24)', () => {
+    // Same shared interpreter as Slack's — semantics are byte-for-byte.
+    expect(
+      parseRepoPickerSubmission({
+        repo: 'acme/widgets',
+        env_vars: 'A=1; B=two=2',
+        setup: 'corepack enable\npnpm install',
+      }),
+    ).toEqual({
+      text: 'acme/widgets',
+      env: { A: '1', B: 'two=2' },
+      setupScript: 'corepack enable\npnpm install',
+    });
+    // Filled-but-malformed env → null (the adapter empties the whole
+    // choice); blank fields are simply unused.
+    expect(parseRepoPickerSubmission({ repo: 'acme/widgets', env_vars: 'oops' })).toEqual({
+      text: 'acme/widgets',
+      env: null,
+    });
+    expect(parseRepoPickerSubmission({ repo: 'acme/widgets', env_vars: ' ', setup: ' ' })).toEqual({
+      text: 'acme/widgets',
+    });
   });
 });
 

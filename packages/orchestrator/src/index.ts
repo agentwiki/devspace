@@ -320,21 +320,25 @@ export class Orchestrator {
     }
 
     const branch = `devspace/${wu.id}`;
-    // The tenant's egress narrowing (M22) rides the choice onto the env
-    // request AND the unit row — resume must re-provision with the SAME
-    // policy, never a silently wider one (m22-plan Decision 6).
-    const egress =
-      choice.networkAccess !== undefined
+    // The tenant's egress narrowing (M22) and env-vars/setup-script shape
+    // (M24) ride the choice onto the env request AND the unit row — resume
+    // must re-provision the SAME environment, never a silently wider or
+    // differently-shaped one (m22-plan Decision 6; m24-plan).
+    const envShape = {
+      ...(choice.networkAccess !== undefined
         ? {
             networkAccess: choice.networkAccess,
             ...(choice.allowedHosts !== undefined ? { allowedHosts: choice.allowedHosts } : {}),
           }
-        : {};
+        : {}),
+      ...(choice.env !== undefined ? { env: choice.env } : {}),
+      ...(choice.setupScript !== undefined ? { setupScript: choice.setupScript } : {}),
+    };
     try {
       const provisioning = await this.advance(wu, 'repoChoice', 'PROVISIONING', {
         repoUrl: choice.repoUrl,
         branch,
-        ...egress,
+        ...envShape,
       });
       await this.emit(
         statusCommand(conv.id, 'PROVISIONING', 'Provisioning environment…', registry),
@@ -362,7 +366,7 @@ export class Orchestrator {
           ref: choice.ref,
           mounts: [agentRuntimeMount()],
           secrets: cloneToken ? [{ name: SECRET_GH_CLONE, value: cloneToken, target: 'env' }] : [],
-          ...egress,
+          ...envShape,
         }),
       );
 
@@ -879,14 +883,17 @@ export class Orchestrator {
             secrets: cloneToken
               ? [{ name: SECRET_GH_CLONE, value: cloneToken, target: 'env' }]
               : [],
-            // The unit's persisted egress policy (M22): a resume re-provision
-            // must never silently widen what the tenant originally narrowed.
+            // The unit's persisted egress policy (M22) and env/setup shape
+            // (M24): a resume re-provision must rebuild the SAME environment
+            // — never silently wider, never differently shaped.
             ...(wu.networkAccess !== undefined
               ? {
                   networkAccess: wu.networkAccess,
                   ...(wu.allowedHosts !== undefined ? { allowedHosts: wu.allowedHosts } : {}),
                 }
               : {}),
+            ...(wu.env !== undefined ? { env: wu.env } : {}),
+            ...(wu.setupScript !== undefined ? { setupScript: wu.setupScript } : {}),
           }),
         );
         envId = env.envId;

@@ -57,6 +57,13 @@
       "when": 1783219313133,
       "tag": "0007_messy_power_man",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1783237076627,
+      "tag": "0008_parallel_wolverine",
+      "breakpoints": true
     }
   ]
 }

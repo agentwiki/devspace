@@ -1,0 +1,50 @@
+{
+  "type": "view_submission",
+  "team": {
+    "id": "T0001",
+    "domain": "acme"
+  },
+  "user": {
+    "id": "U111",
+    "username": "dev",
+    "team_id": "T0001"
+  },
+  "api_app_id": "A0001",
+  "token": "verification-token",
+  "trigger_id": "13345224609.738474920.viewtrigger",
+  "view": {
+    "id": "V0001",
+    "team_id": "T0001",
+    "type": "modal",
+    "callback_id": "devspace-repo-picker",
+    "private_metadata": "C0123ABC",
+    "state": {
+      "values": {
+        "repo": {
+          "value": {
+            "type": "plain_text_input",
+            "value": "acme/widgets"
+          }
+        },
+        "ref": {
+          "value": {
+            "type": "plain_text_input",
+            "value": "main"
+          }
+        },
+        "env_vars": {
+          "value": {
+            "type": "plain_text_input",
+            "value": "A=1; NODE_OPTIONS=--trace-warnings"
+          }
+        },
+        "setup": {
+          "value": {
+            "type": "plain_text_input",
+            "value": "corepack enable\npnpm install"
+          }
+        }
+      }
+    }
+  }
+}

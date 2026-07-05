@@ -7,6 +7,7 @@ import {
   chunkText,
   homeView,
   messageBlocks,
+  parseEnvAssignments,
   parseRepoPickerSubmission,
   parseSecretsSubmission,
   renderCommandBlocks,
@@ -205,11 +206,11 @@ describe('modals (M6-D)', () => {
         repo: { value: { value: 'acme/widgets' } },
         ref: { value: { value: 'main' } },
       }),
-    ).toBe('acme/widgets main');
-    expect(parseRepoPickerSubmission({ repo: { value: { value: 'acme/widgets' } } })).toBe(
-      'acme/widgets',
-    );
-    expect(parseRepoPickerSubmission({})).toBe('');
+    ).toEqual({ text: 'acme/widgets main' });
+    expect(parseRepoPickerSubmission({ repo: { value: { value: 'acme/widgets' } } })).toEqual({
+      text: 'acme/widgets',
+    });
+    expect(parseRepoPickerSubmission({})).toEqual({ text: '' });
   });
 
   it('parseRepoPickerSubmission composes the network field as a net= token (M23)', () => {
@@ -219,20 +220,20 @@ describe('modals (M6-D)', () => {
         ref: { value: { value: 'main' } },
         network: { value: { value: 'none' } },
       }),
-    ).toBe('acme/widgets main net=none');
+    ).toEqual({ text: 'acme/widgets main net=none' });
     // Whitespace inside the value is stripped; one leading `net=` forgiven.
     expect(
       parseRepoPickerSubmission({
         repo: { value: { value: 'acme/widgets' } },
         network: { value: { value: ' +mirror.corp.example, +cdn.corp.example ' } },
       }),
-    ).toBe('acme/widgets net=+mirror.corp.example,+cdn.corp.example');
+    ).toEqual({ text: 'acme/widgets net=+mirror.corp.example,+cdn.corp.example' });
     expect(
       parseRepoPickerSubmission({
         repo: { value: { value: 'acme/widgets' } },
         network: { value: { value: 'net=none' } },
       }),
-    ).toBe('acme/widgets net=none');
+    ).toEqual({ text: 'acme/widgets net=none' });
     // A blank field is UNUSED (default egress) — no empty net= token, which
     // would empty the whole choice.
     expect(
@@ -240,6 +241,48 @@ describe('modals (M6-D)', () => {
         repo: { value: { value: 'acme/widgets' } },
         network: { value: { value: '   ' } },
       }),
-    ).toBe('acme/widgets');
+    ).toEqual({ text: 'acme/widgets' });
+  });
+
+  it('parseRepoPickerSubmission carries the env + setup fields (M24)', () => {
+    // The env field rides the shared interpreter (newlines and spaced pairs
+    // are modal ergonomics); the script attaches verbatim — nothing to parse.
+    expect(
+      parseRepoPickerSubmission({
+        repo: { value: { value: 'acme/widgets' } },
+        env_vars: { value: { value: 'A=1; NODE_OPTIONS=--max-old-space-size=4096\nB=' } },
+        setup: { value: { value: 'corepack enable\npnpm install' } },
+      }),
+    ).toEqual({
+      text: 'acme/widgets',
+      env: { A: '1', NODE_OPTIONS: '--max-old-space-size=4096', B: '' },
+      setupScript: 'corepack enable\npnpm install',
+    });
+    // Filled-but-malformed env parses to null — the adapter empties the
+    // WHOLE choice (m24-plan Decision 7); blank fields are simply unused.
+    expect(
+      parseRepoPickerSubmission({
+        repo: { value: { value: 'acme/widgets' } },
+        env_vars: { value: { value: 'not-an-assignment' } },
+      }),
+    ).toEqual({ text: 'acme/widgets', env: null });
+    expect(
+      parseRepoPickerSubmission({
+        repo: { value: { value: 'acme/widgets' } },
+        env_vars: { value: { value: '  ' } },
+        setup: { value: { value: '  ' } },
+      }),
+    ).toEqual({ text: 'acme/widgets' });
+  });
+
+  it('parseEnvAssignments accepts K=V lists and refuses any malformed pair (M24)', () => {
+    expect(parseEnvAssignments('A=1;B=two=2')).toEqual({ A: '1', B: 'two=2' });
+    expect(parseEnvAssignments(' A = 1 ')).toEqual({ A: '1' });
+    expect(parseEnvAssignments('EMPTY=')).toEqual({ EMPTY: '' });
+    expect(parseEnvAssignments('')).toBeNull();
+    expect(parseEnvAssignments(';')).toBeNull();
+    expect(parseEnvAssignments('A=1;oops')).toBeNull();
+    expect(parseEnvAssignments('1ST=x')).toBeNull();
+    expect(parseEnvAssignments('MY VAR=x')).toBeNull();
   });
 });

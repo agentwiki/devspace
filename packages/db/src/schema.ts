@@ -58,6 +58,13 @@ export const workUnits = pgTable(
     // egress. Nullable: pre-M22 rows and host-default units carry nothing.
     networkAccess: text('network_access'),
     allowedHosts: jsonb('allowed_hosts'),
+    // The tenant's env vars + setup script (M24), written at repo choice like
+    // the egress policy above — the resume re-provision must rebuild the SAME
+    // environment, env and setup included. Non-secret by contract (m24-plan
+    // Decision 2: values are visible in the container config anyway; anything
+    // sensitive belongs in the envelope-encrypted secrets table). Nullable.
+    tenantEnv: jsonb('tenant_env'),
+    setupScript: text('setup_script'),
   },
   (t) => [
     index('work_units_conversation_idx').on(t.conversationId),

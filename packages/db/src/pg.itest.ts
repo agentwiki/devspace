@@ -83,15 +83,20 @@ suite('postgres repositories', () => {
     const ready = await repos.workUnits.transition(wu.id, 'repoChoice', {
       repoUrl: 'https://x/r',
       // The egress policy persists with the choice (M22; 'extend' joined the
-      // enum in M23 — plain text column, the value must survive the mapping).
+      // enum in M23 — plain text column, the value must survive the mapping),
+      // and so do the env vars + setup script (M24 — jsonb/text columns).
       networkAccess: 'extend',
       allowedHosts: ['github.com', '*.corp.example'],
+      env: { NODE_OPTIONS: '--trace-warnings', EMPTY: '' },
+      setupScript: 'corepack enable\npnpm install',
     });
     expect(ready.state).toBe('PROVISIONING');
     expect(ready.repoUrl).toBe('https://x/r');
     expect(await repos.workUnits.get(wu.id)).toMatchObject({
       networkAccess: 'extend',
       allowedHosts: ['github.com', '*.corp.example'],
+      env: { NODE_OPTIONS: '--trace-warnings', EMPTY: '' },
+      setupScript: 'corepack enable\npnpm install',
     });
 
     const sec = await repos.secrets.put({

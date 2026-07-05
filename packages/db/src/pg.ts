@@ -74,6 +74,8 @@ function mapWorkUnit(r: WorkUnitRow): WorkUnit {
     idleWarnedAt: r.idleWarnedAt ? iso(r.idleWarnedAt) : undefined,
     networkAccess: opt(r.networkAccess) as WorkUnit['networkAccess'],
     allowedHosts: (opt(r.allowedHosts) as string[] | undefined) ?? undefined,
+    env: (opt(r.tenantEnv) as Record<string, string> | undefined) ?? undefined,
+    setupScript: opt(r.setupScript),
   };
 }
 
@@ -145,6 +147,8 @@ function workUnitPatchColumns(patch: Partial<WorkUnit>): Partial<typeof workUnit
   if (patch.prUrl !== undefined) set.prUrl = patch.prUrl;
   if (patch.networkAccess !== undefined) set.networkAccess = patch.networkAccess;
   if (patch.allowedHosts !== undefined) set.allowedHosts = patch.allowedHosts;
+  if (patch.env !== undefined) set.tenantEnv = patch.env;
+  if (patch.setupScript !== undefined) set.setupScript = patch.setupScript;
   return set;
 }
 

@@ -44,8 +44,23 @@ describe('contract round-trips', () => {
     expect(() =>
       CreateEnvironmentRequestSchema.parse({ networkAccess: 'none', allowedHosts: ['x.io'] }),
     ).toThrow();
-    // Widening is not a request concept: there is no 'open'/'full' level.
+    // Blanket widening is not a request concept: no 'open'/'full' level —
+    // 'extend' (M23) names hosts, and each must clear the host's ceiling.
     expect(() => CreateEnvironmentRequestSchema.parse({ networkAccess: 'open' })).toThrow();
+  });
+
+  it("guards the 'extend' widening shape (M23)", () => {
+    expect(() =>
+      CreateEnvironmentRequestSchema.parse({
+        networkAccess: 'extend',
+        allowedHosts: ['mirror.corp.example'],
+      }),
+    ).not.toThrow();
+    // Same posture as 'custom': the extras are required and non-empty.
+    expect(() => CreateEnvironmentRequestSchema.parse({ networkAccess: 'extend' })).toThrow();
+    expect(() =>
+      CreateEnvironmentRequestSchema.parse({ networkAccess: 'extend', allowedHosts: [] }),
+    ).toThrow();
   });
 
   it('accepts apply-secrets requests but never an empty one', () => {

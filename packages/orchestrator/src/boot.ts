@@ -244,7 +244,8 @@ export async function bootOrchestrator(
     // The egress allowlist proxy (M22, m22-plan Decision 7): with
     // EGRESS_PROXY_PORT set, the in-process boot now serves the port its
     // provisioned envs are pointed at (previously sandbox-core-svc only) and
-    // wires it as the per-env scope registrar.
+    // wires it as the per-env scope registrar. SANDBOX_TENANT_HOSTS (M23)
+    // rides along as the widening ceiling requests are validated against.
     if (hardening?.egressProxyPort) {
       const allowlist = [
         ...DEFAULT_EGRESS_ALLOWLIST,
@@ -253,13 +254,21 @@ export async function bootOrchestrator(
           .map((s) => s.trim())
           .filter(Boolean),
       ];
+      const tenantHosts = (process.env.SANDBOX_TENANT_HOSTS ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
       egress = new EgressProxy({
         allowlist,
+        ...(tenantHosts.length > 0 ? { tenantHosts } : {}),
         port: hardening.egressProxyPort,
         onLog: (line) => console.log(`[orchestrator] egress: ${line}`),
       });
       await egress.start();
-      console.log(`[orchestrator] egress proxy on :${hardening.egressProxyPort}`);
+      console.log(
+        `[orchestrator] egress proxy on :${hardening.egressProxyPort}` +
+          (tenantHosts.length > 0 ? ` (tenant ceiling: ${tenantHosts.length} host(s))` : ''),
+      );
     }
     // Durable env table (M11): the in-process sandbox recovers what its
     // predecessor was serving BEFORE anything places or sweeps.

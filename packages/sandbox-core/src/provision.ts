@@ -121,21 +121,27 @@ export function mergeDevcontainerConfig(input: {
 }
 
 /**
- * Resolve a request's egress policy (M22) against the operator allowlist:
- * absent → undefined (no per-env scope — the host default governs), 'none' →
- * an empty allowlist (deny everything), 'custom' → exactly the requested
- * hosts, each of which must be COVERED by the operator allowlist. An
- * uncovered entry throws, naming the entries — a silent intersection would
- * hand the tenant a quietly different policy than they asked for (m22-plan
- * Decision 2).
+ * Resolve a request's egress policy (M22, extended M23) against the
+ * operator allowlist and the tenant widening ceiling: absent → undefined
+ * (no per-env scope — the host default governs), 'none' → an empty
+ * allowlist (deny everything), 'custom' → exactly the requested hosts,
+ * 'extend' → the operator allowlist plus the requested hosts (the union
+ * RESOLVED at birth, deduped — m23-plan Decision 3). Every requested host
+ * must be ADMISSIBLE: covered by the operator allowlist or by the tenant
+ * ceiling (SANDBOX_TENANT_HOSTS) — one rule for both levels, because a
+ * host a tenant may extend to must also be nameable in a strictly narrower
+ * custom list. An inadmissible entry throws, naming the entries — a silent
+ * intersection would hand the tenant a quietly different policy than they
+ * asked for (m22-plan Decision 2).
  */
 export function effectiveEgressAllowlist(
   req: Pick<CreateEnvironmentRequest, 'networkAccess' | 'allowedHosts'>,
   operatorAllowlist: readonly string[],
+  tenantHosts: readonly string[] = [],
 ): readonly string[] | undefined {
   if (req.networkAccess === undefined) {
     if (req.allowedHosts !== undefined) {
-      throw new Error("allowedHosts is only meaningful with networkAccess 'custom'");
+      throw new Error("allowedHosts is only meaningful with networkAccess 'custom' or 'extend'");
     }
     return undefined;
   }
@@ -147,16 +153,28 @@ export function effectiveEgressAllowlist(
   }
   const hosts = req.allowedHosts ?? [];
   if (hosts.length === 0) {
-    throw new Error("networkAccess 'custom' requires a non-empty allowedHosts");
+    throw new Error(`networkAccess '${req.networkAccess}' requires a non-empty allowedHosts`);
   }
-  const uncovered = hosts.filter((h) => !coveredByAllowlist(h, operatorAllowlist));
-  if (uncovered.length > 0) {
+  const inadmissible = hosts.filter(
+    (h) => !coveredByAllowlist(h, operatorAllowlist) && !coveredByAllowlist(h, tenantHosts),
+  );
+  if (inadmissible.length > 0) {
     throw new Error(
-      `allowedHosts not covered by this host's egress allowlist: ${uncovered.join(', ')} ` +
-        `(a request narrows host policy, never widens it)`,
+      `allowedHosts not covered by this host's egress allowlist or tenant ceiling ` +
+        `(SANDBOX_TENANT_HOSTS): ${inadmissible.join(', ')}`,
     );
   }
-  return [...hosts];
+  if (req.networkAccess === 'custom') return [...hosts];
+  const union: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of [...operatorAllowlist, ...hosts]) {
+    const entry = raw.trim();
+    const key = entry.toLowerCase().replace(/\.$/, '');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    union.push(entry);
+  }
+  return union;
 }
 
 export function buildGitCloneArgs(repoUrl: string, dest: string, ref?: string): string[] {
@@ -313,7 +331,7 @@ export class DevcontainerProvisioner implements Provisioner {
             `(EGRESS_PROXY_PORT + a running allowlist proxy required)`,
         );
       }
-      egressScope = effectiveEgressAllowlist(req, this.egress.allowlist);
+      egressScope = effectiveEgressAllowlist(req, this.egress.allowlist, this.egress.tenantHosts);
     }
 
     const workspaceFolder = await mkdtemp(join(this.workspaceRoot, `devspace-${sanitize(envId)}-`));

@@ -4,7 +4,7 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M22 (expansion XVII).** The full vertical is live end to end — sandbox
+> **Status: M23 (expansion XVIII).** The full vertical is live end to end — sandbox
 > engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
 > secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
 > (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
@@ -62,8 +62,12 @@ interface — a self-hostable "Claude Code on the web."
 > makes egress policy per-environment: `/devspace <repo> net=none` (or
 > `net=host1,host2`) narrows that session env's allowlist — enforced at the
 > M5 egress proxy as a per-network scope, persisted so a resume rebuilds
-> with the same policy, and refused wherever it cannot be enforced;
-> widening stays operator-only.
+> with the same policy, and refused wherever it cannot be enforced. M23
+> adds the widening half under an operator ceiling: `SANDBOX_TENANT_HOSTS`
+> names the hosts a tenant may add, `net=+extra1,+extra2` (or the new
+> Network field on both repo-picker modals) extends the default allowlist
+> with exactly those — validated against the ceiling at provision, refused
+> loudly otherwise; blanket widening stays operator-only.
 > See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing

@@ -179,12 +179,13 @@ describe('modals (M6-D)', () => {
     expect(inputs.every((b) => (b as { optional: boolean }).optional)).toBe(true);
   });
 
-  it('repoPickerModal requires the repo and keeps ref optional', () => {
+  it('repoPickerModal requires the repo and keeps ref and network optional', () => {
     const view = repoPickerModal('C1');
     expect(view.callback_id).toBe(REPO_PICKER_CALLBACK_ID);
     const byId = new Map(view.blocks.map((b) => [(b as { block_id?: string }).block_id, b]));
     expect((byId.get('repo') as { optional: boolean }).optional).toBe(false);
     expect((byId.get('ref') as { optional: boolean }).optional).toBe(true);
+    expect((byId.get('network') as { optional: boolean }).optional).toBe(true);
   });
 
   it('parseSecretsSubmission keeps only filled fields, trimmed', () => {
@@ -209,5 +210,36 @@ describe('modals (M6-D)', () => {
       'acme/widgets',
     );
     expect(parseRepoPickerSubmission({})).toBe('');
+  });
+
+  it('parseRepoPickerSubmission composes the network field as a net= token (M23)', () => {
+    expect(
+      parseRepoPickerSubmission({
+        repo: { value: { value: 'acme/widgets' } },
+        ref: { value: { value: 'main' } },
+        network: { value: { value: 'none' } },
+      }),
+    ).toBe('acme/widgets main net=none');
+    // Whitespace inside the value is stripped; one leading `net=` forgiven.
+    expect(
+      parseRepoPickerSubmission({
+        repo: { value: { value: 'acme/widgets' } },
+        network: { value: { value: ' +mirror.corp.example, +cdn.corp.example ' } },
+      }),
+    ).toBe('acme/widgets net=+mirror.corp.example,+cdn.corp.example');
+    expect(
+      parseRepoPickerSubmission({
+        repo: { value: { value: 'acme/widgets' } },
+        network: { value: { value: 'net=none' } },
+      }),
+    ).toBe('acme/widgets net=none');
+    // A blank field is UNUSED (default egress) — no empty net= token, which
+    // would empty the whole choice.
+    expect(
+      parseRepoPickerSubmission({
+        repo: { value: { value: 'acme/widgets' } },
+        network: { value: { value: '   ' } },
+      }),
+    ).toBe('acme/widgets');
   });
 });

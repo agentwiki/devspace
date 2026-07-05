@@ -13,7 +13,7 @@
  * (Decision 6): every secret field optional, one `secret.submitted` per
  * filled field, repo required + ref optional.
  */
-import { SECRET_INPUTS, type SecretName } from '../slack/blocks.js';
+import { SECRET_INPUTS, normalizeNetworkField, type SecretName } from '../slack/blocks.js';
 
 /** Discord's hard cap on custom_id (components and modals alike). */
 export const CUSTOM_ID_MAX = 100;
@@ -110,6 +110,13 @@ export function repoPickerModal(channelId: string): DiscordModal {
         required: false,
         placeholder: 'main',
       }),
+      row({
+        custom_id: 'network',
+        style: TEXT_INPUT_STYLE.short,
+        label: 'Network (optional)',
+        required: false,
+        placeholder: 'none | host1,host2 | +extra.example.com',
+      }),
     ],
   };
 }
@@ -129,9 +136,12 @@ export function parseSecretsSubmission(
   return out;
 }
 
-/** Extract the "<repo> [ref]" text from a repo-picker submission. */
+/** Extract the "<repo> [ref] [net=…]" text from a repo-picker submission —
+ * the network field rides the shared `net=` value normalization (M23), so
+ * `parseRepoChoice` stays the single interpreter on both platforms. */
 export function parseRepoPickerSubmission(fields: ModalFields): string {
   const repo = fields.repo?.trim() ?? '';
   const ref = fields.ref?.trim() ?? '';
-  return [repo, ref].filter(Boolean).join(' ');
+  const net = normalizeNetworkField(fields.network);
+  return [repo, ref, net ? `net=${net}` : ''].filter(Boolean).join(' ');
 }

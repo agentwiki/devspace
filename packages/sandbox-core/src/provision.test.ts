@@ -179,6 +179,85 @@ describe('effectiveEgressAllowlist (M22)', () => {
   });
 });
 
+describe('effectiveEgressAllowlist (M23 widening ceiling)', () => {
+  const operator = ['github.com', '*.githubusercontent.com'];
+  const ceiling = ['mirror.corp.example', '*.corp.example'];
+
+  it("resolves 'extend' to the operator allowlist plus the admissible extras", () => {
+    expect(
+      effectiveEgressAllowlist(
+        { networkAccess: 'extend', allowedHosts: ['mirror.corp.example'] },
+        operator,
+        ceiling,
+      ),
+    ).toEqual(['github.com', '*.githubusercontent.com', 'mirror.corp.example']);
+  });
+
+  it("admits 'custom' entries under the ceiling — a strictly narrower env than extend must be legal", () => {
+    expect(
+      effectiveEgressAllowlist(
+        { networkAccess: 'custom', allowedHosts: ['github.com', 'mirror.corp.example'] },
+        operator,
+        ceiling,
+      ),
+    ).toEqual(['github.com', 'mirror.corp.example']);
+  });
+
+  it('refuses entries outside operator ∪ ceiling, naming the entries and the knob', () => {
+    expect(() =>
+      effectiveEgressAllowlist(
+        { networkAccess: 'extend', allowedHosts: ['mirror.corp.example', 'evil.com'] },
+        operator,
+        ceiling,
+      ),
+    ).toThrow(/SANDBOX_TENANT_HOSTS.*evil\.com/s);
+    // A wildcard extra needs an equal-or-broader ceiling wildcard, exactly
+    // like the M22 operator coverage rule.
+    expect(() =>
+      effectiveEgressAllowlist(
+        { networkAccess: 'extend', allowedHosts: ['*.example'] },
+        operator,
+        ceiling,
+      ),
+    ).toThrow(/\*\.example/);
+    expect(
+      effectiveEgressAllowlist(
+        { networkAccess: 'extend', allowedHosts: ['*.corp.example'] },
+        operator,
+        ceiling,
+      ),
+    ).toEqual([...operator, '*.corp.example']);
+  });
+
+  it("an absent/empty ceiling is byte-for-byte M22: 'extend' beyond the operator list refuses", () => {
+    expect(() =>
+      effectiveEgressAllowlist(
+        { networkAccess: 'extend', allowedHosts: ['mirror.corp.example'] },
+        operator,
+      ),
+    ).toThrow(/not covered/);
+    // …while extras the operator list already covers stay legal (a no-op env).
+    expect(
+      effectiveEgressAllowlist({ networkAccess: 'extend', allowedHosts: ['github.com'] }, operator),
+    ).toEqual(operator);
+  });
+
+  it('dedupes the union on the normalized entry form (case/trailing dot)', () => {
+    expect(
+      effectiveEgressAllowlist(
+        { networkAccess: 'extend', allowedHosts: ['GitHub.com.', 'mirror.corp.example'] },
+        operator,
+        ceiling,
+      ),
+    ).toEqual(['github.com', '*.githubusercontent.com', 'mirror.corp.example']);
+  });
+
+  it("the ceiling never admits traffic by itself: absent/'none' requests ignore it", () => {
+    expect(effectiveEgressAllowlist({}, operator, ceiling)).toBeUndefined();
+    expect(effectiveEgressAllowlist({ networkAccess: 'none' }, operator, ceiling)).toEqual([]);
+  });
+});
+
 describe('argv builders', () => {
   it('builds a shallow clone, with and without a ref', () => {
     expect(buildGitCloneArgs('https://x/r.git', '/ws')).toEqual([
@@ -356,7 +435,10 @@ describe('DevcontainerProvisioner with a per-env network profile', () => {
     expect(config.containerEnv?.HTTPS_PROXY).toBe('http://172.20.0.1:3128');
   });
 
-  function fakeRegistrar(allowlist: readonly string[]): {
+  function fakeRegistrar(
+    allowlist: readonly string[],
+    tenantHosts?: readonly string[],
+  ): {
     registrar: EgressScopeRegistrar;
     scopes: Map<string, readonly string[]>;
   } {
@@ -365,6 +447,7 @@ describe('DevcontainerProvisioner with a per-env network profile', () => {
       scopes,
       registrar: {
         allowlist,
+        ...(tenantHosts !== undefined ? { tenantHosts } : {}),
         setScope: (addr, list) => scopes.set(addr, list),
         clearScope: (addr) => scopes.delete(addr),
       },
@@ -410,6 +493,40 @@ describe('DevcontainerProvisioner with a per-env network profile', () => {
       }),
     ).rejects.toThrow(/exited 1/);
     expect(scopes.size).toBe(0);
+  });
+
+  it("validates 'extend' against the registrar's tenant ceiling and scopes the union (M23)", async () => {
+    const { runner } = fakeRunner({});
+    const { registrar, scopes } = fakeRegistrar(['github.com'], ['mirror.corp.example']);
+    const provisioner = new DevcontainerProvisioner(runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+      hardening: { network: 'per-env', egressProxyPort: 3128 },
+      egress: registrar,
+    });
+
+    const result = await provisioner.provision('e9', {
+      ...req,
+      networkAccess: 'extend',
+      allowedHosts: ['mirror.corp.example'],
+    });
+    expect(result.egressScope).toEqual(['github.com', 'mirror.corp.example']);
+    expect(scopes.get('172.20.0.1')).toEqual(['github.com', 'mirror.corp.example']);
+
+    // Without the ceiling the same request refuses up front — the ceiling is
+    // the ONLY thing that admits an off-allowlist extra.
+    const bare = fakeRegistrar(['github.com']);
+    const strict = new DevcontainerProvisioner(fakeRunner({}).runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+      hardening: { network: 'per-env', egressProxyPort: 3128 },
+      egress: bare.registrar,
+    });
+    await expect(
+      strict.provision('e10', {
+        ...req,
+        networkAccess: 'extend',
+        allowedHosts: ['mirror.corp.example'],
+      }),
+    ).rejects.toThrow(/SANDBOX_TENANT_HOSTS/);
   });
 
   it('refuses an uncovered custom policy before touching anything (M22)', async () => {

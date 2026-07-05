@@ -34,6 +34,7 @@ import { SandboxError, type SandboxCore } from '@devspace/sandbox-core';
 import type { AgentRunner } from '@devspace/agent-runner';
 import { agentRuntimeMount } from '@devspace/agent-runner';
 import { classifyAction, WorkUnitMachine } from './stateMachine.js';
+import { buildHistoryPreamble, HISTORY_MAX_ENTRIES } from './transcript.js';
 import {
   approxDuration,
   IDLE_REAP_STATES,
@@ -47,6 +48,7 @@ import { messageCommand, renderAgentEvent, statusCommand } from './render.js';
 import { sameRepo, type MappedPrWebhook } from './webhooks.js';
 
 export * from './stateMachine.js';
+export * from './transcript.js';
 export * from './secrets.js';
 export * from './git.js';
 export * from './render.js';
@@ -457,6 +459,7 @@ export class Orchestrator {
     // Ensure an agent session, transitioning READY --firstMessage--> WORKING on
     // the first message. Subsequent messages find WORKING and skip the transition.
     let unit = wu;
+    let prompt = event.text;
     let agentSessionId = wu.agentSessionId;
     if (!agentSessionId) {
       if (!llm) {
@@ -477,7 +480,16 @@ export class Orchestrator {
       // READY takes the firstMessage edge; a resumed unit is ALREADY WORKING,
       // where `advance` would no-op and silently drop the patch — one orphan
       // ACP session per message. The M19 self-loop persists it instead.
-      unit = await this.machine.apply(unit.id, unit.state === 'READY' ? 'firstMessage' : 'resume', {
+      const resumed = unit.state !== 'READY';
+      if (resumed) {
+        // History restore (M20): a fresh session on a resumed unit starts
+        // blind — carry the prior conversation into its first prompt. Only
+        // this prompt: the preamble is never persisted, so suspend/resume
+        // cycles cannot compound it (m20-plan Decision 5).
+        const history = await this.restoredHistory(event.conversationId);
+        if (history) prompt = `${history}\n\n${event.text}`;
+      }
+      unit = await this.machine.apply(unit.id, resumed ? 'resume' : 'firstMessage', {
         agentSessionId,
       });
     }
@@ -491,7 +503,7 @@ export class Orchestrator {
     let agentReply = '';
     try {
       for await (const agentEvent of this.deps.agents.runTurn(agentSessionId, {
-        prompt: event.text,
+        prompt,
         attachments: [],
       })) {
         // `message` events are stream CHUNKS — coalesce into one row per turn.
@@ -511,6 +523,20 @@ export class Orchestrator {
       // Flushed in a finally (m20-plan Decision 2): a turn that dies
       // mid-stream still records what it said before dying.
       await this.appendTranscript(event.conversationId, unit.id, 'agent', agentReply, registry);
+    }
+  }
+
+  /**
+   * The restored-history preamble for a fresh session on a resumed unit
+   * (M20): read the transcript tail and render it. A failed read degrades to
+   * the M19 blind resume — never a failed turn (m20-plan Decision 4).
+   */
+  private async restoredHistory(conversationId: string): Promise<string> {
+    try {
+      const tail = await this.deps.repos.transcripts.listTail(conversationId, HISTORY_MAX_ENTRIES);
+      return buildHistoryPreamble(tail);
+    } catch {
+      return '';
     }
   }
 

@@ -56,6 +56,9 @@ if (hardening?.runtime) {
 
 // The egress allowlist proxy — the only door out of an --internal env network.
 // EGRESS_ALLOWLIST extends the sandbox defaults (comma-separated hostnames).
+// Since M22 it doubles as the per-env scope registrar: a request carrying
+// `networkAccess` narrows its own env's allowlist at this proxy.
+let egress: EgressProxy | undefined;
 if (hardening?.egressProxyPort) {
   const allowlist = [
     ...DEFAULT_EGRESS_ALLOWLIST,
@@ -64,12 +67,12 @@ if (hardening?.egressProxyPort) {
       .map((s) => s.trim())
       .filter(Boolean),
   ];
-  const proxy = new EgressProxy({
+  egress = new EgressProxy({
     allowlist,
     port: hardening.egressProxyPort,
     onLog: (line) => console.log(`[${SERVICE}] egress: ${line}`),
   });
-  await proxy.start();
+  await egress.start();
   console.log(`[${SERVICE}] egress proxy on :${hardening.egressProxyPort}`);
 }
 
@@ -106,7 +109,14 @@ if (budgets) {
 // listener, so the first fleet census / orphan sweep already sees what was
 // re-adopted; without the var, the documented in-memory posture is unchanged.
 const stateStore = envStateStoreFromEnv(process.env);
-const core = new DevcontainerSandboxCore({ hardening, preview, maxEnvs, budgets, stateStore });
+const core = new DevcontainerSandboxCore({
+  hardening,
+  preview,
+  maxEnvs,
+  budgets,
+  stateStore,
+  egress,
+});
 if (stateStore) {
   const { recovered, discarded, skipped } = await core.recover();
   console.log(

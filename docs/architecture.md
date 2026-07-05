@@ -183,6 +183,22 @@ is the compliance record) add a prune phase to the elected reaper's sweep:
 rows strictly older than each horizon are deleted and the counts reported,
 never silently (docs/m21-plan.md).
 
+Since M22 egress policy is per-environment: a `CreateEnvironmentRequest` can
+carry `networkAccess: 'none' | 'custom'` (+ `allowedHosts`), which only ever
+NARROWS the operator's allowlist — 'custom' entries must be covered by it,
+and there is no widening level. Enforcement lives at the M5 egress proxy as
+a per-network scope keyed on the local address a connection arrived on (an
+`--internal` network reaches the host only at its own bridge gateway —
+nothing the workload can forge); the scope is registered before `up`,
+cleared with the network at destroy, persisted as birth policy in the M11
+table, and re-registered at recovery — or the env is discarded when the
+host can no longer enforce it. Tenants choose with
+`/devspace <repo> [ref] [net=none|net=host1,host2]` on both adapters; the
+work unit remembers the choice so the M19 resume re-provisions with the
+same narrowing, and hosts that cannot enforce a scope (demo mode, shared
+networks, static proxy URL) refuse the request rather than honor it loosely
+(docs/m22-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

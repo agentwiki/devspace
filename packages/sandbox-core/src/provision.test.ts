@@ -3,12 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { CommandRunner, RunResult } from './cli.js';
+import type { EgressScopeRegistrar } from './egress-proxy.js';
 import {
   DevcontainerProvisioner,
   GIT_REFRESH_RESET_ARGS,
   buildDevcontainerUpArgs,
   buildGitCloneArgs,
   buildGitRefreshArgs,
+  effectiveEgressAllowlist,
   mergeDevcontainerConfig,
   mountConfigEntries,
   parseDevcontainerUpOutput,
@@ -132,6 +134,48 @@ describe('mergeDevcontainerConfig', () => {
       mounts: [],
     });
     expect('containerEnv' in config).toBe(false);
+  });
+});
+
+describe('effectiveEgressAllowlist (M22)', () => {
+  const operator = ['github.com', '*.githubusercontent.com'];
+
+  it('is undefined when the request carries no policy (host default governs)', () => {
+    expect(effectiveEgressAllowlist({}, operator)).toBeUndefined();
+  });
+
+  it("resolves 'none' to an empty allowlist (deny everything)", () => {
+    expect(effectiveEgressAllowlist({ networkAccess: 'none' }, operator)).toEqual([]);
+  });
+
+  it("resolves 'custom' to exactly the covered hosts", () => {
+    expect(
+      effectiveEgressAllowlist(
+        { networkAccess: 'custom', allowedHosts: ['github.com', '*.githubusercontent.com'] },
+        operator,
+      ),
+    ).toEqual(['github.com', '*.githubusercontent.com']);
+  });
+
+  it('refuses uncovered entries loudly, naming them — never a silent intersection', () => {
+    expect(() =>
+      effectiveEgressAllowlist(
+        { networkAccess: 'custom', allowedHosts: ['github.com', 'evil.com', '*.bad.io'] },
+        operator,
+      ),
+    ).toThrow(/evil\.com, \*\.bad\.io/);
+  });
+
+  it("refuses 'custom' without hosts and hosts without 'custom'", () => {
+    expect(() => effectiveEgressAllowlist({ networkAccess: 'custom' }, operator)).toThrow(
+      /non-empty allowedHosts/,
+    );
+    expect(() =>
+      effectiveEgressAllowlist({ networkAccess: 'none', allowedHosts: ['github.com'] }, operator),
+    ).toThrow(/must not carry/);
+    expect(() => effectiveEgressAllowlist({ allowedHosts: ['github.com'] }, operator)).toThrow(
+      /only meaningful/,
+    );
   });
 });
 
@@ -311,6 +355,110 @@ describe('DevcontainerProvisioner with a per-env network profile', () => {
     expect(config.containerEnv?.HTTP_PROXY).toBe('http://172.20.0.1:3128');
     expect(config.containerEnv?.HTTPS_PROXY).toBe('http://172.20.0.1:3128');
   });
+
+  function fakeRegistrar(allowlist: readonly string[]): {
+    registrar: EgressScopeRegistrar;
+    scopes: Map<string, readonly string[]>;
+  } {
+    const scopes = new Map<string, readonly string[]>();
+    return {
+      scopes,
+      registrar: {
+        allowlist,
+        setScope: (addr, list) => scopes.set(addr, list),
+        clearScope: (addr) => scopes.delete(addr),
+      },
+    };
+  }
+
+  it('scopes the resolved gateway BEFORE `up` and reports it (M22)', async () => {
+    const { runner, calls } = fakeRunner({});
+    const { registrar, scopes } = fakeRegistrar(['github.com']);
+    const provisioner = new DevcontainerProvisioner(runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+      hardening: { network: 'per-env', egressProxyPort: 3128 },
+      egress: registrar,
+    });
+
+    const result = await provisioner.provision('e5', { ...req, networkAccess: 'none' });
+    expect(result.egressGateway).toBe('172.20.0.1');
+    expect(result.egressScope).toEqual([]);
+    expect(scopes.get('172.20.0.1')).toEqual([]);
+
+    // A 'none' env still gets the proxy vars: the scope denies, so
+    // proxy-polite tools 403 fast instead of hanging on the missing route.
+    const upArgs = calls.find((c) => c.command === 'devcontainer')!.args;
+    const configPath = upArgs[upArgs.indexOf('--config') + 1]!;
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as DevcontainerConfig;
+    expect(config.containerEnv?.HTTPS_PROXY).toBe('http://172.20.0.1:3128');
+  });
+
+  it('clears the scope in the failure cleanup, with the network (M22)', async () => {
+    const { runner } = fakeRunner({ failUp: true });
+    const { registrar, scopes } = fakeRegistrar(['github.com']);
+    const provisioner = new DevcontainerProvisioner(runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+      hardening: { network: 'per-env', egressProxyPort: 3128 },
+      egress: registrar,
+    });
+
+    await expect(
+      provisioner.provision('e6', {
+        ...req,
+        networkAccess: 'custom',
+        allowedHosts: ['github.com'],
+      }),
+    ).rejects.toThrow(/exited 1/);
+    expect(scopes.size).toBe(0);
+  });
+
+  it('refuses an uncovered custom policy before touching anything (M22)', async () => {
+    const { runner, calls } = fakeRunner({});
+    const { registrar } = fakeRegistrar(['github.com']);
+    const provisioner = new DevcontainerProvisioner(runner, {
+      workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+      hardening: { network: 'per-env', egressProxyPort: 3128 },
+      egress: registrar,
+    });
+
+    await expect(
+      provisioner.provision('e7', { ...req, networkAccess: 'custom', allowedHosts: ['evil.com'] }),
+    ).rejects.toThrow(/not covered/);
+    expect(calls).toEqual([]); // refused up front — no network, no clone, no up
+  });
+
+  it.each([
+    [
+      'no per-env network',
+      { network: 'shared-net', egressProxyPort: 3128 },
+      true,
+      /per-env networks/,
+    ],
+    ['no registrar', { network: 'per-env', egressProxyPort: 3128 }, false, /egress proxy/],
+    ['no gateway-addressed proxy', { network: 'per-env' }, true, /egress proxy/],
+    [
+      'static proxy URL (one shared gateway)',
+      { network: 'per-env', egressProxyPort: 3128, egressProxyUrl: 'http://gw:3128' },
+      true,
+      /egress proxy/,
+    ],
+  ] as const)(
+    'refuses networkAccess when unenforceable: %s (M22)',
+    async (_label, hardening, withRegistrar, message) => {
+      const { runner, calls } = fakeRunner({});
+      const { registrar } = fakeRegistrar(['github.com']);
+      const provisioner = new DevcontainerProvisioner(runner, {
+        workspaceRoot: await mkdtemp(join(tmpdir(), 'prov-test-')),
+        hardening,
+        ...(withRegistrar ? { egress: registrar } : {}),
+      });
+
+      await expect(provisioner.provision('e8', { ...req, networkAccess: 'none' })).rejects.toThrow(
+        message,
+      );
+      expect(calls).toEqual([]);
+    },
+  );
 
   it('neither creates nor reports a network for a named-network profile', async () => {
     const { runner, calls } = fakeRunner({});

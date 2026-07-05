@@ -114,6 +114,48 @@ describe('parseRepoChoice', () => {
     expect(parseRepoChoice('   ')).toEqual({ empty: true });
     expect(parseRepoChoice('not a repo')).toEqual({ empty: true });
   });
+
+  it('parses net=none into a no-egress choice (M22)', () => {
+    expect(parseRepoChoice('acme/widgets main net=none')).toEqual({
+      repoUrl: 'https://github.com/acme/widgets',
+      ref: 'main',
+      empty: false,
+      networkAccess: 'none',
+    });
+    // Position-independent; NONE case-insensitive.
+    expect(parseRepoChoice('net=NONE acme/widgets')).toMatchObject({
+      repoUrl: 'https://github.com/acme/widgets',
+      networkAccess: 'none',
+    });
+  });
+
+  it('parses a net= host list into a custom narrowing (M22)', () => {
+    expect(parseRepoChoice('acme/widgets net=github.com,*.githubusercontent.com')).toEqual({
+      repoUrl: 'https://github.com/acme/widgets',
+      ref: undefined,
+      empty: false,
+      networkAccess: 'custom',
+      allowedHosts: ['github.com', '*.githubusercontent.com'],
+    });
+  });
+
+  it('unwraps Slack auto-links and schemes inside net= host entries (M22)', () => {
+    expect(
+      parseRepoChoice('acme/widgets net=<http://github.com|github.com>,https://api.github.com/v3'),
+    ).toMatchObject({
+      networkAccess: 'custom',
+      allowedHosts: ['github.com', 'api.github.com'],
+    });
+  });
+
+  it('an empty net= value empties the whole choice — never a silently wider env (M22)', () => {
+    expect(parseRepoChoice('acme/widgets net=')).toEqual({ empty: true });
+    expect(parseRepoChoice('acme/widgets net=,')).toEqual({ empty: true });
+  });
+
+  it('a bare net= token without a repo stays an empty choice', () => {
+    expect(parseRepoChoice('net=none')).toEqual({ empty: true });
+  });
 });
 
 describe('SlackAdapter inbound (recorded payloads through real Bolt)', () => {

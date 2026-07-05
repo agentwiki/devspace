@@ -83,22 +83,53 @@ export const SecretSpecSchema = z.object({
 });
 export type SecretSpec = z.infer<typeof SecretSpecSchema>;
 
-export const CreateEnvironmentRequestSchema = z.object({
-  repoUrl: z.string().url().optional(),
-  ref: z.string().optional(),
-  /** inline devcontainer.json override merged over the repo's own */
-  devcontainerOverride: z.record(z.unknown()).optional(),
-  baseImage: z.string().optional(),
-  resources: ResourceLimitsSchema.default({}),
-  mounts: z.array(MountSpecSchema).default([]),
-  secrets: z.array(SecretSpecSchema).default([]),
-  /**
-   * Pool identity (M10): set only by the warm-pool layer when filling — the
-   * host records which envs are unclaimed warm stock, so a restarted control
-   * plane can re-adopt them. Cleared by `claimEnvironment` at hand-out.
-   */
-  poolKey: z.string().min(1).optional(),
-});
+export const CreateEnvironmentRequestSchema = z
+  .object({
+    repoUrl: z.string().url().optional(),
+    ref: z.string().optional(),
+    /** inline devcontainer.json override merged over the repo's own */
+    devcontainerOverride: z.record(z.unknown()).optional(),
+    baseImage: z.string().optional(),
+    resources: ResourceLimitsSchema.default({}),
+    mounts: z.array(MountSpecSchema).default([]),
+    secrets: z.array(SecretSpecSchema).default([]),
+    /**
+     * Pool identity (M10): set only by the warm-pool layer when filling — the
+     * host records which envs are unclaimed warm stock, so a restarted control
+     * plane can re-adopt them. Cleared by `claimEnvironment` at hand-out.
+     */
+    poolKey: z.string().min(1).optional(),
+    /**
+     * Per-env egress policy (M22): the request NARROWS the host's egress
+     * ceiling, never widens it (m5-plan Decision 1, extended). Absent = the
+     * operator allowlist, pre-M22 behavior — deliberately optional-absent
+     * (no default) so requests that don't use the feature keep byte-identical
+     * canonical pool keys. `'none'` = zero egress; `'custom'` = exactly
+     * `allowedHosts`, each of which must be covered by the operator
+     * allowlist — an uncovered entry refuses at provision, never a silent
+     * intersection. Hosts that cannot enforce a per-env scope (no per-env
+     * network / no gateway-addressed proxy) refuse rather than honor loosely.
+     */
+    networkAccess: z.enum(['none', 'custom']).optional(),
+    /** Required (non-empty) iff networkAccess === 'custom'. */
+    allowedHosts: z.array(z.string().min(1)).optional(),
+  })
+  .superRefine((req, ctx) => {
+    if (req.networkAccess === 'custom' && !(req.allowedHosts && req.allowedHosts.length > 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "networkAccess 'custom' requires a non-empty allowedHosts",
+        path: ['allowedHosts'],
+      });
+    }
+    if (req.networkAccess !== 'custom' && req.allowedHosts !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "allowedHosts is only meaningful with networkAccess 'custom'",
+        path: ['allowedHosts'],
+      });
+    }
+  });
 export type CreateEnvironmentRequest = z.infer<typeof CreateEnvironmentRequestSchema>;
 
 export const EnvStatusSchema = z.enum(['provisioning', 'ready', 'stopping', 'stopped', 'failed']);
@@ -304,6 +335,15 @@ export const RepoChoiceSchema = z.object({
   repoUrl: z.string().url().optional(),
   ref: z.string().optional(),
   empty: z.boolean().default(false),
+  /**
+   * Per-env egress policy (M22), tenant-chosen at creation
+   * (`/devspace <repo> [ref] [net=none|net=host1,host2]`) — the same
+   * narrowing semantics as `CreateEnvironmentRequest`, which is where it
+   * lands. Adapters construct these; the env request's superRefine is the
+   * contract-level guard.
+   */
+  networkAccess: z.enum(['none', 'custom']).optional(),
+  allowedHosts: z.array(z.string().min(1)).optional(),
 });
 export type RepoChoice = z.infer<typeof RepoChoiceSchema>;
 
@@ -487,6 +527,11 @@ export const WorkUnitSchema = z.object({
   /** When the reaper last warned this session about an idle reap (M18).
    * Never cleared — stale iff it predates max(lastActivityAt, updatedAt). */
   idleWarnedAt: z.string().datetime().optional(),
+  /** The tenant's egress policy (M22), persisted at repo choice so the M19
+   * resume re-provision carries it — a resume must never silently widen
+   * egress. Absent on pre-M22 rows and on units that use the host default. */
+  networkAccess: z.enum(['none', 'custom']).optional(),
+  allowedHosts: z.array(z.string().min(1)).optional(),
 });
 export type WorkUnit = z.infer<typeof WorkUnitSchema>;
 

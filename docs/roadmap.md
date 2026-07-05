@@ -18,6 +18,7 @@ Expansion XIII (idle warnings + PR_OPEN env release): **M18.**
 Expansion XIV (session resume): **M19.**
 Expansion XV (history restore on resume): **M20.**
 Expansion XVI (transcript replay + retention policy): **M21.**
+Expansion XVII (per-environment egress policy): **M22.**
 
 ## M0 — Scaffolding (done)
 
@@ -796,9 +797,61 @@ Landed:
   failure counts as `failed` without stopping the sweep. The
   interval-without-anything refusal now spans all five enablers.
 
-## M22+ — Expansion XVII
+## M22 — Expansion XVII: per-environment egress policy (done)
 
-Native session import (the prompt preamble is the injection story that
+The contract-stage gap the analysis carried since M1 ("네트워크 접근 레벨 —
+필드·데이터는 지금 확정"), landed on the enforcement machinery M5 built: a
+request can now narrow its own env's egress, per environment, for the whole
+life of the env. One contract extension, one proxy capability, one
+migration, one thread convention. Design of record: docs/m22-plan.md.
+
+Landed:
+
+- **The request narrows, never widens** — `networkAccess: 'none' | 'custom'`
+  - `allowedHosts` on `CreateEnvironmentRequest` (and `RepoChoice`),
+    optional-ABSENT so pre-M22 canonical pool keys stay byte-identical (no
+    warm-stock orphaning across the upgrade). `'custom'` entries must each be
+    covered by the operator allowlist (`coveredByAllowlist` — exact hosts by
+    the M5 match; a wildcard only by an equal-or-broader wildcard); an
+    uncovered entry refuses at provision, naming the entries — never a silent
+    intersection. There is deliberately no widening level: operators widen
+    via `EGRESS_ALLOWLIST`, requests only subtract (m5-plan Decision 1,
+    extended).
+- **Enforcement at the proxy, per network gateway** — the M5 egress proxy
+  learns scopes keyed on the LOCAL address a connection arrived on: an
+  `--internal` network reaches the host only at its own bridge gateway, so
+  the dialed address identifies the env — no credentials in env vars,
+  nothing the workload can forge. The provisioner registers the scope the
+  moment the gateway resolves (before `up` — never a live-but-unscoped
+  container) and clears it in the same failure cleanup that removes the
+  network; destroy clears it with the network; the resolved birth policy
+  joins the M11 persisted slice and `recover()` re-registers it verbatim —
+  or DISCARDS the env when the host can no longer enforce it. A 'none' env
+  still gets the proxy vars: the scope denies, so proxy-polite tools 403
+  fast instead of hanging on the missing route.
+- **Honor-or-refuse** — a request carrying `networkAccess` provisions only
+  where per-env scoping is real: per-env networks + a gateway-addressed
+  proxy + a live registrar. Demo mode, shared named networks, and static
+  `egressProxyUrl` (one gateway for every env) refuse with a clear error —
+  a tenant who asked for `none` never silently gets the default. The
+  in-process boot now starts the proxy `EGRESS_PROXY_PORT` points at
+  (previously injected env aimed at a port nobody served) and wires it as
+  the registrar; fleet mode is untouched — the fields ride the existing
+  JSON surface to each host's own proxy.
+- **Tenant surface + resume parity** — `/devspace <repo> [ref] [net=none |
+net=host1,host2]` on both adapters (the shared parser; Slack auto-links
+  unwrapped per host; an empty `net=` value empties the whole choice — a
+  typo costs a retype, never a wider-than-asked env). The choice rides the
+  env request AND persists on the work unit (migration 0007), so the M19
+  resume re-provision narrows exactly as the original did.
+
+## M23+ — Expansion XVIII
+
+Tenant-supplied egress widening under an operator ceiling (e.g.
+`SANDBOX_TENANT_HOSTS` — CCW's "custom domains"; a deliberate policy
+feature, not a request field, per the M22 trust model) and a repo-picker
+modal field for `net=` (the command form is the canonical ergonomics);
+native session import (the prompt preamble is the injection story that
 works for every ACP backend today; if the protocol grows a session-load
 surface, the transcript table is already the source); richer transcript
 surfaces (web/CLI handoff, `/sessions` detail views — `!history` is the

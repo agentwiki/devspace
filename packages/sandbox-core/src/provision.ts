@@ -20,6 +20,8 @@ import { join } from 'node:path';
 import type { CreateEnvironmentRequest, MountSpec, ResourceLimits } from '@devspace/contracts';
 import type { CommandRunner } from './cli.js';
 import { runOrThrow } from './cli.js';
+import { coveredByAllowlist } from './egress-proxy.js';
+import type { EgressScopeRegistrar } from './egress-proxy.js';
 import type { SandboxHardening } from './hardening.js';
 import {
   DEMO_HARDENING,
@@ -118,6 +120,45 @@ export function mergeDevcontainerConfig(input: {
   };
 }
 
+/**
+ * Resolve a request's egress policy (M22) against the operator allowlist:
+ * absent → undefined (no per-env scope — the host default governs), 'none' →
+ * an empty allowlist (deny everything), 'custom' → exactly the requested
+ * hosts, each of which must be COVERED by the operator allowlist. An
+ * uncovered entry throws, naming the entries — a silent intersection would
+ * hand the tenant a quietly different policy than they asked for (m22-plan
+ * Decision 2).
+ */
+export function effectiveEgressAllowlist(
+  req: Pick<CreateEnvironmentRequest, 'networkAccess' | 'allowedHosts'>,
+  operatorAllowlist: readonly string[],
+): readonly string[] | undefined {
+  if (req.networkAccess === undefined) {
+    if (req.allowedHosts !== undefined) {
+      throw new Error("allowedHosts is only meaningful with networkAccess 'custom'");
+    }
+    return undefined;
+  }
+  if (req.networkAccess === 'none') {
+    if (req.allowedHosts !== undefined) {
+      throw new Error("networkAccess 'none' must not carry allowedHosts");
+    }
+    return [];
+  }
+  const hosts = req.allowedHosts ?? [];
+  if (hosts.length === 0) {
+    throw new Error("networkAccess 'custom' requires a non-empty allowedHosts");
+  }
+  const uncovered = hosts.filter((h) => !coveredByAllowlist(h, operatorAllowlist));
+  if (uncovered.length > 0) {
+    throw new Error(
+      `allowedHosts not covered by this host's egress allowlist: ${uncovered.join(', ')} ` +
+        `(a request narrows host policy, never widens it)`,
+    );
+  }
+  return [...hosts];
+}
+
 export function buildGitCloneArgs(repoUrl: string, dest: string, ref?: string): string[] {
   const args = ['clone', '--depth', '1'];
   if (ref) args.push('--branch', ref);
@@ -195,6 +236,14 @@ export interface ProvisionResult {
   remoteUser?: string;
   /** Per-env network created for this env (owner: sandbox teardown). */
   networkName?: string;
+  /**
+   * The gateway address this env's egress scope is keyed on (M22) — present
+   * with `egressScope` iff the request carried a `networkAccess` policy. The
+   * sandbox core clears the scope at destroy and re-registers it at recovery.
+   */
+  egressGateway?: string;
+  /** The RESOLVED per-env allowlist ([] = no egress). Hostnames only. */
+  egressScope?: readonly string[];
 }
 
 export interface Provisioner {
@@ -214,6 +263,13 @@ export interface DevcontainerProvisionerOptions {
    * to demo mode (plain Docker); production boots pass a hardened profile.
    */
   hardening?: SandboxHardening;
+  /**
+   * Per-env egress scope registrar (M22) — the running allowlist proxy.
+   * Required to honor a request carrying `networkAccess`; without it (or
+   * without per-env networks + a gateway-addressed proxy) such requests
+   * REFUSE rather than provision with silently wider egress.
+   */
+  egress?: EgressScopeRegistrar;
 }
 
 /** Provisions containers via `git` + `devcontainers/cli`. */
@@ -224,6 +280,7 @@ export class DevcontainerProvisioner implements Provisioner {
   private readonly workspaceRoot: string;
   private readonly upTimeoutMs: number;
   private readonly hardening: SandboxHardening;
+  private readonly egress?: EgressScopeRegistrar;
 
   constructor(
     private readonly runner: CommandRunner,
@@ -235,12 +292,34 @@ export class DevcontainerProvisioner implements Provisioner {
     this.workspaceRoot = options.workspaceRoot ?? tmpdir();
     this.upTimeoutMs = options.upTimeoutMs ?? 10 * 60 * 1000;
     this.hardening = options.hardening ?? DEMO_HARDENING;
+    this.egress = options.egress;
   }
 
   async provision(envId: string, req: CreateEnvironmentRequest): Promise<ProvisionResult> {
+    // A per-env egress policy is honored or refused UP FRONT (m22-plan,
+    // "honor-or-refuse"): it needs a per-env network (the scope key is the
+    // network's own gateway), a gateway-addressed proxy, and a registrar. A
+    // static egressProxyUrl means one shared gateway — nothing to key on.
+    let egressScope: readonly string[] | undefined;
+    if (req.networkAccess !== undefined) {
+      if (this.hardening.network !== 'per-env') {
+        throw new Error(
+          `cannot honor networkAccess '${req.networkAccess}': this host does not run per-env networks`,
+        );
+      }
+      if (!this.egress || !this.hardening.egressProxyPort || this.hardening.egressProxyUrl) {
+        throw new Error(
+          `cannot honor networkAccess '${req.networkAccess}': this host has no per-env egress proxy ` +
+            `(EGRESS_PROXY_PORT + a running allowlist proxy required)`,
+        );
+      }
+      egressScope = effectiveEgressAllowlist(req, this.egress.allowlist);
+    }
+
     const workspaceFolder = await mkdtemp(join(this.workspaceRoot, `devspace-${sanitize(envId)}-`));
     const networkName = resolveNetworkName(this.hardening, envId);
     let createdNetwork = false;
+    let egressGateway: string | undefined;
     try {
       if (req.repoUrl) {
         await runOrThrow(
@@ -270,7 +349,16 @@ export class DevcontainerProvisioner implements Provisioner {
           this.docker,
           dockerNetworkGatewayArgs(networkName),
         );
-        proxyUrl = `http://${parseNetworkGateway(inspect.stdout)}:${this.hardening.egressProxyPort}`;
+        const gateway = parseNetworkGateway(inspect.stdout);
+        proxyUrl = `http://${gateway}:${this.hardening.egressProxyPort}`;
+        // Scope BEFORE `up` — the container must never be alive unscoped.
+        // A 'none' env still gets the proxy vars below: the scope denies
+        // everything, so proxy-polite tools fail fast with a 403 instead of
+        // hanging on the missing route (m22-plan Decision 4).
+        if (egressScope !== undefined && this.egress) {
+          this.egress.setScope(gateway, egressScope);
+          egressGateway = gateway;
+        }
       }
 
       const config = mergeDevcontainerConfig({
@@ -306,10 +394,13 @@ export class DevcontainerProvisioner implements Provisioner {
         workspaceFolder,
         remoteUser: parsed.remoteUser,
         networkName: createdNetwork ? networkName : undefined,
+        ...(egressGateway !== undefined ? { egressGateway, egressScope } : {}),
       };
     } catch (err) {
-      // Best-effort cleanup of the scratch workspace + network on failure.
+      // Best-effort cleanup of the scratch workspace + network + scope on
+      // failure — the scope dies with the network it was keyed on.
       await rm(workspaceFolder, { recursive: true, force: true }).catch(() => {});
+      if (egressGateway !== undefined) this.egress?.clearScope(egressGateway);
       if (createdNetwork && networkName) {
         await this.runner.run(this.docker, dockerNetworkRmArgs(networkName)).catch(() => {});
       }

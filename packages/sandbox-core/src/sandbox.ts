@@ -22,6 +22,7 @@ import type {
 import { CreateEnvironmentRequestSchema } from '@devspace/contracts';
 import { nodeCommandRunner, runOrThrow } from './cli.js';
 import type { CommandRunner } from './cli.js';
+import type { EgressScopeRegistrar } from './egress-proxy.js';
 import type { EnvStateStore, PersistedEnvState } from './env-state.js';
 import { captureExec } from './exec.js';
 import type { ExecStream } from './exec.js';
@@ -58,6 +59,9 @@ interface EnvRecord {
   workspaceFolder?: string;
   repoUrl?: string;
   ref?: string;
+  /** Per-env egress scope (M22): the gateway key + resolved birth policy. */
+  egressGateway?: string;
+  egressScope?: readonly string[];
 }
 
 export interface SandboxCoreDeps {
@@ -131,6 +135,9 @@ export class DevcontainerSandboxCore implements SandboxCore {
   /** Durable env table (M11); absent = the documented in-memory posture. */
   private readonly stateStore?: EnvStateStore;
 
+  /** Per-env egress scopes (M22): cleared at destroy, re-registered at recovery. */
+  private readonly egress?: EgressScopeRegistrar;
+
   /** Physical capacity reported with stats samples (M16); injectable for tests. */
   private readonly hostInfo: { cpuCount: number; memTotalMB: number };
 
@@ -142,6 +149,7 @@ export class DevcontainerSandboxCore implements SandboxCore {
       budgets?: HostBudgets;
       gitPath?: string;
       stateStore?: EnvStateStore;
+      egress?: EgressScopeRegistrar;
       hostInfo?: { cpuCount: number; memTotalMB: number };
     },
   ) {
@@ -150,8 +158,10 @@ export class DevcontainerSandboxCore implements SandboxCore {
     this.git = deps?.gitPath ?? 'git';
     this.runtime = deps?.runtime ?? new DockerRuntime(runner);
     this.provisioner =
-      deps?.provisioner ?? new DevcontainerProvisioner(runner, { hardening: deps?.hardening });
+      deps?.provisioner ??
+      new DevcontainerProvisioner(runner, { hardening: deps?.hardening, egress: deps?.egress });
     this.preview = deps?.preview;
+    this.egress = deps?.egress;
     this.maxEnvs = deps?.maxEnvs;
     this.budgets = deps?.budgets;
     this.stateStore = deps?.stateStore;
@@ -230,13 +240,13 @@ export class DevcontainerSandboxCore implements SandboxCore {
     }
 
     try {
-      const { containerId, networkName, workspaceFolder } = await this.provisioner.provision(
-        envId,
-        req,
-      );
+      const { containerId, networkName, workspaceFolder, egressGateway, egressScope } =
+        await this.provisioner.provision(envId, req);
       record.containerId = containerId;
       record.networkName = networkName;
       record.workspaceFolder = workspaceFolder;
+      record.egressGateway = egressGateway;
+      record.egressScope = egressScope;
       record.env = { ...record.env, status: 'ready', containerId };
       if (this.stateStore) {
         try {
@@ -245,9 +255,12 @@ export class DevcontainerSandboxCore implements SandboxCore {
           // A durable host must not serve an env it will forget (m11-plan
           // Decision 5) — destroy rather than hand out.
           await this.runtime.destroy(containerId).catch(() => {});
+          if (egressGateway !== undefined) this.egress?.clearScope(egressGateway);
           if (networkName) await this.runtime.removeNetwork?.(networkName).catch(() => {});
           record.containerId = undefined;
           record.networkName = undefined;
+          record.egressGateway = undefined;
+          record.egressScope = undefined;
           throw new Error(`failed to persist env state: ${errMessage(err)}`);
         }
       }
@@ -379,6 +392,13 @@ export class DevcontainerSandboxCore implements SandboxCore {
     if (record.containerId) {
       await this.runtime.destroy(record.containerId);
     }
+    // The scope dies with the network it was keyed on (M22): clear it before
+    // the network goes, so a reused gateway subnet can never inherit it.
+    if (record.egressGateway !== undefined) {
+      this.egress?.clearScope(record.egressGateway);
+      record.egressGateway = undefined;
+      record.egressScope = undefined;
+    }
     // The per-env network outlives its only container by a moment; removal is
     // best-effort (a racing daemon cleanup may have taken it already).
     if (record.networkName) {
@@ -412,7 +432,16 @@ export class DevcontainerSandboxCore implements SandboxCore {
     for (const state of states) {
       if (this.envs.has(state.envId)) continue;
       const alive = state.containerId ? await this.runtime.exists(state.containerId) : false;
-      if (state.status === 'ready' && alive) {
+      // A scoped env on a host with no registrar (the proxy was disabled
+      // across the restart) is UNENFORCEABLE — discard it like any other
+      // crashed transition rather than re-adopt it with silently wider
+      // egress than its tenant asked for (m22-plan Decision 5).
+      const scoped = state.egressGateway !== undefined && state.egressScope !== undefined;
+      const enforceable = !scoped || this.egress !== undefined;
+      if (state.status === 'ready' && alive && enforceable) {
+        // Re-register the env's BIRTH policy before it can serve — never a
+        // recomputation against the operator's current allowlist.
+        if (scoped) this.egress!.setScope(state.egressGateway!, state.egressScope!);
         this.envs.set(state.envId, {
           env: {
             envId: state.envId,
@@ -429,6 +458,8 @@ export class DevcontainerSandboxCore implements SandboxCore {
           workspaceFolder: state.workspaceFolder,
           repoUrl: state.repoUrl,
           ref: state.ref,
+          egressGateway: state.egressGateway,
+          egressScope: state.egressScope,
         });
         summary.recovered.push(state.envId);
       } else {
@@ -628,6 +659,11 @@ function persistedState(record: EnvRecord): PersistedEnvState {
     // A recovered env must weigh what it actually holds (m12-plan Decision 8):
     // the grant was applied to the container and survives the restart with it.
     ...(record.env.resources ? { resources: record.env.resources } : {}),
+    // The egress scope is birth policy, recovered verbatim (m22-plan
+    // Decision 5). Hostnames only — no secret material lands on host disk.
+    ...(record.egressGateway !== undefined && record.egressScope !== undefined
+      ? { egressGateway: record.egressGateway, egressScope: [...record.egressScope] }
+      : {}),
   };
 }
 

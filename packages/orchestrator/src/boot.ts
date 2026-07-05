@@ -22,7 +22,9 @@ import {
   type Repositories,
 } from '@devspace/db';
 import {
+  DEFAULT_EGRESS_ALLOWLIST,
   DevcontainerSandboxCore,
+  EgressProxy,
   MultiHostSandboxCore,
   PreviewProxy,
   RemoteSandboxCore,
@@ -171,6 +173,7 @@ export async function bootOrchestrator(
   const sandboxHosts = config.sandboxHosts ?? sandboxHostsFromEnv(process.env);
   let sandbox: SandboxCore;
   let preview: PreviewProxy | undefined;
+  let egress: EgressProxy | undefined;
   let stopStatsSampling: (() => void) | undefined;
   if (sandboxHosts?.length) {
     const token = config.internalToken ?? process.env.DEVSPACE_INTERNAL_TOKEN;
@@ -238,10 +241,30 @@ export async function bootOrchestrator(
       preview = new PreviewProxy(previewOptions);
       await preview.start();
     }
+    // The egress allowlist proxy (M22, m22-plan Decision 7): with
+    // EGRESS_PROXY_PORT set, the in-process boot now serves the port its
+    // provisioned envs are pointed at (previously sandbox-core-svc only) and
+    // wires it as the per-env scope registrar.
+    if (hardening?.egressProxyPort) {
+      const allowlist = [
+        ...DEFAULT_EGRESS_ALLOWLIST,
+        ...(process.env.EGRESS_ALLOWLIST ?? '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ];
+      egress = new EgressProxy({
+        allowlist,
+        port: hardening.egressProxyPort,
+        onLog: (line) => console.log(`[orchestrator] egress: ${line}`),
+      });
+      await egress.start();
+      console.log(`[orchestrator] egress proxy on :${hardening.egressProxyPort}`);
+    }
     // Durable env table (M11): the in-process sandbox recovers what its
     // predecessor was serving BEFORE anything places or sweeps.
     const stateStore = config.envStateStore ?? envStateStoreFromEnv(process.env);
-    const local = new DevcontainerSandboxCore({ hardening, preview, stateStore });
+    const local = new DevcontainerSandboxCore({ hardening, preview, stateStore, egress });
     if (stateStore) {
       const { recovered, discarded, skipped } = await local.recover();
       console.log(
@@ -371,6 +394,7 @@ export async function bootOrchestrator(
       stopStatsSampling?.();
       await bus.stop();
       await preview?.stop();
+      await egress?.stop();
     },
   };
 }

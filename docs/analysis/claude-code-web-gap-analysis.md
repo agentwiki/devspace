@@ -7,36 +7,37 @@ UI 표면 결정은 [`chat-platform-ui-parity.md`](./chat-platform-ui-parity.md)
 
 ## 기능별 상태
 
-| 기능                                                      | 상태                              |
-| --------------------------------------------------------- | --------------------------------- |
-| 세션별 격리 환경 + repo clone (`DevcontainerProvisioner`) | ✅                                |
-| 리소스 상한 cpu/mem/disk (`ResourceLimitsSchema`)         | ✅                                |
-| 에이전트 in-container 실행 (ACP over exec)                | 🟡                                |
-| 승인 게이트 (`GuardedOp`, `PermissionDecision`)           | 🟡                                |
-| 드라이버 가드레일 (`guardrails.ts`)                       | 🟠                                |
-| PR 생성/브랜치 push (FSM `PRE_PR`→`PR_OPEN`)              | 🟡                                |
-| 멀티테넌트 authZ + 감사로그                               | 🟡                                |
-| 격리 VM (gVisor/Kata)                                     | 🟡                                |
-| 재사용 Environment 설정 객체 (세션/설정 분리)             | ❌ 요청이 1회성                   |
-| 환경 변수(.env) 설정 (비밀 아닌)                          | 🟠 `SecretSpec`만                 |
-| 셋업 스크립트 (root, 에이전트 前)                         | ❌                                |
-| 환경 캐싱/스냅샷                                          | ❌                                |
-| 네트워크 접근 레벨 (none/trusted/full/custom)             | ❌ 계약에 필드 없음               |
-| 기본 allowlist + egress 프록시                            | ❌                                |
-| GitHub 스코프-크리덴셜 프록시                             | 🟠 clone/read 토큰 + push wrapper |
-| 빌트인 GitHub 툴 (issue/PR/diff/comment)                  | ❌                                |
-| PR Auto-fix 루프                                          | ❌                                |
-| 채팅 표면 (Slack/Discord)                                 | 🟡 계약만                         |
-| diff 뷰 + 라인 코멘트                                     | ❌ GitHub PR 위임                 |
-| 세션 공유/아카이브/삭제                                   | 🟠 M21 보존 정책(자동 삭제)만     |
-| 대화 트랜스크립트 영속/복원                               | ✅ M20 영속 + M21 `!history` 재생 |
-| 유휴 회수(GC)                                             | ✅ M17-M19 reaper/경고/resume     |
-| 웹↔CLI 핸드오프 (--remote/teleport)                       | ❌                                |
-| 루틴/트리거 (schedule/API/GitHub event)                   | ❌                                |
+| 기능                                                      | 상태                                         |
+| --------------------------------------------------------- | -------------------------------------------- |
+| 세션별 격리 환경 + repo clone (`DevcontainerProvisioner`) | ✅                                           |
+| 리소스 상한 cpu/mem/disk (`ResourceLimitsSchema`)         | ✅                                           |
+| 에이전트 in-container 실행 (ACP over exec)                | 🟡                                           |
+| 승인 게이트 (`GuardedOp`, `PermissionDecision`)           | 🟡                                           |
+| 드라이버 가드레일 (`guardrails.ts`)                       | 🟠                                           |
+| PR 생성/브랜치 push (FSM `PRE_PR`→`PR_OPEN`)              | 🟡                                           |
+| 멀티테넌트 authZ + 감사로그                               | 🟡                                           |
+| 격리 VM (gVisor/Kata)                                     | 🟡                                           |
+| 재사용 Environment 설정 객체 (세션/설정 분리)             | ❌ 요청이 1회성                              |
+| 환경 변수(.env) 설정 (비밀 아닌)                          | 🟠 `SecretSpec`만                            |
+| 셋업 스크립트 (root, 에이전트 前)                         | ❌                                           |
+| 환경 캐싱/스냅샷                                          | ❌                                           |
+| 네트워크 접근 레벨 (none/trusted/full/custom)             | ✅ M22 `networkAccess`(none/custom·좁히기만) |
+| 기본 allowlist + egress 프록시                            | ✅ M5 프록시 + M22 환경별 스코프             |
+| GitHub 스코프-크리덴셜 프록시                             | 🟠 clone/read 토큰 + push wrapper            |
+| 빌트인 GitHub 툴 (issue/PR/diff/comment)                  | ❌                                           |
+| PR Auto-fix 루프                                          | ❌                                           |
+| 채팅 표면 (Slack/Discord)                                 | 🟡 계약만                                    |
+| diff 뷰 + 라인 코멘트                                     | ❌ GitHub PR 위임                            |
+| 세션 공유/아카이브/삭제                                   | 🟠 M21 보존 정책(자동 삭제)만                |
+| 대화 트랜스크립트 영속/복원                               | ✅ M20 영속 + M21 `!history` 재생            |
+| 유휴 회수(GC)                                             | ✅ M17-M19 reaper/경고/resume                |
+| 웹↔CLI 핸드오프 (--remote/teleport)                       | ❌                                           |
+| 루틴/트리거 (schedule/API/GitHub event)                   | ❌                                           |
 
 sandbox 실행 엔진과 FSM·계약은 견고하다. 트랜스크립트 영속(A)은 M20이 채웠다
 (redact-at-write `transcripts` 테이블 + resume 첫 턴 주입). 비어 있는 축은
-재사용 환경·셋업·캐싱(B), 네트워크 제어(C), GitHub 프록시·Auto-fix(D)다.
+재사용 환경·셋업·캐싱(B), GitHub 프록시·Auto-fix(D)다. 네트워크 제어(C)는
+M5(egress 프록시) + M22(환경별 접근 레벨)로 닫혔다.
 
 ## 채워야 할 것
 
@@ -45,8 +46,10 @@ sandbox 실행 엔진과 FSM·계약은 견고하다. 트랜스크립트 영속(
 - **Environment를 재사용 설정 객체로 분리** — `network`/`env`/`setupScript`/`baseImage`/
   `cache`를 소유하는 `EnvironmentConfig` + `environments` 테이블. 세션 인스턴스와 구분.
   F(웹UI 대체)·H(루틴)·캐싱이 모두 이 위에 얹힌다.
-- **네트워크 접근 레벨 필드 + 기본 allowlist 데이터** — `networkAccess` +
-  `allowedDomains[]`. 구현(egress 프록시)은 이후, 필드·데이터는 지금 확정.
+- ~~**네트워크 접근 레벨 필드 + 기본 allowlist 데이터**~~ — M22 완료:
+  `networkAccess`(none/custom) + `allowedHosts[]`가 계약에 확정, M5 egress
+  프록시의 환경별(게이트웨이별) 스코프로 강제까지. 좁히기 전용 — 테넌트
+  확장(widening)은 운영자 상한 아래의 별도 정책 기능으로 M23+ 시드.
 - **셋업 스크립트 + 스냅샷 캐싱** — `setupScript` 필드 + 실행 후 컨테이너 커밋 재사용
   (`docker commit`/이미지 태깅). 콜드스타트의 최대 레버.
 - ~~**대화 트랜스크립트 영속**~~ — M20 완료: `conversationId`별 `transcripts`

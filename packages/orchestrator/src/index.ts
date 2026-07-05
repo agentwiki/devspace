@@ -381,6 +381,19 @@ export class Orchestrator {
       return;
     }
     if (STATE_RANK[wu.state] > STATE_RANK['WORKING']) {
+      // PR_OPEN is no longer a dead end (M19): offer the explicit resume
+      // action instead of booting a container on a stray "thanks!".
+      if (wu.state === 'PR_OPEN') {
+        await this.emit({
+          type: 'post_actions',
+          conversationId: event.conversationId,
+          text:
+            'This session is paused while its PR is under review — resume to keep ' +
+            'working on the same branch, or start a new conversation.',
+          actions: [{ actionId: 'resume-work', label: 'Resume work', style: 'primary' }],
+        });
+        return;
+      }
       await this.emit(
         messageCommand(
           event.conversationId,
@@ -432,7 +445,12 @@ export class Orchestrator {
         CreateAgentSessionRequestSchema.parse({ envId: unit.envId, llmKeyRef: llm.id }),
       );
       agentSessionId = session.agentSessionId;
-      unit = await this.advance(unit, 'firstMessage', 'WORKING', { agentSessionId });
+      // READY takes the firstMessage edge; a resumed unit is ALREADY WORKING,
+      // where `advance` would no-op and silently drop the patch — one orphan
+      // ACP session per message. The M19 self-loop persists it instead.
+      unit = await this.machine.apply(unit.id, unit.state === 'READY' ? 'firstMessage' : 'resume', {
+        agentSessionId,
+      });
     }
 
     for await (const agentEvent of this.deps.agents.runTurn(agentSessionId, {
@@ -493,6 +511,8 @@ export class Orchestrator {
       }
       case 'hybrid': // create-pr — agent finalizes commits, host-side wrapper pushes + opens PR
         return this.onCreatePr(event.conversationId, event.userId, wu, registry);
+      case 'resume': // resume-work — re-open work on a PR_OPEN unit (M19)
+        return this.onResumeWork(event.conversationId, event.userId, wu, registry);
       case 'expose-port':
         return this.onExposePort(event.conversationId, event.userId, wu, action.port, registry);
       case 'deterministic': // view-pr
@@ -650,6 +670,130 @@ export class Orchestrator {
     );
   }
 
+  /**
+   * Resume work on a PR_OPEN unit (M19, m19-plan Decisions 1–4): re-provision
+   * the environment from the PR branch when it is gone, then apply
+   * PR_OPEN --resume--> WORKING with the envId in the same transition. The
+   * agent session is NOT created here — the next message creates it through
+   * the ordinary lazy path, exactly like a fresh READY unit. A failed resume
+   * leaves the unit PR_OPEN (never FAILED — GitHub owns that lifecycle, the
+   * M17 exemption argument) and the button retries.
+   */
+  private async onResumeWork(
+    conversationId: string,
+    userId: string,
+    wu: WorkUnit,
+    registry: SecretRegistry,
+  ): Promise<void> {
+    if (wu.state === 'WORKING' || wu.state === 'PRE_PR') {
+      await this.emit(
+        messageCommand(
+          conversationId,
+          'This session is already active — just send a message.',
+          registry,
+        ),
+      );
+      return;
+    }
+    if (wu.state !== 'PR_OPEN') {
+      await this.emit(
+        messageCommand(
+          conversationId,
+          'This work unit is finished — start a new conversation for more changes.',
+          registry,
+        ),
+      );
+      return;
+    }
+    if (!wu.repoUrl || !wu.branch) {
+      await this.emit(
+        messageCommand(conversationId, 'This work unit has no repository.', registry),
+      );
+      return;
+    }
+
+    let envId = wu.envId;
+    let reprovisioned = false;
+    try {
+      // Trust the host, not the row (the M11 discipline, one hop up): a
+      // stale envId — the host lost the container, or a sibling released it
+      // between the read and the click — re-provisions instead of resuming
+      // onto a corpse. Any other probe failure fails the resume message-only.
+      if (envId) {
+        try {
+          await this.deps.sandbox.getEnvironment(envId);
+        } catch (err) {
+          if (!(err instanceof SandboxError && err.code === 'NOT_FOUND')) throw err;
+          envId = undefined;
+        }
+      }
+      if (!envId) {
+        // Same provisioning posture as conversation.created: only the
+        // read-only clone token enters the container — but the ref is the PR
+        // BRANCH, so the agent continues from what the reviewer sees.
+        const cloneToken = await this.deps.secrets.resolve(
+          userId,
+          SECRET_GH_CLONE,
+          conversationId,
+          registry,
+        );
+        if (cloneToken) {
+          await this.audit('secret.resolved', {
+            userId,
+            conversationId,
+            workUnitId: wu.id,
+            detail: { name: SECRET_GH_CLONE, purpose: 'env.resume' },
+          });
+        }
+        const env = await this.deps.sandbox.createEnvironment(
+          CreateEnvironmentRequestSchema.parse({
+            repoUrl: wu.repoUrl,
+            ref: wu.branch,
+            mounts: [agentRuntimeMount()],
+            secrets: cloneToken
+              ? [{ name: SECRET_GH_CLONE, value: cloneToken, target: 'env' }]
+              : [],
+          }),
+        );
+        envId = env.envId;
+        reprovisioned = true;
+      }
+      // envId lands in the SAME transition that makes the unit WORKING — no
+      // window where the row owns a container it doesn't know about. Backward
+      // move, so machine.apply directly: `advance` stays forward-only.
+      await this.machine.apply(wu.id, 'resume', { envId });
+      await this.audit('session.resumed', {
+        userId,
+        conversationId,
+        workUnitId: wu.id,
+        detail: { envId, reprovisioned },
+      });
+      await this.emit(
+        statusCommand(
+          conversationId,
+          'WORKING',
+          `Session resumed on \`${wu.branch}\` — send a message to continue.`,
+          registry,
+        ),
+      );
+    } catch (err) {
+      // A container provisioned by THIS failing attempt was never persisted —
+      // destroy it best-effort or it leaks with no pointer (m19-plan
+      // Decision 3; the window is this one call).
+      if (reprovisioned && envId) {
+        try {
+          await this.deps.sandbox.destroyEnvironment(envId);
+        } catch {
+          /* best-effort */
+        }
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      await this.emit(
+        messageCommand(conversationId, `Could not resume this session: ${message}`, registry),
+      );
+    }
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Out-of-process bus events (PR poll reconciler) + reconciler driver       */
   /* ---------------------------------------------------------------------- */
@@ -660,6 +804,11 @@ export class Orchestrator {
     if (!evt.workUnitId) return;
     const wu = await this.workUnits.get(evt.workUnitId);
     if (!wu) return;
+    // A resumed unit (M19) sits below PR_OPEN while its PR truth is paused —
+    // DROP the event rather than throw (`advance` would attempt the illegal
+    // transition, and a throwing bus handler redelivers forever). The poll
+    // backstop re-detects the PR state once the unit is back in PR_OPEN.
+    if (STATE_RANK[wu.state] < STATE_RANK['PR_OPEN']) return;
     const registry = this.registryFor(wu.conversationId);
     if (evt.topic === TOPIC_PR_MERGED) {
       await this.advance(wu, 'prMerged', 'PR_MERGED');
@@ -820,13 +969,29 @@ export class Orchestrator {
    * AFTER the fact. The unit keeps its state, secrets, and PR fields, so
    * the reconciler, webhook, merge/close announcement, and terminal grace
    * all proceed unchanged.
+   *
+   * A RESUMED unit — one in WORKING/PRE_PR carrying a `prNumber`; only the
+   * M19 resume puts a unit there — is SUSPENDED at the idle TTL, never torn
+   * down (m19-plan Decision 5): the unit holds the PR fields and the token
+   * the reconciler needs, the exact M17 Decision-4 argument. Destroy
+   * tolerating only NOT_FOUND, `releaseEnv`, apply `suspend` (back to
+   * PR_OPEN), audit `session.suspended`, one notice carrying the
+   * resume-work button. Each step is retryable by the next sweep; the M18
+   * warning discipline covers suspension too, with "paused" wording.
    */
   async reapExpired(
     policy: Pick<ReapPolicy, 'idleTtlMs' | 'idleWarnMs' | 'terminalGraceMs' | 'prOpenEnvTtlMs'>,
     nowMs: number = Date.now(),
-  ): Promise<{ reaped: number; warned: number; released: number; failed: number }> {
+  ): Promise<{
+    reaped: number;
+    warned: number;
+    suspended: number;
+    released: number;
+    failed: number;
+  }> {
     let reaped = 0;
     let warned = 0;
+    let suspended = 0;
     let released = 0;
     let failed = 0;
 
@@ -849,6 +1014,53 @@ export class Orchestrator {
       await this.teardown(wu.conversationId, 'idle');
     };
 
+    // Suspend an idle resumed unit back to PR_OPEN (m19-plan Decision 5).
+    // Destroy strictly, tolerating only "already gone" — the unit lives on
+    // and its envId is the only pointer (the M18 Decision-4 discipline); a
+    // crash between the writes is retried by the next sweep, which skips the
+    // destroy when the env is already gone.
+    const suspendResumed = async (wu: WorkUnit): Promise<void> => {
+      if (wu.envId) {
+        try {
+          await this.deps.sandbox.destroyEnvironment(wu.envId);
+        } catch (err) {
+          if (!(err instanceof SandboxError && err.code === 'NOT_FOUND')) throw err;
+        }
+      }
+      await this.workUnits.releaseEnv(wu.id);
+      await this.machine.apply(wu.id, 'suspend');
+      const conv = await this.deps.repos.conversations.get(wu.conversationId);
+      await this.audit('session.suspended', {
+        userId: conv?.userId,
+        conversationId: wu.conversationId,
+        workUnitId: wu.id,
+        detail: { envId: wu.envId ?? null, reason: 'idle' },
+      });
+      // The notice states an accomplished fact, AFTER the suspension — a
+      // destroy retried next sweep must not re-announce.
+      await this.emit({
+        type: 'post_actions',
+        conversationId: wu.conversationId,
+        text:
+          'Work paused after inactivity — the environment was released; the PR stays ' +
+          'open and merge/close updates continue.',
+        actions: [{ actionId: 'resume-work', label: 'Resume work', style: 'primary' }],
+      });
+    };
+
+    // The idle TTL reclaims the expensive part: for a resumed unit (the only
+    // way a pre-PR state carries a prNumber) that is the environment, and the
+    // unit itself is suspended back to waiting on its PR.
+    const reapOrSuspend = async (wu: WorkUnit): Promise<void> => {
+      if (wu.prNumber !== undefined) {
+        await suspendResumed(wu);
+        suspended += 1;
+      } else {
+        await reapIdle(wu);
+        reaped += 1;
+      }
+    };
+
     if (policy.idleTtlMs !== undefined) {
       const ttl = policy.idleTtlMs;
       const warnMs = policy.idleWarnMs;
@@ -859,23 +1071,25 @@ export class Orchestrator {
           try {
             if (warnMs === undefined) {
               if (idleMs < ttl) continue;
-              await reapIdle(wu);
-              reaped += 1;
+              await reapOrSuspend(wu);
               continue;
             }
             const warnedAtMs = wu.idleWarnedAt ? Date.parse(wu.idleWarnedAt) : undefined;
             const warnedThisPeriod = warnedAtMs !== undefined && warnedAtMs > alive;
             if (idleMs >= ttl && warnedThisPeriod && nowMs - warnedAtMs >= warnMs) {
-              await reapIdle(wu);
-              reaped += 1;
+              await reapOrSuspend(wu);
             } else if (idleMs >= ttl - warnMs && !warnedThisPeriod) {
               // Post first, mark second (m18-plan Decision 3): a failed post
               // retries next sweep unmarked; a failed mark re-warns once.
               await this.emit(
                 messageCommand(
                   wu.conversationId,
-                  `This session has been idle and will be reclaimed in about ` +
-                    `${approxDuration(warnMs)} — send a message to keep it.`,
+                  wu.prNumber !== undefined
+                    ? `This session has been idle and will be paused in about ` +
+                        `${approxDuration(warnMs)} — its PR stays open; send a message ` +
+                        `to keep working.`
+                    : `This session has been idle and will be reclaimed in about ` +
+                        `${approxDuration(warnMs)} — send a message to keep it.`,
                   this.registryFor(wu.conversationId),
                 ),
               );
@@ -914,15 +1128,17 @@ export class Orchestrator {
             detail: { envId: wu.envId, reason: 'idle' },
           });
           // The notice states an accomplished fact, AFTER the release — a
-          // destroy retried next sweep must not re-announce.
-          await this.emit(
-            messageCommand(
-              wu.conversationId,
+          // destroy retried next sweep must not re-announce. Since M19 it
+          // carries the way back: the moment the env dies is the moment the
+          // resume button becomes relevant.
+          await this.emit({
+            type: 'post_actions',
+            conversationId: wu.conversationId,
+            text:
               'Environment released while the PR is under review — merge/close updates ' +
-                'continue; start a new conversation for further changes.',
-              this.registryFor(wu.conversationId),
-            ),
-          );
+              'continue; resume to keep working on it.',
+            actions: [{ actionId: 'resume-work', label: 'Resume work', style: 'primary' }],
+          });
           released += 1;
         } catch {
           failed += 1; // envId intact — the next sweep retries the destroy
@@ -944,7 +1160,7 @@ export class Orchestrator {
         }
       }
     }
-    return { reaped, warned, released, failed };
+    return { reaped, warned, suspended, released, failed };
   }
 
   /* ---------------------------------------------------------------------- */

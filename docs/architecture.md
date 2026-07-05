@@ -149,6 +149,17 @@ keeps `envId` and retries), then `releaseEnv` nulls `envId` +
 while the unit, its secrets, and the merge/close flow survive intact
 (docs/m18-plan.md).
 
+Since M19 a PR under review is not a dead end: a message in PR_OPEN offers
+`resume-work` (the M18 release notice carries it too), which probes the
+row's env against the host and — when it is gone — re-provisions from the
+PR BRANCH before applying `resume` (PR_OPEN → WORKING); the next message
+lazily creates the fresh agent session, persisted through a WORKING
+self-loop. An idle resumed unit (a pre-PR state carrying a `prNumber`) is
+SUSPENDED back to PR_OPEN by the same idle TTL — env destroyed
+(NOT_FOUND-tolerant), `releaseEnv`, `suspend`, audited — never torn down;
+merge/close events landing mid-resume are dropped and re-detected by the
+poll once the unit returns to PR_OPEN (docs/m19-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.
@@ -186,6 +197,7 @@ Owned by the orchestrator, persisted in Postgres, defined declaratively in
 CREATED --repoChoice--> PROVISIONING --envReady--> READY
 READY --firstMessage--> WORKING --committedAndPushed--> PRE_PR --prCreated--> PR_OPEN
 PR_OPEN --prMerged|prClosed--> PR_MERGED | PR_CLOSED
+PR_OPEN --resume--> WORKING ;  WORKING|PRE_PR --suspend--> PR_OPEN   (M19)
 any --error--> FAILED ;  any --end--> TORN_DOWN
 ```
 

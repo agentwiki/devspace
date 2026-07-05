@@ -7,32 +7,32 @@ UI 표면 결정은 [`chat-platform-ui-parity.md`](./chat-platform-ui-parity.md)
 
 ## 기능별 상태
 
-| 기능                                                      | 상태                              |
-| --------------------------------------------------------- | --------------------------------- |
-| 세션별 격리 환경 + repo clone (`DevcontainerProvisioner`) | ✅                                |
-| 리소스 상한 cpu/mem/disk (`ResourceLimitsSchema`)         | ✅                                |
-| 에이전트 in-container 실행 (ACP over exec)                | 🟡                                |
-| 승인 게이트 (`GuardedOp`, `PermissionDecision`)           | 🟡                                |
-| 드라이버 가드레일 (`guardrails.ts`)                       | 🟠                                |
-| PR 생성/브랜치 push (FSM `PRE_PR`→`PR_OPEN`)              | 🟡                                |
-| 멀티테넌트 authZ + 감사로그                               | 🟡                                |
-| 격리 VM (gVisor/Kata)                                     | 🟡                                |
-| 재사용 Environment 설정 객체 (세션/설정 분리)             | ❌ 요청이 1회성                   |
-| 환경 변수(.env) 설정 (비밀 아닌)                          | 🟠 `SecretSpec`만                 |
-| 셋업 스크립트 (root, 에이전트 前)                         | ❌                                |
-| 환경 캐싱/스냅샷                                          | ❌                                |
-| 네트워크 접근 레벨 (none/trusted/full/custom)             | ❌ 계약에 필드 없음               |
-| 기본 allowlist + egress 프록시                            | ❌                                |
-| GitHub 스코프-크리덴셜 프록시                             | 🟠 clone/read 토큰 + push wrapper |
-| 빌트인 GitHub 툴 (issue/PR/diff/comment)                  | ❌                                |
-| PR Auto-fix 루프                                          | ❌                                |
-| 채팅 표면 (Slack/Discord)                                 | 🟡 계약만                         |
-| diff 뷰 + 라인 코멘트                                     | ❌ GitHub PR 위임                 |
-| 세션 공유/아카이브/삭제                                   | ❌                                |
-| 대화 트랜스크립트 영속/복원                               | ❌ message 테이블 없음            |
-| 유휴 회수(GC)                                             | ✅ M17 reaper + M18 경고/PR env   |
-| 웹↔CLI 핸드오프 (--remote/teleport)                       | ❌                                |
-| 루틴/트리거 (schedule/API/GitHub event)                   | ❌                                |
+| 기능                                                      | 상태                               |
+| --------------------------------------------------------- | ---------------------------------- |
+| 세션별 격리 환경 + repo clone (`DevcontainerProvisioner`) | ✅                                 |
+| 리소스 상한 cpu/mem/disk (`ResourceLimitsSchema`)         | ✅                                 |
+| 에이전트 in-container 실행 (ACP over exec)                | 🟡                                 |
+| 승인 게이트 (`GuardedOp`, `PermissionDecision`)           | 🟡                                 |
+| 드라이버 가드레일 (`guardrails.ts`)                       | 🟠                                 |
+| PR 생성/브랜치 push (FSM `PRE_PR`→`PR_OPEN`)              | 🟡                                 |
+| 멀티테넌트 authZ + 감사로그                               | 🟡                                 |
+| 격리 VM (gVisor/Kata)                                     | 🟡                                 |
+| 재사용 Environment 설정 객체 (세션/설정 분리)             | ❌ 요청이 1회성                    |
+| 환경 변수(.env) 설정 (비밀 아닌)                          | 🟠 `SecretSpec`만                  |
+| 셋업 스크립트 (root, 에이전트 前)                         | ❌                                 |
+| 환경 캐싱/스냅샷                                          | ❌                                 |
+| 네트워크 접근 레벨 (none/trusted/full/custom)             | ❌ 계약에 필드 없음                |
+| 기본 allowlist + egress 프록시                            | ❌                                 |
+| GitHub 스코프-크리덴셜 프록시                             | 🟠 clone/read 토큰 + push wrapper  |
+| 빌트인 GitHub 툴 (issue/PR/diff/comment)                  | ❌                                 |
+| PR Auto-fix 루프                                          | ❌                                 |
+| 채팅 표면 (Slack/Discord)                                 | 🟡 계약만                          |
+| diff 뷰 + 라인 코멘트                                     | ❌ GitHub PR 위임                  |
+| 세션 공유/아카이브/삭제                                   | ❌                                 |
+| 대화 트랜스크립트 영속/복원                               | ❌ M19 resume는 히스토리 없이 재개 |
+| 유휴 회수(GC)                                             | ✅ M17-M19 reaper/경고/resume      |
+| 웹↔CLI 핸드오프 (--remote/teleport)                       | ❌                                 |
+| 루틴/트리거 (schedule/API/GitHub event)                   | ❌                                 |
 
 sandbox 실행 엔진과 FSM·계약은 견고하다. 비어 있는 축은 재사용 환경·셋업·캐싱(B),
 네트워크 제어(C), 트랜스크립트 영속(A), GitHub 프록시·Auto-fix(D)다.

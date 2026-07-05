@@ -4,7 +4,7 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M18 (expansion XIII).** The full vertical is live end to end — sandbox
+> **Status: M19 (expansion XIV).** The full vertical is live end to end — sandbox
 > engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
 > secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
 > (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
@@ -48,7 +48,11 @@ interface — a self-hostable "Claude Code on the web."
 > warning per idle period, a full window before the teardown), and
 > `DEVSPACE_PR_OPEN_ENV_TTL_MS` releases just the ENVIRONMENT of a session
 > idle in PR review — the unit, its secrets, and the merge/close
-> announcement survive the release. See [`docs/roadmap.md`](docs/roadmap.md).
+> announcement survive the release. M19 makes that release reversible: a
+> `resume-work` button in the PR thread rebuilds the environment from the
+> PR branch and re-opens work on the SAME PR (re-pushing adopts it), and an
+> idle resumed session is suspended back to waiting on its PR instead of
+> torn down. See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing
 

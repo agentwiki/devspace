@@ -15,6 +15,7 @@ Expansion X (singleton reconciler election): **M15.**
 Expansion XI (live utilization truth + usage-aware ranking): **M16.**
 Expansion XII (work-unit lifecycle reclamation): **M17.**
 Expansion XIII (idle warnings + PR_OPEN env release): **M18.**
+Expansion XIV (session resume): **M19.**
 
 ## M0 — Scaffolding (done)
 
@@ -681,25 +682,68 @@ Landed:
   refusal now checks all three. The sweep result grows `warned`/`released`
   counts in the boot log.
 
-## M19+ — Expansion XIV
+## M19 — Expansion XIV: session resume (done)
 
-NATS bus (still unnecessary: LISTEN/NOTIFY + the M14 claim survives N
-orchestrators by construction; `EventBus` remains the seam if volume ever
-demands it); turn-level failover (a controller that dies mid-turn loses
-that turn; the conversation resumes on whichever instance gets the next
-message — checkpointing is a product decision); usage-based ADMISSION and
-eviction (the unpaid half of M16: scheduling on measured usage needs an
-eviction story — ranking got the win without the cost) and disk-weighted
-placement (host disk budgets interact with image/layer sharing in ways
-neither grants nor `docker stats` — which reports no disk at all — model);
-session resume / PR re-provision (a released PR_OPEN unit answers `view-pr`
-and announces its merge/close, but CONTINUING work on an open PR needs a
-fresh env + agent session — a product "resume" feature, the same
-transcript-persistence line the gap analysis tracks); certificate
-rotation/revocation tooling (at three certs per deployment, re-minting IS
-the revocation story — until it isn't); Discord Forum-channel session
-dashboard (presentation upgrade over `/sessions`). UI surface remains chat
-only — no self-hosted web UI (see docs/analysis/chat-platform-ui-parity.md).
+The seed the M18 closeout priced: a PR under review stops being a dead end.
+An explicit action re-opens work on a PR_OPEN unit — rebuilding the released
+environment from the PR branch — and an idle resumed unit is suspended back
+to PR_OPEN instead of torn down, so resuming never makes an open PR
+reapable. Zero new knobs, zero migrations, zero gateway changes: two
+additive FSM events, one action id, new branches in the reaper's sweep.
+Design of record: docs/m19-plan.md.
+
+Landed:
+
+- **Resume** — `resume-work` (a message in PR_OPEN now offers the button
+  instead of the dead-end text; the M18 release notice carries it too) takes
+  PR_OPEN back to WORKING: the row's env is probed against the HOST (M11's
+  "trust the daemon", one hop up — NOT_FOUND re-provisions, cloning
+  `repoUrl` at `ref = branch` so the agent continues from what the reviewer
+  sees, with only the read-only clone token), `envId` lands in the same
+  `resume` transition that re-opens work, audited `session.resumed`. The
+  agent session stays lazy: the next message creates it and persists the id
+  through a new WORKING self-loop — the old `advance` call silently dropped
+  that patch and would have minted one orphan ACP session per message. A
+  failed resume answers in-thread and leaves the unit PR_OPEN (never
+  FAILED — GitHub owns that lifecycle), destroying an env the failing
+  attempt provisioned.
+- **Suspension** — an idle unit in WORKING/PRE_PR carrying a `prNumber`
+  (only resume puts one there) is suspended at the idle TTL, never torn
+  down: destroy tolerating only NOT_FOUND (M18 Decision-4 discipline — the
+  unit lives on and `envId` is the only pointer), `releaseEnv`, `suspend`
+  back to PR_OPEN, audit `session.suspended`, one notice with the button.
+  Every step is retryable by the next sweep; the M18 warning discipline
+  covers suspension too ("paused" wording). Rides `DEVSPACE_IDLE_TTL_MS` —
+  no new knob: a resumed unit is a working unit, and after suspension the
+  PR_OPEN env TTL finds nothing left to release.
+- **PR truth pauses while resumed, deferred not lost** — webhook matching
+  and the reconciler enumerate PR_OPEN only, and `handleBusEvent` now DROPS
+  merge/close events for a unit below PR_OPEN (pre-M19 it threw
+  IllegalTransition — and a throwing bus handler redelivers forever): the
+  poll backstop re-detects within one interval of the unit returning to
+  PR_OPEN. create-pr after resume re-pushes the same branch and ADOPTS the
+  still-open PR (M3 idempotency), or opens a fresh one when the old PR
+  settled mid-resume.
+
+## M20+ — Expansion XV
+
+History restore on resume (a resumed agent session starts blind — its
+context is the branch state; restoring the conversation needs transcript
+persistence first, the `message`/AgentEvent-table line the gap analysis
+tracks, plus an agent-side injection story); NATS bus (still unnecessary:
+LISTEN/NOTIFY + the M14 claim survives N orchestrators by construction;
+`EventBus` remains the seam if volume ever demands it); turn-level failover
+(a controller that dies mid-turn loses that turn; the conversation resumes
+on whichever instance gets the next message — checkpointing is a product
+decision); usage-based ADMISSION and eviction (the unpaid half of M16:
+scheduling on measured usage needs an eviction story — ranking got the win
+without the cost) and disk-weighted placement (host disk budgets interact
+with image/layer sharing in ways neither grants nor `docker stats` — which
+reports no disk at all — model); certificate rotation/revocation tooling
+(at three certs per deployment, re-minting IS the revocation story — until
+it isn't); Discord Forum-channel session dashboard (presentation upgrade
+over `/sessions`). UI surface remains chat only — no self-hosted web UI
+(see docs/analysis/chat-platform-ui-parity.md).
 
 ## Top risks (defaults)
 

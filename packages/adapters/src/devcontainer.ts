@@ -12,7 +12,7 @@
  *  - codex를 샌드박스 안에서 돌리기 위해 호스트의 ~/.codex(구독 인증)를
  *    컨테이너에 바인드 마운트하고, up 이후 codex CLI를 설치한다.
  */
-import { mkdtemp, rm, writeFile, mkdir, access } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, access, appendFile } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -74,6 +74,8 @@ export function createDevcontainerSandbox(options: DevcontainerOptions = {}): Sa
     if (await exists(join(workspace, '.devcontainer.json'))) return;
     await mkdir(join(workspace, '.devcontainer'), { recursive: true });
     await writeFile(configPath, JSON.stringify(DEFAULT_DEVCONTAINER, null, 2), 'utf8');
+    // 우리가 넣은 설정은 레포의 것이 아니다 — git이 무시하게 해 diff/PR을 오염시키지 않는다.
+    await appendFile(join(workspace, '.git', 'info', 'exclude'), '\n/.devcontainer/devcontainer.json\n');
   }
 
   const dc = (args: readonly string[], onLine?: (l: string) => void): Promise<ExecResult> =>

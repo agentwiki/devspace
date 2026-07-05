@@ -60,8 +60,9 @@ export function createGitHubHost(sandbox: SandboxPort, options: GitHubOptions): 
 
   return {
     async diffSummary(sandboxId) {
-      // 추적 안 되는 새 파일까지 보이도록 intent-to-add 후 diff (스테이징 내용은 유지 안 함).
-      const result = ensureOk(await sh(sandboxId, 'git add -A -N && git diff HEAD'), 'git diff');
+      // 클론 시점(origin/HEAD)과 비교한다 — codex가 변경을 커밋했든 워킹트리에
+      // 남겼든 모두 잡힌다. 추적 안 되는 새 파일까지 보이도록 intent-to-add 후 diff.
+      const result = ensureOk(await sh(sandboxId, 'git add -A -N && git diff origin/HEAD'), 'git diff');
       return result.stdout;
     },
 
@@ -79,7 +80,8 @@ export function createGitHubHost(sandbox: SandboxPort, options: GitHubOptions): 
             `git config user.name "${GIT_NAME}"`,
             `git checkout -b "${input.branch}"`,
             'git add -A',
-            `git commit -m "${input.title.replace(/"/g, '\\"')}"`,
+            // codex가 이미 커밋했으면 추가로 커밋할 게 없다 — 그 경우 커밋을 건너뛴다.
+            `(git diff --cached --quiet || git commit -m "${input.title.replace(/"/g, '\\"')}")`,
             `git push -u origin "${input.branch}"`,
           ].join(' && '),
         ),

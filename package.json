@@ -13,6 +13,7 @@
     "check:arch": "depcruise packages apps e2e",
     "test:unit": "vitest run",
     "check": "pnpm typecheck && pnpm lint && pnpm check:arch && pnpm test:unit",
+    "dev": "tsx apps/server/src/index.ts",
     "e2e": "playwright test",
     "e2e:golden-path": "playwright test e2e/golden-path.spec.ts"
   },
@@ -21,6 +22,7 @@
     "@types/node": "^22.15.0",
     "dependency-cruiser": "^16.10.0",
     "eslint": "^9.28.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.33.0",
     "vitest": "^3.2.0"

@@ -125,3 +125,33 @@ Slack/Discord 어댑터는 외부 플랫폼을 통과해야 해서 사용자 시
 - **pre-push를 고른 이유:** `pnpm check`는 유닛테스트까지 돌아 커밋마다 걸면
   마찰이 크다. push 직전 한 번이 마지막 로컬 방어선으로 적절하다. 실패 시
   종료코드가 0이 아니면 push가 차단된다(확인함).
+
+## 7. 웹 서버 — 프레임워크 없이 node:http
+
+**결정: `apps/server`는 node 내장 `http`로 시작한다. 웹 프레임워크는 도입하지 않는다.**
+
+- 골든패스 1단계는 채팅 화면 HTML 하나를 GET `/`로 내려주는 것뿐이다.
+  Express/Fastify 같은 프레임워크는 아직 값을 증명하지 못한다("필요가
+  증명될 때만" 원칙). 라우팅은 `apps/server/src/server.ts`의 작은 분기로
+  충분하고, 화면은 순수 함수 `ui.ts`가 문자열로 그린다(유닛테스트로 고정).
+- 다음 단계(에이전트 진행 스트리밍)에서 SSE/WebSocket이 필요해지면 그때
+  재검토한다 — 내장 `http`로도 SSE는 가능하므로 프레임워크 도입은 그 시점의
+  실제 필요로 판단한다.
+- **기동 확인용 `/healthz`:** Playwright webServer가 준비를 기다릴 엔드포인트
+  (§8). 200 "ok"만 돌려준다.
+
+## 8. 서버 실행 — 빌드 스텝 없이 tsx로 TS 직접 실행
+
+**결정: `tsx`를 devDependency로 두고 `pnpm dev`(= `tsx apps/server/src/index.ts`)로 서버를 띄운다.**
+
+- 이 레포는 빌드 스텝이 없다(`noEmit`, vitest·playwright 모두 TS를 직접 실행).
+  서버도 같은 결을 따라 트랜스파일 산출물 없이 실행한다.
+- **node 내장 타입 스트리핑을 못 쓰는 이유:** node 22의
+  `--experimental-strip-types`는 `node_modules` 안의 `.ts`를 거부한다
+  (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`). 워크스페이스 패키지
+  (`@devspace/core` 등)는 심링크로 `node_modules`에 들어오고 `exports`가
+  `./src/index.ts`를 가리키므로, 내장 방식으로는 서버가 core를 import하는
+  순간 깨진다. `tsx`는 이를 문제없이 처리한다.
+- **E2E 연결:** `playwright.config.ts`의 `webServer`가 `pnpm dev`로 서버를
+  띄우고 `/healthz` 200을 기다린 뒤 시나리오를 실행한다. 로컬에 이미 서버가
+  떠 있으면 재사용하고(`reuseExistingServer`), CI에서는 항상 새로 띄운다.

@@ -192,7 +192,7 @@ Out (seeded to M25+, with rationale):
 - chat-gateway: `parseEnvAssignments` (shared interpreter) + `env=` token
   in `parseRepoChoice`; both repo-picker modals gain the env + multi-line
   script inputs; both `parseRepoPickerSubmission`s return `{text, env?,
-  envInvalid?, setupScript?}` and both adapters attach onto the parsed
+envInvalid?, setupScript?}` and both adapters attach onto the parsed
   choice (envInvalid → empty choice).
 - Tests: parser tables (token + assignments, malformed → empty), modal
   builders + submission parsers on both platforms, adapter flow (modal

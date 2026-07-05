@@ -1,0 +1,18 @@
+{
+  "name": "devspace",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "e2e": "playwright test",
+    "e2e:golden-path": "playwright test e2e/golden-path.spec.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.53.0",
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0"
+  }
+}

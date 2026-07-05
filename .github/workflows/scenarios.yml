@@ -1,0 +1,107 @@
+name: scenarios
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # 주 1회 codex 세션 갱신(keepalive). 8일 넘게 갱신이 없으면 세션이
+    # 만료되므로, 이 크론이 도는 한 재로그인 없이 유지된다. (docs/decisions.md §2)
+    - cron: '17 6 * * 1'
+
+jobs:
+  typecheck:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+
+  # 골든패스가 구현될 때까지 이 잡은 의도적으로 빨간불이다. (scenarios/README.md)
+  golden-path:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write # 스크린샷을 ci-media 브랜치에 커밋
+      pull-requests: write # 스크린샷 댓글
+    env:
+      E2E_REPO: ${{ vars.E2E_REPO }}
+      E2E_GITHUB_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      # keepalive 잡이 갱신해 둔 auth.json 캐시를 우선 사용, 없으면 secret 시드
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.codex-auth-cache
+          key: codex-auth-${{ github.run_id }}
+          restore-keys: codex-auth-
+      - name: Codex 구독 인증 준비 (docs/decisions.md §2)
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: bash .github/scripts/codex-auth.sh seed
+
+      # TODO(골든패스 구현 시): 여기서 devspace 서버를 띄운다.
+      # 지금은 서버가 없으므로 시나리오 1단계(접속)에서 실패한다 — 그게 현재 목표 지점.
+
+      - name: 골든패스 시나리오 실행
+        run: npm run e2e:golden-path
+
+      # 주요 장면 + 실패 장면 스크린샷을 트리거한 PR에 인라인 이미지 댓글로 첨부.
+      # (fork PR은 토큰이 읽기 전용이라 제외 — 혼자 쓰는 레포라 사실상 해당 없음)
+      - name: 스크린샷을 PR 댓글로 첨부 (docs/decisions.md §4)
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash .github/scripts/pr-screenshots.sh
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  # 주 1회: codex를 한 번 아주 짧게 실행해 세션 토큰을 갱신하고,
+  # 갱신된 auth.json을 암호화 캐시로 저장한다. (docs/decisions.md §2)
+  codex-auth-keepalive:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/.codex-auth-cache
+          key: codex-auth-${{ github.run_id }}
+          restore-keys: codex-auth-
+      - name: auth.json 시드/복원
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: bash .github/scripts/codex-auth.sh seed
+      - run: npm install -g @openai/codex
+      - name: 토큰 갱신을 위한 최소 실행
+        run: codex exec --sandbox read-only --skip-git-repo-check "Reply with exactly one word - ok"
+      - name: 갱신본 암호화 저장
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: bash .github/scripts/codex-auth.sh save
+      - uses: actions/cache/save@v4
+        with:
+          path: ~/.codex-auth-cache
+          key: codex-auth-${{ github.run_id }}

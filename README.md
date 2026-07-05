@@ -23,6 +23,28 @@
 - 코딩 에이전트 — Codex CLI (구독 계정, 샌드박스 안에서 실행)
 - GitHub — 레포 클론, 브랜치 푸시, PR 생성
 
+## 레포 구조
+
+```
+scenarios/   자연어 사용자 시나리오 — 원천 진실 (scenarios/README.md 참고)
+e2e/         시나리오와 1:1 대응하는 Playwright 테스트
+docs/        결정 기록 (docs/decisions.md)
+```
+
+## 시나리오 실행
+
+```bash
+npm ci
+npx playwright install chromium
+cp .env.e2e.example .env.e2e   # E2E_REPO, E2E_GITHUB_TOKEN 채우기
+npm run e2e:golden-path
+```
+
+CI(`.github/workflows/scenarios.yml`)는 push/PR마다 골든패스를 실행한다.
+**골든패스가 구현될 때까지 이 잡은 의도적으로 빨간불이다** — 그것이 현재
+목표 지점이다. 테스트 레포 지정과 Codex 인증 방식은
+[`docs/decisions.md`](docs/decisions.md) 참고.
+
 ## 이전 코드베이스
 
 2026-07 이전의 멀티테넌트 플랫폼 구현(M1–M24)은

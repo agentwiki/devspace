@@ -19,6 +19,7 @@ Expansion XIV (session resume): **M19.**
 Expansion XV (history restore on resume): **M20.**
 Expansion XVI (transcript replay + retention policy): **M21.**
 Expansion XVII (per-environment egress policy): **M22.**
+Expansion XVIII (tenant egress widening under an operator ceiling): **M23.**
 
 ## M0 — Scaffolding (done)
 
@@ -845,12 +846,54 @@ net=host1,host2]` on both adapters (the shared parser; Slack auto-links
   env request AND persists on the work unit (migration 0007), so the M19
   resume re-provision narrows exactly as the original did.
 
-## M23+ — Expansion XVIII
+## M23 — Expansion XVIII: tenant egress widening under an operator ceiling (done)
 
-Tenant-supplied egress widening under an operator ceiling (e.g.
-`SANDBOX_TENANT_HOSTS` — CCW's "custom domains"; a deliberate policy
-feature, not a request field, per the M22 trust model) and a repo-picker
-modal field for `net=` (the command form is the canonical ergonomics);
+The two M22 deferrals that were ready: CCW's "custom domains" as a
+deliberate policy feature under the M22 trust model, and the repo-picker
+modal `net` field. Zero migrations, zero enforcement changes: one additive
+enum value, one registrar field, one knob, one modal input. Design of
+record: docs/m23-plan.md.
+
+Landed:
+
+- **The widening ceiling** — `SANDBOX_TENANT_HOSTS` (the `EGRESS_ALLOWLIST`
+  entry syntax) names the hosts a tenant request may ADD beyond the
+  operator allowlist, parsed where the proxy boots and carried on the scope
+  registrar. Validation input ONLY: it is never added to the proxy default,
+  so a ceiling host is reachable only inside an env whose RESOLVED scope
+  names it — the whole M22 enforcement path (per-gateway scopes,
+  birth-policy persistence, recovery-or-discard, honor-or-refuse) is
+  byte-for-byte untouched.
+- **`networkAccess: 'extend'`** — the operator allowlist ∪ `allowedHosts`,
+  resolved and deduped at provisioning (birth policy, m22-plan Decision 5:
+  later allowlist/ceiling changes never retune a live env). One
+  admissibility rule for `custom` and `extend` alike — every requested
+  entry must be covered by the operator allowlist OR the ceiling (a host a
+  tenant may extend to must be nameable in a strictly narrower custom
+  list); inadmissible entries refuse at provision naming the entries and
+  the knob. All three fields stay optional-absent, so pre-M23 canonical
+  pool keys are byte-identical, and a pre-M23 host receiving `'extend'`
+  refuses at schema parse — honor-or-refuse covers the upgrade window with
+  no new code.
+- **Tenant surface** — `net=+extra1,+extra2` on both adapters (all entries
+  marked or none: a mixed list empties the whole choice, because either
+  guessed shape mis-sizes egress). Both repo-picker modals gain an optional
+  free-text Network field whose value rides the composed picker text as a
+  `net=` token (whitespace stripped, one leading `net=` forgiven), so
+  `parseRepoChoice` stays the single interpreter of `net` syntax and a
+  malformed modal value can only ever yield an empty choice. Resume
+  re-validates against the host's CURRENT ceiling: a resume after a
+  tightening refuses in-thread and the unit stays PR_OPEN (the M19
+  failed-resume posture, unchanged).
+
+## M24+ — Expansion XIX
+
+Per-tenant/per-user widening ceilings (`SANDBOX_TENANT_HOSTS` is per host —
+every tenant on the host shares one ceiling; identity-keyed policy needs a
+control-plane policy store and a way to ship it to hosts, its own feature
+with its own review); mid-session widening (the scope stays fixed at
+provisioning; "add a host to my live env" is applySecrets-like surface
+with a real authz question — who may widen a running workload?);
 native session import (the prompt preamble is the injection story that
 works for every ACP backend today; if the protocol grows a session-load
 surface, the transcript table is already the source); richer transcript

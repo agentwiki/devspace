@@ -40,9 +40,12 @@ policy on the provisioner, never on the tenant request):
   traffic (M5-A/B). Since M22 a request can NARROW its own env's allowlist
   (`networkAccess: 'none' | 'custom'` — enforced as a per-gateway scope at
   the proxy, keyed on the address the connection arrived on, which the
-  workload cannot forge); widening stays operator-only (`EGRESS_ALLOWLIST`),
-  and hosts that cannot enforce a scope refuse the request rather than honor
-  it loosely.
+  workload cannot forge); hosts that cannot enforce a scope refuse the
+  request rather than honor it loosely. Since M23 `networkAccess: 'extend'`
+  can widen — but only to hosts the operator pre-approved for tenant use
+  (`SANDBOX_TENANT_HOSTS`, a validation-only ceiling: never in the proxy
+  default, reachable only via an env's own resolved scope). Blanket
+  widening remains operator-only (`EGRESS_ALLOWLIST`).
 - cgroup CPU/mem/pids limits (M1) + opt-in disk quota (`--storage-opt`,
   driver-gated; M5-A) against noisy-neighbor / fork-bomb DoS.
 - **Turn budgets + real auto-abort** (M5-C): tool-call + wall-clock budgets on

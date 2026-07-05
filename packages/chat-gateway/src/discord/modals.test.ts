@@ -98,7 +98,11 @@ describe('submission parsers', () => {
     );
     // Shared normalization with Slack: whitespace stripped, `net=` forgiven.
     expect(
-      parseRepoPickerSubmission({ repo: 'acme/widgets', ref: 'main', network: ' net=+mirror.corp.example ' }),
+      parseRepoPickerSubmission({
+        repo: 'acme/widgets',
+        ref: 'main',
+        network: ' net=+mirror.corp.example ',
+      }),
     ).toBe('acme/widgets main net=+mirror.corp.example');
     // A blank field is unused — default egress, never an empty net= token.
     expect(parseRepoPickerSubmission({ repo: 'acme/widgets', network: '  ' })).toBe('acme/widgets');

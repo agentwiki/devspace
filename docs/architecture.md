@@ -199,6 +199,20 @@ same narrowing, and hosts that cannot enforce a scope (demo mode, shared
 networks, static proxy URL) refuse the request rather than honor it loosely
 (docs/m22-plan.md).
 
+Since M23 a request can also WIDEN — under an operator ceiling:
+`SANDBOX_TENANT_HOSTS` names the hosts a tenant may add beyond the
+allowlist, carried on the scope registrar as validation input only (never
+added to the proxy default — a ceiling host is reachable only inside an
+env whose resolved scope names it). `networkAccess: 'extend'` resolves to
+the operator allowlist ∪ the requested extras at provisioning (birth
+policy, deduped); one admissibility rule covers `custom` and `extend`
+(entry covered by allowlist OR ceiling), and inadmissible entries refuse
+naming both. Tenants ask with `net=+extra1,+extra2` (all entries marked or
+none — a mixed list empties the choice) or the new optional Network field
+on both repo-picker modals, which rides the composed picker text as a
+`net=` token so `parseRepoChoice` stays the single interpreter
+(docs/m23-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

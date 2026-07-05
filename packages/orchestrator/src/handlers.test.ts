@@ -198,6 +198,29 @@ describe('conversation.created', () => {
     expect(wu).toMatchObject({ networkAccess: 'custom', allowedHosts: ['github.com'] });
   });
 
+  it("passes an 'extend' widening through to the sandbox and the unit row (M23)", async () => {
+    const h = harness();
+    await h.orch.handleChatEvent({
+      type: 'conversation.created',
+      platform: 'slack',
+      externalChannelId: 'C-net-x',
+      userId: 'u1',
+      repoChoice: {
+        repoUrl: 'https://github.com/a/b.git',
+        empty: false,
+        networkAccess: 'extend',
+        allowedHosts: ['mirror.corp.example'],
+      },
+    });
+    // The orchestrator carries the choice verbatim — whether the extras are
+    // admissible is the HOST's call (its ceiling), refused at provision.
+    expect(h.sandbox.createEnvironment).toHaveBeenCalledWith(
+      expect.objectContaining({ networkAccess: 'extend', allowedHosts: ['mirror.corp.example'] }),
+    );
+    const [wu] = await h.repos.workUnits.listByState('READY');
+    expect(wu).toMatchObject({ networkAccess: 'extend', allowedHosts: ['mirror.corp.example'] });
+  });
+
   it('a policy-less choice sends a policy-less request (pre-M22 shape)', async () => {
     const h = harness();
     await h.orch.handleChatEvent({

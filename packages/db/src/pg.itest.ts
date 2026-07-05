@@ -82,15 +82,16 @@ suite('postgres repositories', () => {
     expect(wu.networkAccess).toBeUndefined(); // pre-choice / pre-M22 shape
     const ready = await repos.workUnits.transition(wu.id, 'repoChoice', {
       repoUrl: 'https://x/r',
-      // The egress policy persists with the choice (M22) — resume reads it.
-      networkAccess: 'custom',
-      allowedHosts: ['github.com', '*.githubusercontent.com'],
+      // The egress policy persists with the choice (M22; 'extend' joined the
+      // enum in M23 — plain text column, the value must survive the mapping).
+      networkAccess: 'extend',
+      allowedHosts: ['github.com', '*.corp.example'],
     });
     expect(ready.state).toBe('PROVISIONING');
     expect(ready.repoUrl).toBe('https://x/r');
     expect(await repos.workUnits.get(wu.id)).toMatchObject({
-      networkAccess: 'custom',
-      allowedHosts: ['github.com', '*.githubusercontent.com'],
+      networkAccess: 'extend',
+      allowedHosts: ['github.com', '*.corp.example'],
     });
 
     const sec = await repos.secrets.put({

@@ -156,6 +156,31 @@ describe('parseRepoChoice', () => {
   it('a bare net= token without a repo stays an empty choice', () => {
     expect(parseRepoChoice('net=none')).toEqual({ empty: true });
   });
+
+  it('parses a net=+ marked list into an extend widening (M23)', () => {
+    expect(parseRepoChoice('acme/widgets net=+mirror.corp.example,+*.corp.example')).toEqual({
+      repoUrl: 'https://github.com/acme/widgets',
+      ref: undefined,
+      empty: false,
+      networkAccess: 'extend',
+      allowedHosts: ['mirror.corp.example', '*.corp.example'],
+    });
+    // Auto-linked/schemed marked entries unwrap after the marker is read.
+    expect(
+      parseRepoChoice('acme/widgets net=+<http://mirror.corp.example|mirror.corp.example>'),
+    ).toMatchObject({
+      networkAccess: 'extend',
+      allowedHosts: ['mirror.corp.example'],
+    });
+  });
+
+  it('mixed marked/unmarked entries empty the whole choice — never a guessed shape (M23)', () => {
+    expect(parseRepoChoice('acme/widgets net=github.com,+mirror.corp.example')).toEqual({
+      empty: true,
+    });
+    expect(parseRepoChoice('acme/widgets net=+')).toEqual({ empty: true });
+    expect(parseRepoChoice('acme/widgets net=+,+')).toEqual({ empty: true });
+  });
 });
 
 describe('SlackAdapter inbound (recorded payloads through real Bolt)', () => {

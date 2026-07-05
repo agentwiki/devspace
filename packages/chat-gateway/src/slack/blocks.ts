@@ -280,6 +280,7 @@ export function repoPickerModal(privateMetadata: string): SlackModalView {
     blocks: [
       input('repo', 'Repository', false, 'https://github.com/owner/repo or owner/repo'),
       input('ref', 'Branch or ref (optional)', true, 'main'),
+      input('network', 'Network (optional)', true, 'none | host1,host2 | +extra.example.com'),
     ],
   };
 }
@@ -299,9 +300,23 @@ export function parseSecretsSubmission(
   return out;
 }
 
-/** Extract the "<repo> [ref]" text from a repo-picker submission. */
+/**
+ * Normalize the modal's free-text network field into a `net=` VALUE (M23):
+ * whitespace stripped (a spaced comma list is unambiguous), one leading
+ * `net=` forgiven (users who know the command form will type it). Empty →
+ * '' (field unused — default egress). The value is composed as `net=<value>`
+ * onto the picker text so `parseRepoChoice` stays the single interpreter of
+ * `net` syntax — a malformed value can only ever yield an EMPTY choice,
+ * never a differently-shaped env (m23-plan Decision 6).
+ */
+export function normalizeNetworkField(raw: string | null | undefined): string {
+  return (raw ?? '').replace(/\s+/g, '').replace(/^net=/i, '');
+}
+
+/** Extract the "<repo> [ref] [net=…]" text from a repo-picker submission. */
 export function parseRepoPickerSubmission(values: ViewStateValues): string {
   const repo = values.repo?.value?.value?.trim() ?? '';
   const ref = values.ref?.value?.value?.trim() ?? '';
-  return [repo, ref].filter(Boolean).join(' ');
+  const net = normalizeNetworkField(values.network?.value?.value);
+  return [repo, ref, net ? `net=${net}` : ''].filter(Boolean).join(' ');
 }

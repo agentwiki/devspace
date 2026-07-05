@@ -58,12 +58,13 @@ describe('secretsModal', () => {
 });
 
 describe('repoPickerModal', () => {
-  it('requires the repo, keeps ref optional, and carries the channel', () => {
+  it('requires the repo, keeps ref and network optional, and carries the channel', () => {
     const modal = repoPickerModal('C42');
     expect(modal.custom_id).toBe(`${REPO_PICKER_MODAL_PREFIX}:C42`);
-    const [repo, ref] = modal.components.map((r) => r.components[0]);
+    const [repo, ref, network] = modal.components.map((r) => r.components[0]);
     expect(repo).toMatchObject({ custom_id: 'repo', required: true });
     expect(ref).toMatchObject({ custom_id: 'ref', required: false });
+    expect(network).toMatchObject({ custom_id: 'network', required: false });
   });
 });
 
@@ -89,6 +90,18 @@ describe('submission parsers', () => {
     );
     expect(parseRepoPickerSubmission({ repo: 'acme/widgets' })).toBe('acme/widgets');
     expect(parseRepoPickerSubmission({})).toBe('');
+  });
+
+  it('parseRepoPickerSubmission composes the network field as a net= token (M23)', () => {
+    expect(parseRepoPickerSubmission({ repo: 'acme/widgets', network: 'none' })).toBe(
+      'acme/widgets net=none',
+    );
+    // Shared normalization with Slack: whitespace stripped, `net=` forgiven.
+    expect(
+      parseRepoPickerSubmission({ repo: 'acme/widgets', ref: 'main', network: ' net=+mirror.corp.example ' }),
+    ).toBe('acme/widgets main net=+mirror.corp.example');
+    // A blank field is unused — default egress, never an empty net= token.
+    expect(parseRepoPickerSubmission({ repo: 'acme/widgets', network: '  ' })).toBe('acme/widgets');
   });
 });
 

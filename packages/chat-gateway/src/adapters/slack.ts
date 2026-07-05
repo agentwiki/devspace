@@ -85,13 +85,15 @@ export interface SlackAdapterOptions {
 }
 
 /**
- * Parse "/devspace <repoUrl|owner/repo> [ref] [net=none|net=host1,host2]"
- * text into a RepoChoice. `net=` (M22) narrows the session env's egress:
- * `none` for no egress, a comma list for exactly those hosts (each must be
- * covered by the host allowlist — provisioning refuses otherwise). An empty
- * `net=` value makes the whole choice empty rather than dropping the token:
- * a typo must cost a retype, never a wider-than-asked env (m22-plan
- * Decision 8).
+ * Parse "/devspace <repoUrl|owner/repo> [ref]
+ * [net=none|net=host1,host2|net=+extra1,+extra2]" text into a RepoChoice.
+ * `net=` (M22) narrows the session env's egress: `none` for no egress, a
+ * comma list for exactly those hosts. A `+`-marked list (M23) EXTENDS the
+ * host default instead — each extra must clear the host's tenant ceiling
+ * (provisioning refuses otherwise). All entries marked or none: a mixed
+ * list is ambiguous and either guess mis-shapes egress, so it empties the
+ * choice, like an empty `net=` value — a typo must cost a retype, never a
+ * differently-shaped env (m22-plan Decision 8; m23-plan Decision 5).
  */
 export function parseRepoChoice(text: string): RepoChoice {
   const tokens = text.trim().split(/\s+/).filter(Boolean);
@@ -111,9 +113,17 @@ export function parseRepoChoice(text: string): RepoChoice {
     if (net.toLowerCase() === 'none') {
       networkAccess = 'none';
     } else {
-      const hosts = net.split(',').map(normalizeHostToken).filter(Boolean);
+      const entries = net
+        .split(',')
+        .map((e) => e.trim())
+        .filter(Boolean);
+      const marked = entries.filter((e) => e.startsWith('+')).length;
+      if (marked > 0 && marked < entries.length) return { empty: true };
+      const hosts = entries
+        .map((e) => normalizeHostToken(marked > 0 ? e.slice(1) : e))
+        .filter(Boolean);
       if (hosts.length === 0) return { empty: true };
-      networkAccess = 'custom';
+      networkAccess = marked > 0 ? 'extend' : 'custom';
       allowedHosts = hosts;
     }
   }

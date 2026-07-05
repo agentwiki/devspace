@@ -160,6 +160,17 @@ SUSPENDED back to PR_OPEN by the same idle TTL — env destroyed
 merge/close events landing mid-resume are dropped and re-detected by the
 poll once the unit returns to PR_OPEN (docs/m19-plan.md).
 
+Since M20 a resumed session is not blind: every turn the orchestrator
+actually runs lands in the durable `transcripts` table — the tenant prompt
+and ONE coalesced agent reply per turn, both passed through the
+conversation's redaction registry BEFORE storage, appended best-effort so
+bookkeeping never fails a turn. When the M19 self-loop mints a fresh agent
+session on a resumed unit, the transcript tail is rendered into a bounded
+preamble (oldest entries dropped past the char budget, the cut marked) and
+prefixed onto that first prompt only; the preamble is never persisted, so
+suspend/resume cycles cannot compound it, and a failed read degrades to the
+M19 blind resume (docs/m20-plan.md).
+
 ### Dependency rules (keep it a DAG)
 
 1. `orchestrator` is the only component that knows all others; owns workflow + FSM.

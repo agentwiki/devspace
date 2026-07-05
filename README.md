@@ -4,7 +4,7 @@ On-premises, self-hostable platform that spins up isolated, Codespaces-like dev
 environments on demand and lets coding agents operate inside them from a chat
 interface — a self-hostable "Claude Code on the web."
 
-> **Status: M19 (expansion XIV).** The full vertical is live end to end — sandbox
+> **Status: M20 (expansion XV).** The full vertical is live end to end — sandbox
 > engine (M1), ACP agent runner + approval gate (M2), orchestrator FSM +
 > secrets + host-side git/PR (M3), Slack surface (M4), multi-tenant hardening
 > (gVisor profile, egress allowlist, budgets/auto-abort, audit log, webhooks —
@@ -52,7 +52,10 @@ interface — a self-hostable "Claude Code on the web."
 > `resume-work` button in the PR thread rebuilds the environment from the
 > PR branch and re-opens work on the SAME PR (re-pushing adopts it), and an
 > idle resumed session is suspended back to waiting on its PR instead of
-> torn down. See [`docs/roadmap.md`](docs/roadmap.md).
+> torn down. M20 makes the resumed session remember: every turn lands in a
+> durable, redacted-at-write transcript, and the first turn after a resume
+> carries a bounded digest of the prior conversation.
+> See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Testing
 

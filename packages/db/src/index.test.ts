@@ -219,6 +219,35 @@ describe('in-memory repositories', () => {
     expect(await repos.audit.listByConversation('nope')).toHaveLength(0);
   });
 
+  it('appends transcript entries and reads a chronological tail (M20)', async () => {
+    const repos = createInMemoryRepositories();
+    const rec = await repos.transcripts.append({
+      conversationId: 'c1',
+      workUnitId: 'wu1',
+      role: 'user',
+      text: 'do the thing',
+    });
+    expect(rec.id).toBeTruthy();
+    expect(rec.createdAt).toBeTruthy();
+    await repos.transcripts.append({ conversationId: 'c1', role: 'agent', text: 'done' });
+    await repos.transcripts.append({ conversationId: 'c1', role: 'user', text: 'now this' });
+    await repos.transcripts.append({ conversationId: 'c2', role: 'user', text: 'other convo' });
+
+    // The tail is the NEWEST n entries, returned oldest-first — and it never
+    // crosses conversations.
+    const tail = await repos.transcripts.listTail('c1', 2);
+    expect(tail.map((t) => t.text)).toEqual(['done', 'now this']);
+    const all = await repos.transcripts.listByConversation('c1');
+    expect(all.map((t) => `${t.role}:${t.text}`)).toEqual([
+      'user:do the thing',
+      'agent:done',
+      'user:now this',
+    ]);
+    // A limit past the size returns everything; an unknown conversation, nothing.
+    expect(await repos.transcripts.listTail('c1', 99)).toHaveLength(3);
+    expect(await repos.transcripts.listTail('nope', 5)).toEqual([]);
+  });
+
   it('tracks event consumption', async () => {
     const repos = createInMemoryRepositories();
     const e = await repos.events.append({ topic: 't', payload: {} });

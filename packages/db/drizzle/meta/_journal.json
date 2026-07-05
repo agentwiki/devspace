@@ -43,6 +43,13 @@
       "when": 1783174487988,
       "tag": "0005_deep_mongoose",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1783211257880,
+      "tag": "0006_silly_black_queen",
+      "breakpoints": true
     }
   ]
 }

@@ -10,7 +10,7 @@
  * state — it can never be misreported as an illegal transition.
  */
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import type { Pool } from 'pg';
 import type { WorkUnit } from '@devspace/contracts';
@@ -23,14 +23,24 @@ import {
   type LeaseRecord,
   type Repositories,
   type SecretRecord,
+  type TranscriptRecord,
 } from './index.js';
-import { auditLog, conversations, events, leases, secrets, workUnits } from './schema.js';
+import {
+  auditLog,
+  conversations,
+  events,
+  leases,
+  secrets,
+  transcripts,
+  workUnits,
+} from './schema.js';
 import type {
   AuditRow,
   ConversationRow,
   EventRow,
   LeaseRow,
   SecretRow,
+  TranscriptRow,
   WorkUnitRow,
 } from './schema.js';
 
@@ -85,6 +95,17 @@ function mapAudit(r: AuditRow): AuditRecord {
     workUnitId: opt(r.workUnitId),
     action: r.action,
     detail: r.detail as Record<string, unknown>,
+  };
+}
+
+function mapTranscript(r: TranscriptRow): TranscriptRecord {
+  return {
+    id: r.id,
+    conversationId: r.conversationId,
+    workUnitId: opt(r.workUnitId),
+    role: r.role as TranscriptRecord['role'],
+    text: r.text,
+    createdAt: iso(r.createdAt),
   };
 }
 
@@ -381,6 +402,41 @@ export function createPostgresRepositories(pool: Pool): Repositories {
           .where(eq(auditLog.conversationId, conversationId))
           .orderBy(auditLog.at);
         return rows.map(mapAudit);
+      },
+    },
+
+    transcripts: {
+      async append(input) {
+        const [row] = await db
+          .insert(transcripts)
+          .values({
+            id: `tr_${randomUUID()}`,
+            conversationId: input.conversationId,
+            workUnitId: input.workUnitId,
+            role: input.role,
+            text: input.text,
+          })
+          .returning();
+        return mapTranscript(row!);
+      },
+      async listTail(conversationId, limit) {
+        // seq owns the total order (m20-plan Decision 7): newest `limit`
+        // rows, returned chronologically.
+        const rows = await db
+          .select()
+          .from(transcripts)
+          .where(eq(transcripts.conversationId, conversationId))
+          .orderBy(desc(transcripts.seq))
+          .limit(limit);
+        return rows.reverse().map(mapTranscript);
+      },
+      async listByConversation(conversationId) {
+        const rows = await db
+          .select()
+          .from(transcripts)
+          .where(eq(transcripts.conversationId, conversationId))
+          .orderBy(asc(transcripts.seq));
+        return rows.map(mapTranscript);
       },
     },
   };

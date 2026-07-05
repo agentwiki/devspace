@@ -16,6 +16,7 @@ Expansion XI (live utilization truth + usage-aware ranking): **M16.**
 Expansion XII (work-unit lifecycle reclamation): **M17.**
 Expansion XIII (idle warnings + PR_OPEN env release): **M18.**
 Expansion XIV (session resume): **M19.**
+Expansion XV (history restore on resume): **M20.**
 
 ## M0 — Scaffolding (done)
 
@@ -725,12 +726,52 @@ Landed:
   still-open PR (M3 idempotency), or opens a fresh one when the old PR
   settled mid-resume.
 
-## M20+ — Expansion XV
+## M20 — Expansion XV: history restore on resume (done)
 
-History restore on resume (a resumed agent session starts blind — its
-context is the branch state; restoring the conversation needs transcript
-persistence first, the `message`/AgentEvent-table line the gap analysis
-tracks, plus an agent-side injection story); NATS bus (still unnecessary:
+The seed the M19 closeout priced: a resumed agent session no longer starts
+blind. Every conversation-visible turn lands in a durable per-conversation
+transcript — the `message`/AgentEvent-table line the gap analysis carried
+since M1 — and the first turn of a fresh session on a resumed unit carries
+a bounded digest of it. Zero contract changes, zero knobs, zero gateway
+changes: one additive table + repo, one pure preamble builder, new lines in
+the message path. Design of record: docs/m20-plan.md.
+
+Landed:
+
+- **Transcript persistence** — `transcripts` (additive migration 0006) +
+  `TranscriptRepo` (`append`/`listTail`/`listByConversation`), in-memory
+  and Pg; `seq` owns the total order (created_at collides inside a burst).
+  The message handler persists the tenant prompt of every turn it actually
+  RUNS and ONE coalesced agent row per turn (`message` events are stream
+  chunks), both passed through the conversation's redaction registry
+  BEFORE storage — the 100%-of-outbound invariant extends to the table at
+  rest, and the registry is warm because M4 re-registers the LLM key every
+  turn. Flushed in a `finally` (a turn that dies mid-stream still records
+  what it said); best-effort throughout (the M17 `touch` discipline —
+  bookkeeping never fails the turn it rode in on). Guard-path replies,
+  thoughts, and tool traffic never persist: the branch is the durable
+  record of the tree, the transcript holds what the branch cannot restore.
+- **History restore** — the M19 resume self-loop (the only path minting a
+  fresh session past READY) reads the transcript tail and prefixes a
+  bounded preamble onto that first prompt only: role-labelled lines,
+  oldest whole entries dropped past the char budget with the cut marked,
+  a single oversized newest entry hard-truncated head-first. The preamble
+  is never persisted, so suspend/resume cycles cannot compound it; a
+  failed read degrades to the M19 blind resume, never a failed turn.
+  Fresh READY units and every later message are untouched.
+- **Rows survive teardown** like audit rows — redacted at rest, readable
+  (`listByConversation`) for the product surfaces the M21+ seeds carry.
+
+## M21+ — Expansion XVI
+
+Native session import (the prompt preamble is the injection story that
+works for every ACP backend today; if the protocol grows a session-load
+surface, the transcript table is already the source); transcript product
+surfaces (chat backfill, `/sessions` detail, web/CLI handoff — the table
+is deliberately readable, UI stays chat-only per the parity analysis);
+transcript/audit retention policy (both are append-only, text-only,
+per-conversation — the same growth class; a retention knob is an operator
+policy for the milestone that needs one); NATS bus (still unnecessary:
 LISTEN/NOTIFY + the M14 claim survives N orchestrators by construction;
 `EventBus` remains the seam if volume ever demands it); turn-level failover
 (a controller that dies mid-turn loses that turn; the conversation resumes

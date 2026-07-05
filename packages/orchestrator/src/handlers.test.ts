@@ -382,6 +382,110 @@ describe('action.invoked', () => {
   });
 });
 
+describe('transcript persistence (M20)', () => {
+  it('persists the tenant prompt and ONE coalesced agent row per turn', async () => {
+    const agent = fakeAgent([
+      { type: 'thought', text: 'let me think' },
+      { type: 'message', text: 'first chunk, ' },
+      { type: 'tool_call', name: 'shell', args: {} },
+      { type: 'message', text: 'second chunk' },
+      { type: 'turn_end', reason: 'completed' },
+    ]);
+    const h = harness({ agent });
+    const { conv, wu } = await seed(h.repos, h.store, 'WORKING');
+
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'do the thing',
+    });
+
+    const rows = await h.repos.transcripts.listByConversation(conv.id);
+    // Chunks coalesce into one agent row; thoughts/tool calls never persist.
+    expect(rows.map((r) => `${r.role}:${r.text}`)).toEqual([
+      'user:do the thing',
+      'agent:first chunk, second chunk',
+    ]);
+    expect(rows[0]?.workUnitId).toBe(wu.id);
+  });
+
+  it('redacts before storing: an echoed LLM key never reaches the table', async () => {
+    const agent = fakeAgent([{ type: 'message', text: 'my key is sk-llm' }]);
+    const h = harness({ agent });
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'please echo sk-llm back at me',
+    });
+
+    const rows = await h.repos.transcripts.listByConversation(conv.id);
+    expect(rows).toHaveLength(2); // the tenant's own paste is scrubbed too
+    expect(JSON.stringify(rows)).not.toContain('sk-llm');
+    expect(rows.every((r) => r.text.includes('«redacted»'))).toBe(true);
+  });
+
+  it('guard-path replies never persist — the transcript is turns only', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'READY');
+    // Walk to PR_OPEN without running a turn, then post: the resume offer is
+    // platform chrome, not conversation.
+    const wu = await h.repos.workUnits.getByConversation(conv.id);
+    await h.repos.workUnits.transition(wu!.id, 'firstMessage', { agentSessionId: 'as_1' });
+    await h.repos.workUnits.transition(wu!.id, 'committedAndPushed');
+    await h.repos.workUnits.transition(wu!.id, 'prCreated', { prNumber: 1, prUrl: 'https://x/1' });
+
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'thanks!',
+    });
+    expect(await h.repos.transcripts.listByConversation(conv.id)).toEqual([]);
+  });
+
+  it('a throwing transcript repo never fails the turn (best-effort writes)', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+    vi.spyOn(h.repos.transcripts, 'append').mockRejectedValue(new Error('table on fire'));
+
+    await expect(
+      h.orch.handleChatEvent({
+        type: 'message.posted',
+        conversationId: conv.id,
+        userId: 'u1',
+        text: 'still works',
+      }),
+    ).resolves.toBeUndefined();
+    expect(h.rendered.some((r) => r.type === 'post_message')).toBe(true);
+  });
+
+  it('a turn that dies mid-stream still flushes the partial agent row', async () => {
+    const agent = fakeAgent();
+    agent.runTurn = async function* () {
+      yield { type: 'message', text: 'partial ' } as AgentEvent;
+      throw new Error('stream died');
+    };
+    const h = harness({ agent });
+    const { conv } = await seed(h.repos, h.store, 'WORKING');
+
+    await expect(
+      h.orch.handleChatEvent({
+        type: 'message.posted',
+        conversationId: conv.id,
+        userId: 'u1',
+        text: 'go',
+      }),
+    ).rejects.toThrow('stream died');
+
+    const rows = await h.repos.transcripts.listByConversation(conv.id);
+    expect(rows.map((r) => `${r.role}:${r.text}`)).toEqual(['user:go', 'agent:partial ']);
+  });
+});
+
 describe('session resume (M19)', () => {
   /** Walk a seeded unit to PR_OPEN (prNumber 42, the seed's PR branch). */
   async function seedPrOpen(h: Harness) {
@@ -588,6 +692,117 @@ describe('session resume (M19)', () => {
     expect((h.rendered.at(-1) as { text: string }).text).toContain('finished');
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_MERGED');
     expect(h.sandbox.createEnvironment).not.toHaveBeenCalled();
+  });
+});
+
+describe('history restore on resume (M20)', () => {
+  /** Run a real turn in WORKING, walk to PR_OPEN, release the env — the
+   * suspended-under-review shape a resume rebuilds from. */
+  async function seedResumable(h: Harness) {
+    const { conv, wu } = await seed(h.repos, h.store, 'WORKING');
+    await h.orch.handleChatEvent({
+      type: 'message.posted',
+      conversationId: conv.id,
+      userId: 'u1',
+      text: 'add a retry to the fetcher',
+    });
+    await h.repos.workUnits.transition(wu.id, 'committedAndPushed');
+    await h.repos.workUnits.transition(wu.id, 'prCreated', {
+      prNumber: 42,
+      prUrl: 'https://github.com/a/b/pull/42',
+    });
+    await h.repos.workUnits.releaseEnv(wu.id); // env + agent session died in review
+    return { conv, wu };
+  }
+
+  const resume = (h: Harness, conversationId: string) =>
+    h.orch.handleChatEvent({
+      type: 'action.invoked',
+      conversationId,
+      userId: 'u1',
+      actionId: 'resume-work',
+      payload: {},
+    });
+
+  const message = (h: Harness, conversationId: string, text: string) =>
+    h.orch.handleChatEvent({ type: 'message.posted', conversationId, userId: 'u1', text });
+
+  it("the resumed session's first prompt carries the prior conversation", async () => {
+    const h = harness();
+    const { conv } = await seedResumable(h);
+    await resume(h, conv.id);
+    const runTurn = vi.spyOn(h.agent, 'runTurn');
+
+    await message(h, conv.id, 'reviewer wants five attempts');
+
+    const prompt = (runTurn.mock.calls[0]?.[1] as { prompt: string }).prompt;
+    expect(prompt).toContain('this session was resumed');
+    expect(prompt).toContain('[user] add a retry to the fetcher');
+    expect(prompt).toContain('[agent] working'); // the fake agent's earlier reply
+    expect(prompt.endsWith('reviewer wants five attempts')).toBe(true);
+  });
+
+  it('the second message after resume is NOT re-prefixed', async () => {
+    const h = harness();
+    const { conv } = await seedResumable(h);
+    await resume(h, conv.id);
+    await message(h, conv.id, 'first after resume');
+    const runTurn = vi.spyOn(h.agent, 'runTurn');
+
+    await message(h, conv.id, 'second after resume');
+    expect((runTurn.mock.calls[0]?.[1] as { prompt: string }).prompt).toBe('second after resume');
+  });
+
+  it('a fresh READY unit never injects — restore rides the resume edge only', async () => {
+    const h = harness();
+    const { conv } = await seed(h.repos, h.store, 'READY');
+    const runTurn = vi.spyOn(h.agent, 'runTurn');
+
+    await message(h, conv.id, 'the very first message');
+    expect((runTurn.mock.calls[0]?.[1] as { prompt: string }).prompt).toBe(
+      'the very first message',
+    );
+  });
+
+  it('a failed transcript read degrades to the blind resume, never a failed turn', async () => {
+    const h = harness();
+    const { conv } = await seedResumable(h);
+    await resume(h, conv.id);
+    vi.spyOn(h.repos.transcripts, 'listTail').mockRejectedValue(new Error('table on fire'));
+    const runTurn = vi.spyOn(h.agent, 'runTurn');
+
+    await expect(message(h, conv.id, 'still works')).resolves.toBeUndefined();
+    expect((runTurn.mock.calls[0]?.[1] as { prompt: string }).prompt).toBe('still works');
+  });
+
+  it('the preamble never lands in the transcript — a second cycle injects history exactly once', async () => {
+    const h = harness();
+    const { conv, wu } = await seedResumable(h);
+    await resume(h, conv.id);
+    await message(h, conv.id, 'round two');
+
+    // Suspend again (the reaper's path), resume again.
+    await h.repos.workUnits.releaseEnv(wu.id);
+    await h.repos.workUnits.transition(wu.id, 'suspend');
+    await resume(h, conv.id);
+    const runTurn = vi.spyOn(h.agent, 'runTurn');
+    await message(h, conv.id, 'round three');
+
+    // The stored rows are the tenants' own texts and the agent replies — no
+    // header ever compounds into the table.
+    const rows = await h.repos.transcripts.listByConversation(conv.id);
+    expect(rows.map((r) => r.text)).toEqual([
+      'add a retry to the fetcher',
+      'working',
+      'round two',
+      'working',
+      'round three',
+      'working',
+    ]);
+    // And the third-round prompt contains exactly ONE restored-history header.
+    const prompt = (runTurn.mock.calls[0]?.[1] as { prompt: string }).prompt;
+    expect(prompt.match(/this session was resumed/g)).toHaveLength(1);
+    expect(prompt).toContain('[user] round two');
   });
 });
 

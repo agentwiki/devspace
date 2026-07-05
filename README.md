@@ -23,21 +23,30 @@
 - 코딩 에이전트 — Codex CLI (구독 계정, 샌드박스 안에서 실행)
 - GitHub — 레포 클론, 브랜치 푸시, PR 생성
 
-## 레포 구조
+## 레포 구조 (헥사고날 — 경계는 CI가 강제)
 
 ```
-scenarios/   자연어 사용자 시나리오 — 원천 진실 (scenarios/README.md 참고)
-e2e/         시나리오와 1:1 대응하는 Playwright 테스트
-docs/        결정 기록 (docs/decisions.md)
+scenarios/           자연어 사용자 시나리오 — 원천 진실 (scenarios/README.md)
+e2e/                 시나리오와 1:1 대응하는 Playwright 테스트 (앱 내부 import 금지)
+packages/core/       순수 도메인 + 포트 인터페이스 (의존성 0 — 강제됨)
+packages/adapters/   포트 구현: devcontainer, codex, GitHub (core만 안다)
+apps/server/         조립 루트 + 웹 채팅 UI
+docs/                결정 기록 (docs/decisions.md)
 ```
 
-## 시나리오 실행
+경계 규칙은 `.dependency-cruiser.cjs`에 있고 `pnpm check:arch`가 검사한다.
+자세한 근거: [`docs/decisions.md`](docs/decisions.md) §5.
+
+## 검사와 테스트
 
 ```bash
-npm ci
-npx playwright install chromium
+pnpm install
+pnpm check             # typecheck + lint + 아키텍처 경계 + 유닛테스트 (커밋 전 필수)
+
+# 시나리오 E2E:
+pnpm exec playwright install chromium
 cp .env.e2e.example .env.e2e   # E2E_REPO, E2E_GITHUB_TOKEN 채우기
-npm run e2e:golden-path
+pnpm e2e:golden-path
 ```
 
 CI(`.github/workflows/scenarios.yml`)는 push/PR마다 골든패스를 실행한다.

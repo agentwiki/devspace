@@ -52,7 +52,7 @@
 - **그래도 만료되면:** (예: 크론 8일+ 중단, Actions 캐시 7일 미사용 축출 후
   시드도 이미 stale) 골든패스가 인증 단계에서 명확히 실패한다 — 로컬 재로그인
   후 secret만 다시 올리면 된다. 조용히 썩지 않는다.
-- **주의 2 — rate limit:** 구독 요금제의 사용량을 개인 사용과 공유한다.
+- **주의 — rate limit:** 구독 요금제의 사용량을 개인 사용과 공유한다.
   시나리오의 에이전트 작업은 "README에 한 줄 추가" 수준으로 작게 유지한다.
 - **백업 경로:** 만료가 잦아 성가시면 usage-based `OPENAI_API_KEY`로 전환
   가능(codex는 API key 인증도 지원). 비용이 들지만 만료가 없다.
@@ -79,3 +79,26 @@ Slack/Discord 어댑터는 외부 플랫폼을 통과해야 해서 사용자 시
   만들고 이후 실행은 그 댓글을 수정한다.
 - **청소:** `ci-media`는 최근 20개 실행만 유지한다. 오래된 댓글의 이미지는
   깨질 수 있고, 브랜치 전체를 지워도 다음 실행이 다시 만든다.
+
+## 5. 헥사고날 모노레포 + 결정론적 경계 강제
+
+**결정: pnpm workspace 3패키지(core/adapters/server) + dependency-cruiser로 경계를 CI에서 강제.**
+
+- **구조:** `packages/core`(순수 도메인 + 포트 인터페이스) ←
+  `packages/adapters`(포트 구현: devcontainer/codex/GitHub) ←
+  `apps/server`(조립 루트 + 웹 채팅). 화살표 방향으로만 알 수 있다.
+  패키지는 필요가 증명될 때만 늘린다 — 지금은 3개면 충분하다.
+- **강제 장치 4중 (문서가 아니라 기계가 지킨다):**
+  1. **pnpm 엄격 node_modules** — package.json에 선언 안 한 패키지는
+     import 자체가 실패한다. core는 dependencies가 없으므로 아무것도 못 가져온다.
+  2. **dependency-cruiser** (`pnpm check:arch`) — core 순수성(외부 패키지·node
+     내장까지 금지), "adapters는 server만이 조립", "e2e는 앱 내부 import 금지
+     (블랙박스)", 순환 의존 금지. 위반 = CI 실패.
+  3. **ESLint + tsc strict** (`noUncheckedIndexedAccess`,
+     `exactOptionalPropertyTypes`) — 코드 수준 결함.
+  4. **유닛테스트** (vitest) — 도메인 로직(예: 세션 상태 머신)은 포트 목 없이
+     순수 함수로 테스트된다. E2E가 사용자 진실을, 유닛이 도메인 진실을 지킨다.
+- CI의 `checks` 잡이 위 전부를 실행한다. 저성능 에이전트든 사람이든,
+  경계를 깨면 머지 전에 기계적으로 걸린다.
+- **pnpm 복귀:** 단일 패키지 시절 npm이었으나 모노레포 유지 결정(이 항목)으로
+  pnpm workspace로 전환. 엄격 node_modules가 강제 장치 1번을 겸한다.

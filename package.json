@@ -2,17 +2,26 @@
   "name": "devspace",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "check:arch": "depcruise packages apps e2e",
+    "test:unit": "vitest run",
+    "check": "pnpm typecheck && pnpm lint && pnpm check:arch && pnpm test:unit",
     "e2e": "playwright test",
-    "e2e:golden-path": "playwright test e2e/golden-path.spec.ts",
-    "typecheck": "tsc --noEmit"
+    "e2e:golden-path": "playwright test e2e/golden-path.spec.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.53.0",
     "@types/node": "^22.15.0",
-    "typescript": "^5.8.0"
+    "dependency-cruiser": "^16.10.0",
+    "eslint": "^9.28.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.33.0",
+    "vitest": "^3.2.0"
   }
 }

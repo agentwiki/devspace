@@ -96,7 +96,13 @@ export function reapPolicyFromEnv(env: Record<string, string | undefined>): Reap
         `(${idleTtlMs}) — the warning window opens before the TTL, not around it`,
     );
   }
-  const enablers = [idleTtlMs, terminalGraceMs, prOpenEnvTtlMs, transcriptRetentionMs, auditRetentionMs];
+  const enablers = [
+    idleTtlMs,
+    terminalGraceMs,
+    prOpenEnvTtlMs,
+    transcriptRetentionMs,
+    auditRetentionMs,
+  ];
   if (enablers.every((v) => v === undefined)) {
     if (intervalMs !== undefined) {
       throw new Error(

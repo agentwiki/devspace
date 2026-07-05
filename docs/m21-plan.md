@@ -122,7 +122,7 @@ Out (seeded to M22+, with rationale):
   pure `buildHistoryReplay(entries, opts?)` in transcript.ts (role-labelled
   lines, newest-kept char budget shared with the preamble builder, omitted
   marker driven by the caller's probe); `onViewHistory` — `listTail(…,
-  REPLAY_MAX_ENTRIES + 1)` → replay → `messageCommand`; empty → "No
+REPLAY_MAX_ENTRIES + 1)` → replay → `messageCommand`; empty → "No
   conversation history recorded yet."
 - Tests: parser table; adapter fixture tests (both platforms — `!history`
   becomes the action, never an agent prompt); builder shape/order/budget/
@@ -134,7 +134,7 @@ Out (seeded to M22+, with rationale):
 
 - db: `deleteBefore(cutoffIso)` on `TranscriptRepo` (by `createdAt`) and
   `AuditRepo` (by `at`), returning counts; in-memory + Pg (one `DELETE …
-  WHERE < cutoff` each); Pg itest rounds a prune trip.
+WHERE < cutoff` each); Pg itest rounds a prune trip.
 - reaper.ts: `ReapPolicy.transcriptRetentionMs` / `auditRetentionMs`;
   `reapPolicyFromEnv` reads both knobs, either enables the reaper, and the
   interval-without-anything refusal now spans all five enablers.

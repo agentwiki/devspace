@@ -343,7 +343,15 @@ export async function bootOrchestrator(
         run: async () => {
           const { reaped, warned, suspended, released, prunedTranscripts, prunedAudit, failed } =
             await orch.reapExpired(policy);
-          if (reaped || warned || suspended || released || prunedTranscripts || prunedAudit || failed) {
+          if (
+            reaped ||
+            warned ||
+            suspended ||
+            released ||
+            prunedTranscripts ||
+            prunedAudit ||
+            failed
+          ) {
             console.log(
               `[reap] reclaimed ${reaped} work unit(s), warned ${warned}, ` +
                 `suspended ${suspended}, released ${released} env(s), pruned ` +

@@ -307,7 +307,15 @@ describe('reapExpired (M17)', () => {
     const { conv, wu } = await seedAt(h, 'PR_OPEN', 'C4');
     expect(
       await h.orch.reapExpired({ idleTtlMs: HOUR, terminalGraceMs: HOUR }, 100 * HOUR),
-    ).toEqual({ reaped: 0, warned: 0, suspended: 0, released: 0, prunedTranscripts: 0, prunedAudit: 0, failed: 0 });
+    ).toEqual({
+      reaped: 0,
+      warned: 0,
+      suspended: 0,
+      released: 0,
+      prunedTranscripts: 0,
+      prunedAudit: 0,
+      failed: 0,
+    });
     expect((await h.repos.workUnits.get(wu.id))?.state).toBe('PR_OPEN');
     // The reconciler's token survives with the unit.
     expect(await h.repos.secrets.get('u1', SECRET_GH_TOKEN, conv.id)).not.toBeNull();
@@ -992,10 +1000,7 @@ describe('retention pruning (M21)', () => {
     // Horizon = 1h at now = 2h → cutoff = 1h: the t=0 rows go, t=1h survive
     // (strictly-older-than — a row exactly at the horizon lives one more sweep).
     expect(
-      await h.orch.reapExpired(
-        { transcriptRetentionMs: HOUR, auditRetentionMs: HOUR },
-        2 * HOUR,
-      ),
+      await h.orch.reapExpired({ transcriptRetentionMs: HOUR, auditRetentionMs: HOUR }, 2 * HOUR),
     ).toEqual({
       reaped: 0,
       warned: 0,
@@ -1008,9 +1013,9 @@ describe('retention pruning (M21)', () => {
     expect((await h.repos.transcripts.listByConversation(conv.id)).map((r) => r.text)).toEqual([
       'fresh row',
     ]);
-    expect(
-      (await h.repos.audit.listByConversation(conv.id)).map((a) => a.action),
-    ).toEqual(['fresh.action']);
+    expect((await h.repos.audit.listByConversation(conv.id)).map((a) => a.action)).toEqual([
+      'fresh.action',
+    ]);
 
     // A second sweep at the same instant prunes nothing — age deletion is
     // idempotent, so an elected sibling double-run is harmless.

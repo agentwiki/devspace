@@ -624,10 +624,7 @@ export class Orchestrator {
     try {
       // Probe one entry past the window so the omitted marker appears iff
       // something actually exists above it (m21-plan Decision 3).
-      entries = await this.deps.repos.transcripts.listTail(
-        conversationId,
-        REPLAY_MAX_ENTRIES + 1,
-      );
+      entries = await this.deps.repos.transcripts.listTail(conversationId, REPLAY_MAX_ENTRIES + 1);
     } catch {
       await this.emit(
         messageCommand(

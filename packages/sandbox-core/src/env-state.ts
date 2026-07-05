@@ -37,6 +37,15 @@ export const PersistedEnvStateSchema = z.object({
    * upstream weighs the contract defaults).
    */
   resources: ResourceLimitsSchema.optional(),
+  /**
+   * The env's per-env egress scope (M22): the gateway it is keyed on and the
+   * RESOLVED birth-policy allowlist (hostnames only — no secrets). Present
+   * together iff the request carried `networkAccess`; recovery re-registers
+   * exactly this, never a recomputation against the operator's current
+   * allowlist (m22-plan Decision 5). Pre-M22 files load unchanged.
+   */
+  egressGateway: z.string().min(1).optional(),
+  egressScope: z.array(z.string()).optional(),
 });
 export type PersistedEnvState = z.infer<typeof PersistedEnvStateSchema>;
 

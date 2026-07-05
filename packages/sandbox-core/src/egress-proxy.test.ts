@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_EGRESS_ALLOWLIST,
   EgressProxy,
+  coveredByAllowlist,
   hostAllowed,
   parseConnectTarget,
 } from './egress-proxy.js';
@@ -51,6 +52,29 @@ describe('hostAllowed', () => {
   });
 });
 
+describe('coveredByAllowlist (M22 — a request narrows, never widens)', () => {
+  const operator = ['github.com', '*.githubusercontent.com', 'api.anthropic.com'];
+
+  it.each([
+    ['github.com', true], // exact covered by exact
+    ['GitHub.COM.', true], // normalization matches hostAllowed's
+    ['objects.githubusercontent.com', true], // exact covered by wildcard
+    ['evil.com', false],
+    ['api.github.com', false], // exact entries never cover subdomains
+    ['*.githubusercontent.com', true], // wildcard covered by the equal wildcard
+    ['*.objects.githubusercontent.com', true], // narrower wildcard covered by broader
+    ['*.github.com', false], // a wildcard matches strictly more than any exact entry
+    ['*.com', false], // broader than anything the operator granted
+    ['', false],
+  ])('%s -> %s', (entry, expected) => {
+    expect(coveredByAllowlist(entry, operator)).toBe(expected);
+  });
+
+  it('never covers a wildcard request from a bare-suffix exact entry', () => {
+    expect(coveredByAllowlist('*.githubusercontent.com', ['githubusercontent.com'])).toBe(false);
+  });
+});
+
 describe('parseConnectTarget', () => {
   it('parses host:port and [v6]:port; rejects junk', () => {
     expect(parseConnectTarget('github.com:443')).toEqual({ host: 'github.com', port: 443 });
@@ -67,11 +91,14 @@ describe('EgressProxy over loopback sockets', () => {
     while (cleanups.length) await cleanups.pop()!();
   });
 
-  async function startProxy(allowlist: readonly string[]): Promise<{ port: number }> {
-    const proxy = new EgressProxy({ allowlist, bindHost: '127.0.0.1' });
+  async function startProxy(
+    allowlist: readonly string[],
+    bindHost = '127.0.0.1',
+  ): Promise<{ port: number; proxy: EgressProxy }> {
+    const proxy = new EgressProxy({ allowlist, bindHost });
     const { port } = await proxy.start();
     cleanups.push(() => proxy.stop());
-    return { port };
+    return { port, proxy };
   }
 
   /** A TCP upstream that echoes and counts connections. */
@@ -104,9 +131,10 @@ describe('EgressProxy over loopback sockets', () => {
   function connectViaProxy(
     proxyPort: number,
     target: string,
+    proxyHost = '127.0.0.1',
   ): Promise<{ socket: Socket; statusLine: string }> {
     return new Promise((resolve, reject) => {
-      const socket = connect(proxyPort, '127.0.0.1', () => {
+      const socket = connect(proxyPort, proxyHost, () => {
         socket.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`);
       });
       socket.once('data', (chunk: Buffer) => {
@@ -158,6 +186,53 @@ describe('EgressProxy over loopback sockets', () => {
     });
     expect(body.status).toBe(200);
     expect(body.text).toBe('hello /x');
+  });
+
+  it('enforces a per-address scope over the default and restores it on clear (M22)', async () => {
+    const upstream = await startTcpUpstream();
+    const { port, proxy } = await startProxy(['127.0.0.1']);
+
+    // A 'none' scope on the dialed gateway denies what the default allows…
+    proxy.setScope('127.0.0.1', []);
+    const denied = await connectViaProxy(port, `127.0.0.1:${upstream.port}`);
+    expect(denied.statusLine).toBe('HTTP/1.1 403 Forbidden');
+    expect(upstream.connections()).toBe(0);
+
+    // …and clearing the scope restores the default allowlist.
+    proxy.clearScope('127.0.0.1');
+    const allowed = await connectViaProxy(port, `127.0.0.1:${upstream.port}`);
+    expect(allowed.statusLine).toBe('HTTP/1.1 200 Connection Established');
+    expect(upstream.connections()).toBe(1);
+  });
+
+  it('keys scopes on the LOCAL address a connection arrived on (M22)', async () => {
+    // Two loopback addresses stand in for two per-env network gateways: the
+    // scope set for one gateway must not leak to connections on the other.
+    const upstream = await startTcpUpstream();
+    const { port, proxy } = await startProxy(['127.0.0.1'], '0.0.0.0');
+    proxy.setScope('127.0.0.2', []);
+
+    const viaScoped = await connectViaProxy(port, `127.0.0.1:${upstream.port}`, '127.0.0.2');
+    expect(viaScoped.statusLine).toBe('HTTP/1.1 403 Forbidden');
+    const viaDefault = await connectViaProxy(port, `127.0.0.1:${upstream.port}`, '127.0.0.1');
+    expect(viaDefault.statusLine).toBe('HTTP/1.1 200 Connection Established');
+  });
+
+  it('scopes the plain-HTTP absolute-form path too (M22)', async () => {
+    const upstream = await startHttpUpstream();
+    const { port, proxy } = await startProxy(['127.0.0.1']);
+    proxy.setScope('127.0.0.1', []);
+
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = createHttpRequestViaProxy(port, `http://127.0.0.1:${upstream.port}/x`);
+      req.on('response', (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    expect(status).toBe(403);
   });
 
   it('rejects plain-HTTP to a denied host with 403', async () => {

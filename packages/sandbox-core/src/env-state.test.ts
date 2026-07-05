@@ -46,6 +46,18 @@ describe('FileEnvStateStore', () => {
     expect((await readdir(dir)).filter((n) => n.endsWith('.tmp'))).toEqual([]);
   });
 
+  it('round-trips an egress scope and loads pre-M22 files without one (M22)', async () => {
+    const store = new FileEnvStateStore(dir);
+    await store.save(state({ egressGateway: '172.20.0.1', egressScope: [] }));
+    const { states } = await store.loadAll();
+    expect(states[0]).toMatchObject({ egressGateway: '172.20.0.1', egressScope: [] });
+    // Pre-M22 record shape (no scope fields) still parses.
+    await store.save(state());
+    const reloaded = await store.loadAll();
+    expect(reloaded.skipped).toEqual([]);
+    expect(reloaded.states[0]!.egressGateway).toBeUndefined();
+  });
+
   it('remove forgets the env and is idempotent', async () => {
     const store = new FileEnvStateStore(dir);
     await store.save(state());

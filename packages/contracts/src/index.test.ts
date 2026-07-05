@@ -21,6 +21,35 @@ describe('contract round-trips', () => {
     expect(parsed.secrets).toEqual([]);
   });
 
+  it('guards the per-env egress policy shape (M22)', () => {
+    // Policy-less requests parse WITHOUT the keys — canonical pool keys for
+    // pre-M22 requests must stay byte-identical (m22-plan Decision 1).
+    const bare = CreateEnvironmentRequestSchema.parse({});
+    expect('networkAccess' in bare).toBe(false);
+    expect('allowedHosts' in bare).toBe(false);
+
+    expect(() => CreateEnvironmentRequestSchema.parse({ networkAccess: 'none' })).not.toThrow();
+    expect(() =>
+      CreateEnvironmentRequestSchema.parse({
+        networkAccess: 'custom',
+        allowedHosts: ['github.com'],
+      }),
+    ).not.toThrow();
+    // 'custom' without hosts, empty hosts, and hosts without 'custom' refuse.
+    expect(() => CreateEnvironmentRequestSchema.parse({ networkAccess: 'custom' })).toThrow();
+    expect(() =>
+      CreateEnvironmentRequestSchema.parse({ networkAccess: 'custom', allowedHosts: [] }),
+    ).toThrow();
+    expect(() =>
+      CreateEnvironmentRequestSchema.parse({ allowedHosts: ['github.com'] }),
+    ).toThrow();
+    expect(() =>
+      CreateEnvironmentRequestSchema.parse({ networkAccess: 'none', allowedHosts: ['x.io'] }),
+    ).toThrow();
+    // Widening is not a request concept: there is no 'open'/'full' level.
+    expect(() => CreateEnvironmentRequestSchema.parse({ networkAccess: 'open' })).toThrow();
+  });
+
   it('accepts apply-secrets requests but never an empty one', () => {
     expect(() =>
       ApplySecretsRequestSchema.parse({

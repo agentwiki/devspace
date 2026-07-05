@@ -63,6 +63,45 @@ export function hostAllowed(host: string, allowlist: readonly string[]): boolean
   return false;
 }
 
+/**
+ * Coverage check for a REQUESTED allowlist entry against the operator's
+ * allowlist (M22, m22-plan Decision 2): a per-env `custom` policy may only
+ * NARROW the host ceiling. An exact-host entry is covered iff the operator
+ * list would allow that host; a `*.suffix` entry is covered only by an
+ * equal-or-broader operator wildcard (an exact operator host never covers a
+ * wildcard request — the wildcard matches strictly more).
+ */
+export function coveredByAllowlist(entry: string, allowlist: readonly string[]): boolean {
+  const e = entry.trim().toLowerCase().replace(/\.$/, '');
+  if (!e) return false;
+  if (!e.startsWith('*.')) return hostAllowed(e, allowlist);
+  const wanted = e.slice(1); // '.suffix'
+  for (const raw of allowlist) {
+    const op = raw.trim().toLowerCase();
+    if (!op.startsWith('*.')) continue;
+    const given = op.slice(1);
+    if (wanted === given || wanted.endsWith(given)) return true;
+  }
+  return false;
+}
+
+/**
+ * Per-env scope registration (M22): the provisioner/core scope a network
+ * gateway to an env's own (narrowed) allowlist; connections arriving on an
+ * unscoped address keep the default allowlist. `allowlist` exposes the
+ * operator ceiling `custom` requests are validated against.
+ */
+export interface EgressScopeRegistrar {
+  readonly allowlist: readonly string[];
+  setScope(clientAddr: string, allowlist: readonly string[]): void;
+  clearScope(clientAddr: string): void;
+}
+
+/** Node reports IPv4 peers as `::ffff:a.b.c.d` on dual-stack binds. */
+function normalizeAddr(addr: string): string {
+  return addr.toLowerCase().replace(/^::ffff:/, '');
+}
+
 /** Parse a CONNECT target (`host:port`, incl. `[v6]:port`). Null when malformed. */
 export function parseConnectTarget(url: string | undefined): { host: string; port: number } | null {
   if (!url) return null;
@@ -83,12 +122,19 @@ export interface EgressProxyOptions {
   onLog?: (line: string) => void;
 }
 
-export class EgressProxy {
-  private readonly allowlist: readonly string[];
+export class EgressProxy implements EgressScopeRegistrar {
+  readonly allowlist: readonly string[];
   private readonly bindHost: string;
   private readonly requestedPort: number;
   private readonly onLog: (line: string) => void;
   private server?: Server;
+  /**
+   * Per-env scopes (M22), keyed by the LOCAL address a connection arrived
+   * on: an `--internal` network reaches the host only at its own bridge
+   * gateway, so the dialed address identifies the env's network — nothing
+   * the workload can forge. Unscoped addresses keep the default allowlist.
+   */
+  private readonly scopes = new Map<string, readonly string[]>();
 
   constructor(options: EgressProxyOptions) {
     this.allowlist = options.allowlist;
@@ -122,11 +168,29 @@ export class EgressProxy {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 
+  setScope(clientAddr: string, allowlist: readonly string[]): void {
+    this.scopes.set(normalizeAddr(clientAddr), [...allowlist]);
+  }
+
+  clearScope(clientAddr: string): void {
+    this.scopes.delete(normalizeAddr(clientAddr));
+  }
+
+  /** The allowlist governing one accepted connection (scope, else default). */
+  private allowlistFor(socket: Pick<Socket, 'localAddress'>): readonly string[] {
+    const addr = socket.localAddress;
+    if (addr !== undefined) {
+      const scoped = this.scopes.get(normalizeAddr(addr));
+      if (scoped !== undefined) return scoped;
+    }
+    return this.allowlist;
+  }
+
   /** HTTPS (and any raw TCP-over-CONNECT): allow, then blind splice. */
   private tunnelConnect(req: IncomingMessage, clientSocket: Socket, head: Buffer): void {
     clientSocket.on('error', () => {});
     const target = parseConnectTarget(req.url);
-    if (!target || !hostAllowed(target.host, this.allowlist)) {
+    if (!target || !hostAllowed(target.host, this.allowlistFor(clientSocket))) {
       this.onLog(`deny CONNECT ${req.url ?? '<none>'}`);
       clientSocket.end('HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n');
       return;
@@ -151,7 +215,7 @@ export class EgressProxy {
       res.writeHead(400, { 'content-type': 'text/plain' }).end('proxy requires absolute-form URLs');
       return;
     }
-    if (url.protocol !== 'http:' || !hostAllowed(url.hostname, this.allowlist)) {
+    if (url.protocol !== 'http:' || !hostAllowed(url.hostname, this.allowlistFor(req.socket))) {
       this.onLog(`deny ${req.method ?? 'GET'} ${url.hostname}`);
       res.writeHead(403, { 'content-type': 'text/plain' }).end('egress denied by allowlist');
       return;

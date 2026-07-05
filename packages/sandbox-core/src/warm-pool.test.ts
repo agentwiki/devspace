@@ -199,6 +199,19 @@ describe('WarmPoolSandboxCore', () => {
     );
   });
 
+  it('an egress policy shapes the key; requests without one keep pre-M22 keys (M22)', () => {
+    // Optional-absent, not defaulted (m22-plan Decision 1): a policy-less
+    // request must serialize WITHOUT the keys, or every pool mark stamped on
+    // live pre-M22 warm stock would be orphaned by the upgrade.
+    expect(canonicalRequestKey(TEMPLATE)).not.toContain('networkAccess');
+    expect(canonicalRequestKey({ ...TEMPLATE, networkAccess: 'none' })).not.toBe(
+      canonicalRequestKey(TEMPLATE),
+    );
+    expect(
+      canonicalRequestKey({ ...TEMPLATE, networkAccess: 'custom', allowedHosts: ['github.com'] }),
+    ).not.toBe(canonicalRequestKey({ ...TEMPLATE, networkAccess: 'none' }));
+  });
+
   it('goes cold when the pool is empty — and kicks a refill', async () => {
     const inner = fakeInner();
     const pool = new WarmPoolSandboxCore(inner, [{ template: TEMPLATE, size: 1 }]);

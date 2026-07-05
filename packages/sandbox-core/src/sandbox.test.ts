@@ -4,6 +4,7 @@ import type { CommandRunner } from './cli.js';
 import { toBase64 } from './exec.js';
 import type { ExecStream } from './exec.js';
 import type { ContainerRuntime } from './runtime.js';
+import type { EgressScopeRegistrar } from './egress-proxy.js';
 import type { EnvStateStore, PersistedEnvState } from './env-state.js';
 import type { Provisioner, ProvisionResult } from './provision.js';
 import {
@@ -140,6 +141,7 @@ function makeCore(
     maxEnvs?: number;
     budgets?: HostBudgets;
     stateStore?: EnvStateStore;
+    egress?: EgressScopeRegistrar;
     exists?: () => Promise<boolean>;
     stats?: ContainerRuntime['stats'];
     hostInfo?: { cpuCount: number; memTotalMB: number };
@@ -196,6 +198,7 @@ function makeCore(
       maxEnvs: opts.maxEnvs,
       budgets: opts.budgets,
       stateStore: opts.stateStore,
+      egress: opts.egress,
       hostInfo: opts.hostInfo,
     }),
     container,
@@ -842,6 +845,94 @@ describe('durable env table (M11)', () => {
     const summary = await core.recover(); // same process: the env is already live
     expect(summary.recovered).toEqual([]);
     expect((await core.listEnvironments()).filter((e) => e.envId === env.envId)).toHaveLength(1);
+  });
+});
+
+describe('per-env egress scopes (M22)', () => {
+  function fakeRegistrar(): { registrar: EgressScopeRegistrar; scopes: Map<string, unknown> } {
+    const scopes = new Map<string, readonly string[]>();
+    return {
+      scopes,
+      registrar: {
+        allowlist: ['github.com'],
+        setScope: (addr, list) => scopes.set(addr, list),
+        clearScope: (addr) => scopes.delete(addr),
+      },
+    };
+  }
+
+  const SCOPED_RESULT = {
+    networkName: 'devspace-net-e1',
+    egressGateway: '172.20.0.1',
+    egressScope: [] as string[],
+  };
+
+  it('persists the scope with the env and clears it at destroy, with the network', async () => {
+    const store = new FakeEnvStateStore();
+    const { registrar, scopes } = fakeRegistrar();
+    // The provisioner registered the scope itself; the core owns it from here.
+    scopes.set('172.20.0.1', []);
+    const { core } = makeCore(new FakeContainer(), SCOPED_RESULT, {
+      stateStore: store,
+      egress: registrar,
+    });
+
+    const env = await core.createEnvironment({ networkAccess: 'none' });
+    expect(store.states.get(env.envId)).toMatchObject({
+      egressGateway: '172.20.0.1',
+      egressScope: [],
+    });
+
+    await core.destroyEnvironment(env.envId);
+    expect(scopes.size).toBe(0);
+  });
+
+  it('recover() re-registers the env BIRTH policy before it can serve', async () => {
+    const store = new FakeEnvStateStore();
+    const first = makeCore(new FakeContainer(), SCOPED_RESULT, {
+      stateStore: store,
+      egress: fakeRegistrar().registrar,
+    });
+    const env = await first.core.createEnvironment({
+      networkAccess: 'custom',
+      allowedHosts: ['github.com'],
+    });
+    // What the provisioner resolved is what persists — simulate its scope.
+    store.states.set(env.envId, {
+      ...store.states.get(env.envId)!,
+      egressScope: ['github.com'],
+    });
+
+    const { registrar, scopes } = fakeRegistrar();
+    const second = makeCore(new FakeContainer(), {}, { stateStore: store, egress: registrar });
+    expect((await second.core.recover()).recovered).toEqual([env.envId]);
+    expect(scopes.get('172.20.0.1')).toEqual(['github.com']);
+  });
+
+  it('recover() DISCARDS a scoped env when no registrar is running — never re-adopts it unscoped', async () => {
+    const store = new FakeEnvStateStore();
+    const first = makeCore(new FakeContainer(), SCOPED_RESULT, {
+      stateStore: store,
+      egress: fakeRegistrar().registrar,
+    });
+    const env = await first.core.createEnvironment({ networkAccess: 'none' });
+
+    const second = makeCore(new FakeContainer(), {}, { stateStore: store }); // no egress
+    const summary = await second.core.recover();
+    expect(summary.recovered).toEqual([]);
+    expect(summary.discarded).toEqual([env.envId]);
+    expect(second.destroy).toHaveBeenCalledWith('cont-1');
+    expect(second.removeNetwork).toHaveBeenCalledWith('devspace-net-e1');
+    expect(store.states.size).toBe(0);
+  });
+
+  it('an unscoped env recovers fine without a registrar (pre-M22 posture)', async () => {
+    const store = new FakeEnvStateStore();
+    const first = makeCore(new FakeContainer(), {}, { stateStore: store });
+    const env = await first.core.createEnvironment({});
+
+    const second = makeCore(new FakeContainer(), {}, { stateStore: store });
+    expect((await second.core.recover()).recovered).toEqual([env.envId]);
   });
 });
 

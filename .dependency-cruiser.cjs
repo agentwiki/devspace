@@ -23,6 +23,22 @@ module.exports = {
       to: { pathNot: '^packages/core' },
     },
     {
+      name: 'domain-knows-no-ports',
+      comment:
+        'core 내부 세부 경계: domain(규칙)은 ports/usecase를 모른다 — ' +
+        '포트가 필요한 로직은 규칙이 아니라 유스케이스다. usecase로 옮겨라.',
+      severity: 'error',
+      from: { path: '^packages/core/src/domain' },
+      to: { path: '^packages/core/src/(ports|usecase)' },
+    },
+    {
+      name: 'ports-are-contracts-only',
+      comment: '포트는 계약 선언일 뿐 — 유스케이스 구현을 끌어들이지 않는다',
+      severity: 'error',
+      from: { path: '^packages/core/src/ports' },
+      to: { path: '^packages/core/src/usecase' },
+    },
+    {
       name: 'adapters-know-only-core',
       comment: 'adapters는 core(와 외부 라이브러리)만 알 수 있다 — server/e2e 금지',
       severity: 'error',

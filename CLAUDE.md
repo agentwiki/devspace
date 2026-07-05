@@ -13,11 +13,18 @@
 ## 구조 (헥사고날 — 어기면 CI가 깨진다)
 
 ```
-packages/core      순수 도메인 + 포트 인터페이스. import 금지: 외부 패키지, node 내장, 다른 패키지 전부.
+packages/core      순수 비즈니스 로직. import 금지: 외부 패키지, node 내장, 다른 패키지 전부.
+  src/domain/        규칙·상태 (ports도 모른다 — 포트가 필요하면 그건 유스케이스다)
+  src/ports.ts       바깥에 요구하는 계약 (인터페이스만)
+  src/usecase/       오케스트레이션 — domain + ports를 엮는다 (포트 구현은 주입받음)
 packages/adapters  포트 구현(devcontainer/codex/GitHub). core만 알 수 있다.
 apps/server        조립 루트 + 웹 채팅. 유일하게 adapters를 꽂는 곳.
 e2e/               블랙박스 — 앱 내부 코드 import 금지.
 ```
+
+로직 배치 판별: 포트 없이 성립하는 규칙 → domain, 포트를 엮는 순서 → usecase,
+도구 호출 방법 → adapters, HTTP/조립 → server. domain이 포트를 import하는
+순간 CI가 깨진다 — 그 코드는 usecase로 옮기라는 뜻이다.
 
 경계는 `.dependency-cruiser.cjs`가 강제한다(`pnpm check:arch`).
 규칙을 우회하려 하지 말 것 — 경계를 바꿔야 한다면 규칙 파일과

@@ -53,3 +53,12 @@ export function transition(state: SessionState, event: SessionEvent): SessionSta
   if (!next) throw new InvalidTransitionError(state, event.type);
   return next;
 }
+
+/**
+ * 이 상태에서 해당 이벤트가 유효한 전이인지 던지지 않고 확인한다.
+ * 호출자가 무효 전이를 예외로 만들기 전에, 조용히 삼키는 대신 사용자에게
+ * 명확히 안내하는 가드로 쓴다(CLAUDE.md: 조용한 실패 금지).
+ */
+export function canTransition(state: SessionState, event: SessionEvent['type']): boolean {
+  return TRANSITIONS[state][event] !== undefined;
+}

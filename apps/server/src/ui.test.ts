@@ -25,3 +25,23 @@ describe('세션 재접속 (이슈 A)', () => {
     expect(html).toContain('이전 세션을 찾을 수 없습니다');
   });
 });
+
+describe('종료 상태 UX + 조용한 실패 제거 (이슈 C)', () => {
+  it('종료 상태(pr-opened/failed)에서 입력창을 잠근다', () => {
+    const html = renderChatScreen();
+    // 상태에 맞춰 컴포저를 잠그는 경로가 있다.
+    expect(html).toContain('applyComposerState');
+    expect(html).toContain("state === 'pr-opened' || state === 'failed'");
+  });
+
+  it('PR 만들기 버튼은 클릭 즉시 비활성화된다 (중복 클릭으로 조용히 삼켜지지 않게)', () => {
+    const html = renderChatScreen();
+    expect(html).toContain('e.currentTarget.disabled = true');
+  });
+
+  it('할 수 없는 동작에 대한 안내(notice)를 조용히 삼키지 않고 화면에 띄운다', () => {
+    const html = renderChatScreen();
+    expect(html).toContain("update.kind === 'notice'");
+    expect(html).toContain("setAttribute('data-testid', 'notice')");
+  });
+});

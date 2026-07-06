@@ -63,6 +63,64 @@ describe('세션 유스케이스 (골든패스 오케스트레이션)', () => {
     expect(session.state).toBe('awaiting-approval');
   });
 
+  it('종료 상태(pr-opened)에서 보낸 지시는 조용히 삼켜지지 않고 안내(notice)로 표면화된다 (이슈 C)', async () => {
+    const { emit, updates } = collect();
+    const session = new Session('s1', 'o/r', 'b', inMemoryPorts(), emit);
+    await session.provision();
+    await session.sendMessage('첫 지시');
+    await session.openPr('PR 제목');
+    expect(session.state).toBe('pr-opened');
+
+    // 종료 상태에서의 추가 지시: 던지지도, 조용히 사라지지도 않는다.
+    await expect(session.sendMessage('더 고쳐줘')).resolves.toBeUndefined();
+    expect(session.state).toBe('pr-opened'); // 상태는 그대로 (failed로도 넘기지 않는다)
+    const notice = updates.find((u) => u.kind === 'notice');
+    expect(notice).toBeDefined();
+    expect(notice && notice.kind === 'notice' && notice.text).toContain('더 보낼 수 없습니다');
+    // 조용히 삼켜지던 옛 경로처럼 user 메시지 버블만 남기고 끝나지 않는다.
+    expect(updates.some((u) => u.kind === 'message' && u.role === 'user' && u.text === '더 고쳐줘')).toBe(
+      false,
+    );
+  });
+
+  it('opening-pr 중 PR 만들기 중복 클릭은 조용히 삼켜지지 않고 안내(notice)로 표면화된다 (이슈 C)', async () => {
+    // openPullRequest가 늦게 끝나도록 잡아, 아직 opening-pr인 동안 두 번째 openPr을 부른다.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { emit, updates } = collect();
+    const session = new Session(
+      's1',
+      'o/r',
+      'b',
+      inMemoryPorts({
+        gitHost: {
+          diffSummary: async () => 'README.md',
+          openPullRequest: async () => {
+            await gate;
+            return { url: 'https://github.com/o/r/pull/7' };
+          },
+        },
+      }),
+      emit,
+    );
+    await session.provision();
+    await session.sendMessage('지시');
+
+    const first = session.openPr('제목'); // opening-pr에서 대기
+    expect(session.state).toBe('opening-pr');
+    await session.openPr('제목'); // 중복 클릭 — 무효 전이
+
+    const notice = updates.find((u) => u.kind === 'notice');
+    expect(notice).toBeDefined();
+    expect(notice && notice.kind === 'notice' && notice.text).toContain('이미 PR을 만들고 있습니다');
+
+    release();
+    await first;
+    expect(session.state).toBe('pr-opened'); // 첫 PR은 정상 완료 — 중복이 흐름을 깨지 않았다
+  });
+
   it('샌드박스 준비가 실패하면 조용히 넘어가지 않고 failed로 전이 후 다시 던진다', async () => {
     const { emit, updates } = collect();
     const boom = new Error('docker 없음');

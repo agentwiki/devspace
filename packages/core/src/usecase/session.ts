@@ -8,7 +8,7 @@
  *   sendMessage()  → 4~6 (지시 → 에이전트 작업 → 변경 요약)
  *   openPr()       → 7   (PR 만들기 → PR 링크)
  */
-import { transition, type SessionEvent, type SessionState } from '../domain/session';
+import { canTransition, transition, type SessionEvent, type SessionState } from '../domain/session';
 import type { AgentPort, GitHostPort, SandboxPort } from '../ports';
 
 export interface SessionPorts {
@@ -23,7 +23,9 @@ export type SessionUpdate =
   | { kind: 'message'; role: 'user' | 'system'; text: string }
   | { kind: 'activity'; line: string }
   | { kind: 'diff'; summary: string }
-  | { kind: 'pr'; url: string };
+  | { kind: 'pr'; url: string }
+  // 지금 상태에서 할 수 없는 동작을 조용히 삼키지 않고 사용자에게 알린다.
+  | { kind: 'notice'; text: string };
 
 export type Emit = (update: SessionUpdate) => void;
 
@@ -78,6 +80,16 @@ export class Session {
     return this.sandboxId;
   }
 
+  /**
+   * 지금 상태에서 할 수 없는 동작을 조용히 삼키지 않고 명확히 안내한다.
+   * 무효 전이를 예외로 던져 상위 `.catch`가 console.error로만 삼키던 경로
+   * (이슈 C)를 대체한다. failed로 넘기지도 않는다 — 실패가 아니라 '지금은
+   * 불가'일 뿐이므로 세션은 현재 상태를 그대로 유지한다.
+   */
+  private notice(text: string): void {
+    this.emit({ kind: 'notice', text });
+  }
+
   /** 2~3단계: 레포를 클론한 샌드박스를 준비한다 */
   async provision(): Promise<void> {
     this.emit({ kind: 'status', state: 'provisioning', label: STATUS_LABEL.provisioning });
@@ -93,6 +105,15 @@ export class Session {
 
   /** 4~6단계: 지시를 에이전트에 넘기고, 진행을 흘리고, 끝나면 변경 요약을 낸다 */
   async sendMessage(text: string): Promise<void> {
+    if (!canTransition(this.currentState, 'user-message')) {
+      const terminal = this.currentState === 'pr-opened' || this.currentState === 'failed';
+      this.notice(
+        terminal
+          ? `${STATUS_LABEL[this.currentState]} 상태입니다 — 이 세션엔 더 보낼 수 없습니다. 새 세션을 시작하세요.`
+          : `${STATUS_LABEL[this.currentState]} 중입니다 — 끝난 뒤에 보내주세요.`,
+      );
+      return;
+    }
     this.go({ type: 'user-message', text });
     this.emit({ kind: 'message', role: 'user', text });
     const sandboxId = this.requireSandbox();
@@ -108,6 +129,16 @@ export class Session {
 
   /** 7단계: 변경을 브랜치로 올리고 PR을 연다 */
   async openPr(title: string): Promise<void> {
+    if (!canTransition(this.currentState, 'approve-pr')) {
+      this.notice(
+        this.currentState === 'opening-pr'
+          ? '이미 PR을 만들고 있습니다 — 잠시만 기다려주세요.'
+          : this.currentState === 'pr-opened'
+            ? 'PR이 이미 열렸습니다.'
+            : `${STATUS_LABEL[this.currentState]} 상태에서는 PR을 만들 수 없습니다.`,
+      );
+      return;
+    }
     this.go({ type: 'approve-pr' });
     const sandboxId = this.requireSandbox();
     try {

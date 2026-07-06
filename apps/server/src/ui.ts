@@ -38,6 +38,9 @@ export function renderChatScreen(): string {
   .messages:empty::after { content: '레포를 지정해 세션을 시작하세요.'; opacity: 0.5; }
   .msg { padding: 8px 12px; border-radius: 10px; max-width: 80%; background: color-mix(in srgb, CanvasText 7%, Canvas); }
   .msg.user { align-self: flex-end; background: color-mix(in srgb, AccentColor 22%, Canvas); }
+  .msg.notice { align-self: center; max-width: 100%; text-align: center; font-size: 13px;
+    background: color-mix(in srgb, AccentColor 12%, Canvas);
+    border: 1px solid color-mix(in srgb, AccentColor 40%, transparent); }
   .activity { font-family: ui-monospace, monospace; font-size: 12.5px; opacity: 0.75; white-space: pre-wrap; }
   .diff-panel { margin: 4px 0; padding: 12px; border: 1px solid color-mix(in srgb, CanvasText 15%, transparent); border-radius: 10px; }
   .diff-panel[hidden] { display: none; }
@@ -114,6 +117,35 @@ function clientScript(): string {
     messages.scrollTop = messages.scrollHeight;
   }
 
+  // 지금 할 수 없는 동작에 대한 안내 — 조용히 사라지지 않고 눈에 띄게 알린다.
+  function addNotice(text) {
+    const el = document.createElement('div');
+    el.className = 'msg notice';
+    el.setAttribute('data-testid', 'notice');
+    el.setAttribute('role', 'status');
+    el.textContent = text;
+    messages.appendChild(el);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function disableCreatePr() {
+    const btn = byId('create-pr-button');
+    if (btn) btn.disabled = true;
+  }
+
+  // 상태에 맞춰 컨트롤을 잠근다: 종료(pr-opened/failed)나 진행 중엔 입력창을 닫아
+  // 사라질 메시지를 애초에 못 보내게 하고, PR 버튼도 중복 클릭을 막는다.
+  function applyComposerState(state) {
+    const canChat = state === 'ready' || state === 'awaiting-approval';
+    const terminal = state === 'pr-opened' || state === 'failed';
+    chatInput.disabled = !canChat;
+    sendButton.disabled = !canChat;
+    chatInput.placeholder = terminal
+      ? '이 세션은 끝났습니다 — 새 세션을 시작하세요.'
+      : '메시지를 입력하세요…';
+    if (terminal || state === 'opening-pr') disableCreatePr();
+  }
+
   function showDiff(summary) {
     let panel = byId('diff-panel');
     if (!panel) {
@@ -126,7 +158,11 @@ function clientScript(): string {
         '<a class="pr-link" data-testid="pr-link" target="_blank" rel="noopener" hidden></a>';
       messages.appendChild(panel);
       panel.querySelector('[data-testid="create-pr-button"]')
-        .addEventListener('click', () => sessionId && post('/api/sessions/' + sessionId + '/pr'));
+        .addEventListener('click', (e) => {
+          // 즉시 비활성화 — 두 번째 클릭이 opening-pr에서 무효 전이로 조용히 삼켜지지 않게.
+          e.currentTarget.disabled = true;
+          if (sessionId) post('/api/sessions/' + sessionId + '/pr');
+        });
     }
     panel.querySelector('[data-testid="diff-summary"]').textContent = summary;
     messages.scrollTop = messages.scrollHeight;
@@ -144,7 +180,7 @@ function clientScript(): string {
     if (update.kind === 'status') {
       status.hidden = false;
       status.textContent = update.label;
-      if (update.state === 'ready') { chatInput.disabled = false; sendButton.disabled = false; }
+      applyComposerState(update.state);
     } else if (update.kind === 'message') {
       addMessage(update.role, update.text);
     } else if (update.kind === 'activity') {
@@ -153,6 +189,8 @@ function clientScript(): string {
       showDiff(update.summary);
     } else if (update.kind === 'pr') {
       showPr(update.url);
+    } else if (update.kind === 'notice') {
+      addNotice(update.text);
     }
   }
 

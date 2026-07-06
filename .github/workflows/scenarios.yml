@@ -65,6 +65,15 @@ jobs:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
         run: bash .github/scripts/codex-auth.sh seed
 
+      # 시나리오 작업은 "한 줄 추가" 수준이라 낮은 추론 강도로 충분하다 —
+      # Actions 분·구독 rate limit을 아낀다. ~/.codex 가 샌드박스에 마운트되어
+      # 이 config.toml 이 그대로 적용된다. (docs/decisions.md §12)
+      - name: codex 모델·추론 강도 설정 (CI 비용 절감)
+        env:
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+          CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT || 'low' }}
+        run: bash .github/scripts/codex-config.sh
+
       # devspace 서버는 Playwright의 webServer가 `pnpm dev`로 띄운다
       # (playwright.config.ts, docs/decisions.md §8). e2e 디렉터리의 모든
       # 시나리오 spec을 순차로 통과시킨다 — 이 잡이 사용자 진실의 최종 관문이다.

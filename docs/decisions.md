@@ -229,3 +229,26 @@ Slack/Discord 어댑터는 외부 플랫폼을 통과해야 해서 사용자 시
   훨씬 짧다. 상한이라 정상 실행을 자르지 않으면서 무한 행은 막는다.
 - **되돌릴 조건:** 시나리오가 많아져 CI 시간이 아프면, 라벨/`paths` 필터로
   변경 영역만 돌리거나 야간 크론으로 분리하는 선택지를 그때 이 문서에 남긴다.
+
+## 12. CI codex는 낮은 추론 강도로 값싸게 돈다
+
+**결정: CI에서 `~/.codex/config.toml`에 `model_reasoning_effort = "low"`(기본)를 써서 codex를 값싸게 돌린다. 모델 슬러그는 `vars.CODEX_MODEL`로 선택 지정, 미설정이면 codex 기본 모델. (`.github/scripts/codex-config.sh`)**
+
+- **왜 config.toml인가:** codex는 샌드박스(devcontainer) 안에서 돈다. 그런데
+  devcontainer 어댑터가 호스트의 `~/.codex`를 컨테이너에 그대로 바인드 마운트
+  하므로(§9, `target=/home/node/.codex`), 러너의 `~/.codex/config.toml`이 auth.json
+  과 함께 샌드박스 안 codex에 그대로 적용된다. 어댑터·로컬 개발에 손대지 않고
+  **CI에서만** 값을 낮출 수 있다 — CLI 플래그를 adapters에 박아 로컬까지 바꾸는
+  것보다 경계를 덜 건드린다.
+- **왜 추론 강도인가(모델이 아니라):** codex 비용을 지배하는 건 추론 토큰이다.
+  시나리오 작업은 "README에 한 줄 추가" 수준(§2)이라 `low`로 충분하고, 모델
+  선택보다 효과가 크며 플랜별 모델 슬러그를 추측하지 않아도 된다. 특정 모델이
+  필요하면 `CODEX_MODEL` 저장소 변수로 지정한다.
+- **무엇을 아끼나(구독은 토큰당 과금이 아니다):** §2대로 인증은 ChatGPT 구독
+  이라 토큰당 청구가 없다 — 낮춘 강도가 아끼는 건 (a) E2E가 빨리 끝나 줄어드는
+  **GitHub Actions 분**, (b) §11로 4배가 된 codex 사용이 주간/시간당 **rate limit**
+  을 치는 위험. 둘 다 CI가 4개 시나리오를 도는 지금 실질적이다.
+- **신뢰성 한계:** 너무 낮추면(예: `minimal`) 사소한 편집도 실패해 E2E가
+  불안정해질 수 있다. `low`는 "한 줄 추가"엔 안전한 선. 값은 `CODEX_REASONING_EFFORT`
+  변수로 조정 가능하고, config.toml 한 줄이라 되돌리기 쉽다. codex가 이 키를
+  실제로 존중하는지는 첫 CI 실행 로그로 확인한다.

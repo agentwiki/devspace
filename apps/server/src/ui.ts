@@ -81,7 +81,7 @@ export function renderChatScreen(): string {
 `;
 }
 
-/** 브라우저에서 도는 클라이언트 — 세션 시작, SSE 구독, 화면 갱신. */
+/** 브라우저에서 도는 클라이언트 — 세션 시작, SSE 구독/재구독, 화면 갱신. */
 function clientScript(): string {
   return `
   const byId = (id) => document.querySelector('[data-testid="' + id + '"]');
@@ -89,6 +89,8 @@ function clientScript(): string {
   const status = byId('session-status');
   const chatInput = byId('chat-input');
   const sendButton = byId('send-button');
+  const repoInput = byId('repo-input');
+  const startButton = byId('start-session-button');
   let sessionId = null;
 
   const post = (url, body) =>
@@ -154,17 +156,50 @@ function clientScript(): string {
     }
   }
 
+  // SSE 구독. 서버가 세션별 버퍼를 재생하므로 재접속(새로고침) 시 지나간 진행이 되살아난다.
+  function subscribe(id) {
+    const events = new EventSource('/api/sessions/' + id + '/events');
+    events.onmessage = (ev) => handle(JSON.parse(ev.data));
+    // 없는 세션이면 서버가 404로 스트림을 열지 않는다 → EventSource가 CLOSED가 되고
+    // 재시도하지 않는다. (일시적 네트워크 끊김은 CONNECTING 상태로 자동 재구독되니 건드리지 않는다.)
+    events.onerror = () => {
+      if (events.readyState === EventSource.CLOSED) {
+        events.close();
+        sessionLost();
+      }
+    };
+  }
+
+  // 세션 화면으로 들어간다: 시작 바를 잠그고, id를 URL 해시에 남겨 새로고침·북마크에도 살아남게 한다.
+  function enterSession(id) {
+    sessionId = id;
+    if (location.hash.slice(1) !== id) location.hash = id;
+    repoInput.disabled = true;
+    startButton.disabled = true;
+    status.hidden = false;
+    subscribe(id);
+  }
+
+  // 재접속했는데 세션이 서버에 없다(프로세스 재시작 등). 조용히 멈추지 않고 명확히 안내한다.
+  function sessionLost() {
+    sessionId = null;
+    location.hash = '';
+    status.hidden = false;
+    status.textContent = '이전 세션을 찾을 수 없습니다 — 새 세션을 시작하세요.';
+    chatInput.disabled = true;
+    sendButton.disabled = true;
+    repoInput.disabled = false;
+    startButton.disabled = false;
+  }
+
   byId('session-start').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const repo = byId('repo-input').value.trim();
+    const repo = repoInput.value.trim();
     if (!repo || sessionId) return;
-    byId('start-session-button').disabled = true;
+    startButton.disabled = true;
     const res = await post('/api/sessions', { repo });
     const data = await res.json();
-    sessionId = data.id;
-    status.hidden = false;
-    const events = new EventSource('/api/sessions/' + sessionId + '/events');
-    events.onmessage = (ev) => handle(JSON.parse(ev.data));
+    enterSession(data.id);
   });
 
   byId('composer').addEventListener('submit', (e) => {
@@ -174,5 +209,9 @@ function clientScript(): string {
     chatInput.value = '';
     post('/api/sessions/' + sessionId + '/messages', { text });
   });
+
+  // 로드 시 URL 해시에 세션 id가 있으면 곧바로 재구독한다 — 새로고침·북마크로 이어가기.
+  const resumeId = location.hash.slice(1);
+  if (resumeId) enterSession(resumeId);
   `;
 }

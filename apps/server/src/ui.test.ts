@@ -10,3 +10,18 @@ describe('채팅 화면 렌더링 (골든패스 1단계)', () => {
     expect(renderChatScreen().trimStart().toLowerCase().startsWith('<!doctype html>')).toBe(true);
   });
 });
+
+describe('세션 재접속 (이슈 A)', () => {
+  it('로드 시 URL 해시의 세션 id로 곧바로 재구독한다', () => {
+    const html = renderChatScreen();
+    // 세션 id를 해시에 보존하고, 로드 시 있으면 이어붙인다.
+    expect(html).toContain('location.hash');
+    expect(html).toContain('const resumeId = location.hash.slice(1)');
+  });
+
+  it('없는 세션 재접속은 조용히 멈추지 않고 명확히 안내한다', () => {
+    const html = renderChatScreen();
+    expect(html).toContain('EventSource.CLOSED');
+    expect(html).toContain('이전 세션을 찾을 수 없습니다');
+  });
+});

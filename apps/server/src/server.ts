@@ -117,6 +117,10 @@ async function sessionSubRoute(
   method: string,
 ): Promise<void> {
   if (method === 'GET' && action === 'events') {
+    // 없는 세션은 스트림을 열기 전에 404로 끊는다 — 브라우저 EventSource가 CLOSED로
+    // 판단해 재접속 실패를 UI로 표면화한다(조용한 실패 금지). 200으로 스트림을 연 뒤
+    // 닫으면 EventSource가 정상 종료로 보고 무한 재시도한다.
+    if (!hub.has(id)) return sendText(res, 404, 'no such session');
     openSseStream(res);
     if (!hub.subscribe(id, res)) res.end();
     return;

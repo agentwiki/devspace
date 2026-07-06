@@ -46,6 +46,11 @@ export class SessionHub {
     return id;
   }
 
+  /** 세션이 살아 있는지 — 재접속 요청이 유효한지 스트림을 열기 전에 확인한다. */
+  has(id: string): boolean {
+    return this.entries.has(id);
+  }
+
   /** SSE 구독자를 붙인다. 지나간 갱신을 먼저 재생하고, 연결 종료 시 제거한다. */
   subscribe(id: string, res: ServerResponse): boolean {
     const entry = this.entries.get(id);

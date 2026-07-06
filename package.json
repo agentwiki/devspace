@@ -15,7 +15,8 @@
     "check": "pnpm typecheck && pnpm lint && pnpm check:arch && pnpm test:unit",
     "dev": "tsx apps/server/src/index.ts",
     "e2e": "playwright test",
-    "e2e:golden-path": "playwright test e2e/golden-path.spec.ts"
+    "e2e:golden-path": "playwright test e2e/golden-path.spec.ts",
+    "e2e:reconnect": "playwright test e2e/reconnect.spec.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.53.0",

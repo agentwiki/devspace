@@ -53,14 +53,37 @@ describe('세션 유스케이스 (골든패스 오케스트레이션)', () => {
     expect(updates).toContainEqual({ kind: 'pr', url: 'https://github.com/o/r/pull/7' });
   });
 
-  it('승인 대기 중 추가 지시를 보내면 다시 에이전트 작업으로 돌아간다', async () => {
-    const { emit } = collect();
-    const session = new Session('s1', 'o/r', 'b', inMemoryPorts(), emit);
+  it('승인 대기 중 추가 지시를 보내면 다시 작업하고 갱신된 요약을 낸다 (이슈 B)', async () => {
+    // 라운드마다 누적 요약이 나오도록 diffSummary가 호출마다 다른 값을 낸다.
+    const summaries = [' README.md | 1 +\n+First', ' README.md | 2 +\n+First\n+Second'];
+    let round = 0;
+    const { emit, updates } = collect();
+    const session = new Session(
+      's1',
+      'o/r',
+      'b',
+      inMemoryPorts({
+        gitHost: {
+          diffSummary: async () => summaries[round++] ?? '',
+          openPullRequest: async () => ({ url: 'u' }),
+        },
+      }),
+      emit,
+    );
     await session.provision();
+
     await session.sendMessage('첫 지시');
     expect(session.state).toBe('awaiting-approval');
-    await session.sendMessage('주석도 달아줘');
+
+    await session.sendMessage('둘째 줄도 추가해줘');
     expect(session.state).toBe('awaiting-approval');
+
+    // 두 라운드 모두 diff 갱신을 냈고, 둘째 라운드 요약엔 두 변경이 누적된다.
+    const diffs = updates.filter((u) => u.kind === 'diff');
+    expect(diffs).toHaveLength(2);
+    const last = diffs[1];
+    expect(last && last.kind === 'diff' && last.summary).toContain('First');
+    expect(last && last.kind === 'diff' && last.summary).toContain('Second');
   });
 
   it('종료 상태(pr-opened)에서 보낸 지시는 조용히 삼켜지지 않고 안내(notice)로 표면화된다 (이슈 C)', async () => {

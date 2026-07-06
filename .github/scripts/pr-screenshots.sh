@@ -16,18 +16,25 @@ RUN_DIR="runs/${GITHUB_RUN_ID}"
 KEEP_RUNS=20 # 이보다 오래된 실행의 이미지는 브랜치에서 정리(과거 댓글 이미지는 깨질 수 있음)
 
 # ── 1. 스크린샷 수집: 명시적 장면(snap) + 실패 시점 자동 캡처 ────────────────
+# 장면 파일명은 "<시나리오>__<장면>.png"(snap.ts)라 시나리오별로 정렬·그룹된다.
+# 실패 캡처(test-failed-*)는 같은 테스트 출력 디렉토리의 시나리오로 묶는다.
 staging=$(mktemp -d)
+declare -A DIR_SCENARIO # 테스트 출력 디렉토리 → 시나리오 슬러그
 fail_count=0
+
 while IFS= read -r png; do
-  name=$(basename "$png" .png)
-  case "$png" in
-    */scenes/*) cp "$png" "$staging/${name}.png" ;;
-    *)
-      fail_count=$((fail_count + 1))
-      cp "$png" "$staging/99-failure-${fail_count}.png"
-      ;;
-  esac
-done < <(find test-results \( -path '*/scenes/*.png' -o -name 'test-failed-*.png' \) 2>/dev/null | sort)
+  base=$(basename "$png" .png) # <시나리오>__<장면>
+  rel=${png#test-results/}
+  DIR_SCENARIO[${rel%%/*}]=${base%%__*}
+  cp "$png" "$staging/${base}.png"
+done < <(find test-results -path '*/scenes/*.png' 2>/dev/null | sort)
+
+while IFS= read -r png; do
+  rel=${png#test-results/}
+  scenario=${DIR_SCENARIO[${rel%%/*}]:-zzz-unknown}
+  fail_count=$((fail_count + 1))
+  cp "$png" "$staging/${scenario}__zz-failure-${fail_count}.png"
+done < <(find test-results -name 'test-failed-*.png' 2>/dev/null | sort)
 
 count=$(find "$staging" -name '*.png' | wc -l)
 if [ "$count" -eq 0 ]; then
@@ -62,18 +69,27 @@ git -C "$media" \
 git -C "$media" push -q origin "$MEDIA_BRANCH" ||
   { git -C "$media" pull -q --rebase origin "$MEDIA_BRANCH" && git -C "$media" push -q origin "$MEDIA_BRANCH"; }
 
-# ── 3. 댓글 본문 구성 ────────────────────────────────────────────────────────
+# ── 3. 댓글 본문 구성 (시나리오별 섹션) ──────────────────────────────────────
+# staging 파일명이 "<시나리오>__<장면>.png"라 glob 정렬이 곧 시나리오별 묶음이다.
 raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${MEDIA_BRANCH}/${RUN_DIR}"
 body_file=$(mktemp)
 {
   echo "$MARKER"
   echo "### 📸 E2E 주요 장면 — [run ${GITHUB_RUN_ID}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
   echo
-  echo "시나리오: \`scenarios/golden-path.md\` (이 댓글은 실행마다 갱신됩니다)"
-  echo
+  echo "시나리오별 주요 장면입니다 (이 댓글은 실행마다 갱신됩니다)."
+  current=""
   for png in "$staging"/*.png; do
-    name=$(basename "$png" .png)
-    echo "<details open><summary><b>${name}</b></summary>"
+    base=$(basename "$png" .png)
+    scenario=${base%%__*}
+    title=${base#*__}
+    if [ "$scenario" != "$current" ]; then
+      current=$scenario
+      echo
+      echo "#### 🎬 \`${scenario}\`"
+      echo
+    fi
+    echo "<details open><summary><b>${title}</b></summary>"
     echo
     echo "<img src=\"${raw_base}/$(basename "$png")\" width=\"600\">"
     echo

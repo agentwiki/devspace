@@ -80,6 +80,21 @@ jobs:
       - name: 전체 시나리오 E2E 실행
         run: pnpm e2e
 
+      # 이 run에서 codex가 갱신(회전)한 auth.json을 캐시에 되저장한다. refresh
+      # token은 1회용이라, 저장하지 않으면 다음 run이 이미 소비된 토큰을 복원해
+      # refresh_token_reused(401)로 깨진다(§13). 성패와 무관하게(always) 마지막으로
+      # 회전된 토큰을 보존한다 — keepalive와 같은 저장 경로. (docs/decisions.md §2, §13)
+      - name: 갱신된 codex 인증 되저장
+        if: always()
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: bash .github/scripts/codex-auth.sh save
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.codex-auth-cache
+          key: codex-auth-${{ github.run_id }}
+
       # 주요 장면 + 실패 장면 스크린샷을 트리거한 PR에 인라인 이미지 댓글로 첨부.
       # (fork PR은 토큰이 읽기 전용이라 제외 — 혼자 쓰는 레포라 사실상 해당 없음)
       - name: 스크린샷을 PR 댓글로 첨부 (docs/decisions.md §4)

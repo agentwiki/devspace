@@ -135,6 +135,8 @@ function clientScript(): string {
 
   // 상태에 맞춰 컨트롤을 잠근다: 종료(pr-opened/failed)나 진행 중엔 입력창을 닫아
   // 사라질 메시지를 애초에 못 보내게 하고, PR 버튼도 중복 클릭을 막는다.
+  // 추가 지시로 다시 작업 중(agent-working)일 때도 이전 라운드의 PR 버튼을 잠가,
+  // 아직 갱신되지 않은 옛 요약으로 PR을 여는 무효 전이(→notice)를 애초에 막는다(이슈 B).
   function applyComposerState(state) {
     const canChat = state === 'ready' || state === 'awaiting-approval';
     const terminal = state === 'pr-opened' || state === 'failed';
@@ -143,7 +145,7 @@ function clientScript(): string {
     chatInput.placeholder = terminal
       ? '이 세션은 끝났습니다 — 새 세션을 시작하세요.'
       : '메시지를 입력하세요…';
-    if (terminal || state === 'opening-pr') disableCreatePr();
+    if (terminal || state === 'opening-pr' || state === 'agent-working') disableCreatePr();
   }
 
   function showDiff(summary) {
@@ -156,7 +158,6 @@ function clientScript(): string {
         '<pre data-testid="diff-summary"></pre>' +
         '<button type="button" data-testid="create-pr-button">PR 만들기</button>' +
         '<a class="pr-link" data-testid="pr-link" target="_blank" rel="noopener" hidden></a>';
-      messages.appendChild(panel);
       panel.querySelector('[data-testid="create-pr-button"]')
         .addEventListener('click', (e) => {
           // 즉시 비활성화 — 두 번째 클릭이 opening-pr에서 무효 전이로 조용히 삼켜지지 않게.
@@ -164,6 +165,10 @@ function clientScript(): string {
           if (sessionId) post('/api/sessions/' + sessionId + '/pr');
         });
     }
+    // 반복 지시(이슈 B): 라운드마다 같은 패널을 재사용하되 최신 진행 아래로 옮기고,
+    // 작업 중 잠갔던 PR 버튼을 다시 열어 갱신된 요약으로 PR을 만들 수 있게 한다.
+    messages.appendChild(panel);
+    panel.querySelector('[data-testid="create-pr-button"]').disabled = false;
     panel.querySelector('[data-testid="diff-summary"]').textContent = summary;
     messages.scrollTop = messages.scrollHeight;
   }

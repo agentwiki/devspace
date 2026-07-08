@@ -30,11 +30,14 @@ jobs:
       - run: pnpm check:arch
       - run: pnpm test:unit
 
-  # 골든패스가 구현될 때까지 이 잡은 의도적으로 빨간불이다. (scenarios/README.md)
-  golden-path:
+  # 모든 사용자 시나리오 E2E를 실제 샌드박스·codex·GitHub으로 통과시킨다.
+  # (scenarios/README.md, docs/decisions.md §11 — 시나리오 1개 = e2e 1개, 목 없이 실제 통과)
+  scenarios:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # 시나리오는 순차 실행(workers:1)이라 실행 시간이 합산된다. 각 spec의
+    # per-test 타임아웃(20~25분) 합에 여유를 둔다.
+    timeout-minutes: 120
     permissions:
       contents: write # 스크린샷을 ci-media 브랜치에 커밋
       pull-requests: write # 스크린샷 댓글
@@ -62,12 +65,35 @@ jobs:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
         run: bash .github/scripts/codex-auth.sh seed
 
+      # 시나리오 작업은 "한 줄 추가" 수준이라 낮은 추론 강도로 충분하다 —
+      # Actions 분·구독 rate limit을 아낀다. ~/.codex 가 샌드박스에 마운트되어
+      # 이 config.toml 이 그대로 적용된다. (docs/decisions.md §12)
+      - name: codex 모델·추론 강도 설정 (CI 비용 절감)
+        env:
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+          CODEX_REASONING_EFFORT: ${{ vars.CODEX_REASONING_EFFORT || 'low' }}
+        run: bash .github/scripts/codex-config.sh
+
       # devspace 서버는 Playwright의 webServer가 `pnpm dev`로 띄운다
-      # (playwright.config.ts, docs/decisions.md §8). 1단계(접속·채팅 화면)는
-      # 통과하고, 아직 구현되지 않은 이후 단계(샌드박스~PR)에서 실패한다 —
-      # 그것이 현재 목표 지점이다.
-      - name: 골든패스 시나리오 실행
-        run: pnpm e2e:golden-path
+      # (playwright.config.ts, docs/decisions.md §8). e2e 디렉터리의 모든
+      # 시나리오 spec을 순차로 통과시킨다 — 이 잡이 사용자 진실의 최종 관문이다.
+      - name: 전체 시나리오 E2E 실행
+        run: pnpm e2e
+
+      # 이 run에서 codex가 갱신(회전)한 auth.json을 캐시에 되저장한다. refresh
+      # token은 1회용이라, 저장하지 않으면 다음 run이 이미 소비된 토큰을 복원해
+      # refresh_token_reused(401)로 깨진다(§13). 성패와 무관하게(always) 마지막으로
+      # 회전된 토큰을 보존한다 — keepalive와 같은 저장 경로. (docs/decisions.md §2, §13)
+      - name: 갱신된 codex 인증 되저장
+        if: always()
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: bash .github/scripts/codex-auth.sh save
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.codex-auth-cache
+          key: codex-auth-${{ github.run_id }}
 
       # 주요 장면 + 실패 장면 스크린샷을 트리거한 PR에 인라인 이미지 댓글로 첨부.
       # (fork PR은 토큰이 읽기 전용이라 제외 — 혼자 쓰는 레포라 사실상 해당 없음)

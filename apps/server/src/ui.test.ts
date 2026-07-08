@@ -45,3 +45,19 @@ describe('종료 상태 UX + 조용한 실패 제거 (이슈 C)', () => {
     expect(html).toContain("setAttribute('data-testid', 'notice')");
   });
 });
+
+describe('반복 지시 후 PR (이슈 B)', () => {
+  it('라운드마다 diff 패널을 최신 진행 아래로 옮겨 갱신한다', () => {
+    const html = renderChatScreen();
+    // showDiff는 패널을 재사용하되 매번 messages 끝으로 이동시킨다(appendChild).
+    expect(html).toContain('messages.appendChild(panel)');
+  });
+
+  it('작업 중(agent-working)엔 이전 라운드 PR 버튼을 잠갔다가 새 요약이 오면 다시 연다', () => {
+    const html = renderChatScreen();
+    expect(html).toContain("state === 'opening-pr' || state === 'agent-working'");
+    expect(html).toContain(
+      "panel.querySelector('[data-testid=\"create-pr-button\"]').disabled = false",
+    );
+  });
+});
